@@ -42,13 +42,16 @@ use tempo_contracts::precompiles::{
 use tempo_evm::{
     StorageActionReplay, StorageActionReplayError, TempoEvmConfig, supports_storage_action_replay,
 };
-use tempo_precompiles::{error::TempoPrecompileError, nonce::NonceManager, tip20::TIP20Token};
+use tempo_precompiles::{
+    error::TempoPrecompileError, native_multisig::keccak_cost, nonce::NonceManager,
+    tip20::TIP20Token,
+};
 use tempo_primitives::{
     Block as TempoBlock, SignatureType, TempoHeader, TempoTxEnvelope,
     account::encode_config_commitment,
     transaction::{
-        AccountSignature, CallScope, KeyAuthorization, KeychainSignature, TempoSignedAuthorization,
-        TokenLimit, calc_gas_balance_spending,
+        AccountSignature, CallScope, KeyAuthorization, KeychainSignature, MULTISIG_CONFIG_DOMAIN,
+        TempoSignedAuthorization, TokenLimit, calc_gas_balance_spending,
     },
 };
 use tempo_revm::{TempoInvalidTransaction, TempoTxEnv, native_multisig::NativeMultisigError};
@@ -1506,12 +1509,8 @@ fn grant_key(f: &mut Fixture, nonce: u64, key: &PrivateKeySigner, admin: bool, e
     }
     let approval = f.owner.sign_hash_sync(&grant.signature_hash()).unwrap();
     let tx = f.sign_primitive(TempoTransaction {
-        chain_id: 1,
-        nonce,
-        gas_limit: 1_000_000,
-        calls: vec![f.getter()],
         key_authorization: Some(grant.into_signed(approval)),
-        ..Default::default()
+        ..aa_tx(nonce, vec![f.getter()])
     });
     let result = f.run(&tx);
     assert!(result.is_success(), "{result:?}");
@@ -1519,13 +1518,7 @@ fn grant_key(f: &mut Fixture, nonce: u64, key: &PrivateKeySigner, admin: bool, e
 
 /// A transaction signed by the access key `key` on behalf of the account.
 fn keychain_tx(f: &Fixture, key: &PrivateKeySigner, nonce: u64, calls: Vec<Call>) -> AASigned {
-    let tx = TempoTransaction {
-        chain_id: 1,
-        nonce,
-        gas_limit: 1_000_000,
-        calls,
-        ..Default::default()
-    };
+    let tx = aa_tx(nonce, calls);
     let signature = key
         .sign_hash_sync(&KeychainSignature::signing_hash(
             tx.signature_hash(),
@@ -1620,21 +1613,18 @@ fn eoa_migration_commits_configuration() {
 
     // A nonce-zero account with no balance migrates under a fee payer, which pays.
     let mut f = Fixture::with_parent(false);
-    f.evm
-        .db_mut()
-        .insert_account(f.account, AccountInfo::default());
+    f.evm.db_mut().insert_account(
+        f.account,
+        AccountInfo::new(U256::ZERO, 0, KECCAK256_EMPTY, Bytecode::new()),
+    );
     let sponsor = signer(9);
     fund(&mut f, sponsor.address(), 50_000_000);
     let config = f.upgraded(1, owner_set(others.to_vec()));
     let mut tx = TempoTransaction {
-        chain_id: 1,
-        nonce: 0,
-        gas_limit: 1_000_000,
         max_fee_per_gas: 1,
         max_priority_fee_per_gas: 1,
         fee_token: Some(PATH_USD_ADDRESS),
-        calls: vec![Fixture::upgrade(&config)],
-        ..Default::default()
+        ..aa_tx(0, vec![Fixture::upgrade(&config)])
     };
     tx.fee_payer_signature = Some(
         sponsor
@@ -1721,15 +1711,11 @@ fn eoa_migration_error_order() {
                 .sign_hash_sync(&authorization.signature_hash())
                 .unwrap();
             f.sign_primitive(TempoTransaction {
-                chain_id: 1,
-                nonce: 3,
-                gas_limit: 1_000_000,
-                calls: vec![upgrade.clone()],
                 tempo_authorization_list: vec![TempoSignedAuthorization::new_unchecked(
                     authorization,
                     signature.into(),
                 )],
-                ..Default::default()
+                ..aa_tx(3, vec![upgrade.clone()])
             })
             .into()
         },
@@ -1743,12 +1729,8 @@ fn eoa_migration_error_order() {
                 KeyAuthorization::unrestricted(1, SignatureType::Secp256k1, signer(6).address());
             let approval = f.owner.sign_hash_sync(&grant.signature_hash()).unwrap();
             f.sign_primitive(TempoTransaction {
-                chain_id: 1,
-                nonce: 3,
-                gas_limit: 1_000_000,
-                calls: vec![upgrade.clone()],
                 key_authorization: Some(grant.into_signed(approval)),
-                ..Default::default()
+                ..aa_tx(3, vec![upgrade.clone()])
             })
             .into()
         },
@@ -1988,14 +1970,10 @@ fn eoa_migration_failure_keeps_fee_and_nonce() {
             calls.push(f.getter());
         }
         let tx = f.sign_primitive(TempoTransaction {
-            chain_id: 1,
-            nonce: 3,
-            gas_limit: 1_000_000,
             max_fee_per_gas: 1,
             max_priority_fee_per_gas: 1,
             fee_token: Some(PATH_USD_ADDRESS),
-            calls,
-            ..Default::default()
+            ..aa_tx(3, calls)
         });
         let result = f.run(&tx);
         assert!(
@@ -2022,9 +2000,6 @@ fn eoa_migration_failure_keeps_fee_and_nonce() {
 
 #[test]
 fn eoa_migration_gas_schedule() {
-    use tempo_precompiles::native_multisig::keccak_cost;
-    use tempo_primitives::transaction::multisig::MULTISIG_CONFIG_DOMAIN;
-
     let members = owner_set(vec![
         signer(2).address(),
         signer(3).address(),
@@ -2032,7 +2007,7 @@ fn eoa_migration_gas_schedule() {
     ]);
     let params = tempo_gas_params(TempoHardfork::T14);
     // Pinned totals: (owners, gas_used). Legacy and AA primitive transactions cost the same.
-    let pins = [(1, 45_598), (3, 47_764)];
+    let pins = [(1, 45_498), (3, 47_664)];
     for (count, expected) in pins {
         for kind in [RootTx::Legacy, RootTx::Aa] {
             let mut f = Fixture::with_parent(false);
@@ -2049,21 +2024,21 @@ fn eoa_migration_gas_schedule() {
                     .iter()
                     .map(|b| if *b == 0 { 4 } else { 16 })
                     .sum::<u64>();
-            // The precompile charges, in order: ABI input, two TLOADs (eligibility and tx origin),
-            // the account access for X, the 42-byte salt preimage hash, the commitment preimage
-            // hash, the zero to non-zero commitment write, and LOG3 with the ABI-encoded data
-            // (salt, threshold, owners).
+            // The precompile charges, in order: ABI input, the eligibility TLOAD, the account
+            // access for X, the 42-byte salt preimage hash, the commitment preimage hash, the zero
+            // to non-zero commitment write, and LOG3 with the ABI-encoded data (salt, threshold,
+            // owners).
             let input = 30 * (call.input.len() as u64).div_ceil(32);
             let salt = keccak_cost(MULTISIG_UPGRADE_DOMAIN.len() + 20);
             let commitment = keccak_cost(MULTISIG_CONFIG_DOMAIN.len() + 32 + 8 + 2 + count * 21);
             let warm_read = params.warm_storage_read_cost();
-            let tloads = 2 * warm_read;
+            let tload = warm_read;
             let account_access = warm_read;
             let write = 20_000;
             let log_data = (4 + count as u64 * 2) * 32;
             let log = 375 + 3 * 375 + 8 * log_data;
             let components =
-                intrinsic + input + salt + commitment + tloads + account_access + write + log;
+                intrinsic + input + salt + commitment + tload + account_access + write + log;
             assert_eq!(
                 components, expected,
                 "{count} owners, {kind:?}: component sum"
@@ -2119,12 +2094,8 @@ fn eoa_migration_preserves_account_state() {
     f.evm.db_mut().commit(state);
     let lane = U256::from(5);
     let tx = f.sign_primitive(TempoTransaction {
-        chain_id: 1,
         nonce_key: lane,
-        nonce: 0,
-        gas_limit: 1_000_000,
-        calls: vec![f.getter()],
-        ..Default::default()
+        ..aa_tx(0, vec![f.getter()])
     });
     assert!(f.run(&tx).is_success());
 

@@ -1,4 +1,5 @@
 //! Signed transaction integration fixtures for the T14 account-leaf protocol.
+use alloy_eips::eip2930::AccessList;
 use alloy_evm::{Evm, EvmEnv, FromRecoveredTx};
 use alloy_primitives::{Address, B256, TxKind, U256, keccak256};
 use alloy_signer::SignerSync;
@@ -175,13 +176,7 @@ impl Fixture {
 
     /// An AA transaction signed by the account's root key (a primitive signature).
     fn primitive(&self, nonce: u64, calls: Vec<Call>) -> AASigned {
-        self.sign_primitive(TempoTransaction {
-            chain_id: 1,
-            nonce,
-            gas_limit: 1_000_000,
-            calls,
-            ..Default::default()
-        })
+        self.sign_primitive(aa_tx(nonce, calls))
     }
 
     fn sign_primitive(&self, tx: TempoTransaction) -> AASigned {
@@ -226,6 +221,27 @@ impl Fixture {
             value: U256::ZERO,
             input: Default::default(),
         }
+    }
+}
+
+/// An unsigned AA transaction on the protocol nonce lane, with no fee, sponsor, validity window
+/// or authorizations.
+fn aa_tx(nonce: u64, calls: Vec<Call>) -> TempoTransaction {
+    TempoTransaction {
+        chain_id: 1,
+        fee_token: None,
+        max_priority_fee_per_gas: 0,
+        max_fee_per_gas: 0,
+        gas_limit: 1_000_000,
+        calls,
+        access_list: AccessList(Vec::new()),
+        nonce_key: U256::ZERO,
+        nonce,
+        fee_payer_signature: None,
+        valid_before: None,
+        valid_after: None,
+        key_authorization: None,
+        tempo_authorization_list: Vec::new(),
     }
 }
 
