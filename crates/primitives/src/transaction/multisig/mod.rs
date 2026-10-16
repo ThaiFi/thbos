@@ -29,16 +29,12 @@ pub const MULTISIG_RECOVERY_SINGLETON_FACTORY: Address = SAFE_DEPLOYER_ADDRESS;
 pub const MULTISIG_RECOVERY_SINGLETON_FACTORY_RUNTIME_HASH: B256 =
     b256!("2fa86add0aed31f33a762c9d88e807c475bd51d0f52bd0955754b2608f7e4989");
 
-/// Keccak-256 of the dedicated recovery factory creation code.
-pub const MULTISIG_RECOVERY_FACTORY_INIT_CODE_HASH: B256 =
-    b256!("32c2f9b9926477ca22da4308d7efa1b92a2c2db3f434a0afa77fc32bdecbe48b");
-
-/// Keccak-256 of the dedicated recovery factory runtime code.
-pub const MULTISIG_RECOVERY_FACTORY_RUNTIME_HASH: B256 =
-    b256!("e74489073cf29a2000b643988575b615febec333a826512de4e1e8db10228a60");
-
-/// Keccak-256 of the canonical recovery wallet creation code.
-pub const MULTISIG_RECOVERY_WALLET_INIT_CODE_HASH: B256 =
+/// Keccak-256 of the account proxy creation code. The creation code is identical for every
+/// account, takes no constructor arguments and embeds the beacon address as a constant.
+///
+/// Placeholder until the canonical account proxy is final: TIP-1110 leaves the value TBD.
+// TODO: replace with the canonical account proxy init-code hash before T14 activation
+pub const ACCOUNT_PROXY_INIT_CODE_HASH: B256 =
     b256!("583cc63a2e37f645b43eac911b1a6d6de08b83abdc308c61364edda8cfc3bd37");
 
 /// CREATE2 preimage length: 1-byte `0xff` + 20-byte factory + 32-byte salt +
@@ -617,7 +613,7 @@ pub fn multisig_digest(inner_digest: B256, account: Address, config_version: u64
 
 /// Returns the native multisig account for a committed factory and precomputed account salt.
 fn multisig_account_address(factory: Address, account_salt: B256) -> Address {
-    factory.create2(account_salt, MULTISIG_RECOVERY_WALLET_INIT_CODE_HASH)
+    factory.create2(account_salt, ACCOUNT_PROXY_INIT_CODE_HASH)
 }
 
 #[cfg(feature = "serde")]

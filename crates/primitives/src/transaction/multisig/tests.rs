@@ -383,7 +383,7 @@ fn multisig_domains_match_spec_vectors() {
         account_salt,
         b256!("7162e370e58784e6b33d61878820d1497eeaf4f68e00b2cfc00a2f3b1dbb00da")
     );
-    // Independently reproduced with raw CREATE2 hashing and the canonical Solidity factory.
+    // Independently reproduced with raw CREATE2 hashing over the placeholder account proxy hash.
     let expected = address!("d62b59cb4e41a0dd9000c71c6663df05e2bb910d");
     assert_eq!(
         multisig_account_address(TEST_FACTORY, account_salt),
