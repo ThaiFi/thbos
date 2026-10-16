@@ -1,6 +1,9 @@
 use super::*;
 use crate::tempo_transaction::helpers::{create_transfer_call, parse_filled_tx, sign_fee_payer};
-use alloy::rpc::types::state::StateOverridesBuilder;
+use alloy::{
+    rpc::types::state::StateOverridesBuilder,
+    sol_types::{SolError, SolEvent},
+};
 use alloy_eips::{BlockId, Decodable2718};
 use serde_json::{from_value, json};
 use tempo_contracts::precompiles::{ACCOUNT_KEYCHAIN_ADDRESS, IAccountKeychain, ITIP20};
@@ -478,5 +481,109 @@ async fn native_rpc_maximum_mixed_quorums_and_validation_cost_order() -> eyre::R
         commitment(&env, delegate.address).await?,
         delegate.config.commitment().unwrap()
     );
+    Ok(())
+}
+
+/// Reads the revert data of a failed `eth_call` and requires it to be exactly `expected`.
+fn assert_call_reverts(
+    result: Result<Bytes, alloy::transports::RpcError<alloy::transports::TransportErrorKind>>,
+    expected: Vec<u8>,
+) {
+    let error = result.expect_err("call must revert");
+    let data = error
+        .as_error_resp()
+        .and_then(|payload| payload.as_revert_data());
+    assert_eq!(data, Some(Bytes::from(expected)), "{error:?}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn eoa_migration_rpc_estimate_send_and_rotate() -> eyre::Result<()> {
+    let mut env = environment().await?;
+    for (index, kind) in [
+        SignatureType::Secp256k1,
+        SignatureType::P256,
+        SignatureType::WebAuthn,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let seed = 0x30 + 0x10 * index as u8;
+        let root = OwnerKey::new(seed, kind);
+        let mut account = NativeAccount::migrated(root.address(), seed + 1, 3);
+        env.fund_account(account.address).await?;
+        assert_eq!(commitment(&env, account.address).await?, B256::ZERO);
+        let expected = account.config.commitment().unwrap();
+        let call = account.upgrade_call();
+        let request = TransactionRequest {
+            from: Some(account.address),
+            to: Some(NATIVE_MULTISIG_ADDRESS.into()),
+            input: call.input.clone().into(),
+            gas: Some(GAS_LIMIT),
+            ..Default::default()
+        };
+
+        // A simulation returns the commitment and the gas, and writes nothing.
+        let simulated = env.provider().call(request.clone()).latest().await?;
+        assert_eq!(
+            simulated,
+            Bytes::from(INativeMultisig::upgradeAccountCall::abi_encode_returns(
+                &expected
+            ))
+        );
+        assert!(
+            env.provider()
+                .estimate_gas(request.clone())
+                .latest()
+                .await?
+                > 0
+        );
+        assert_eq!(commitment(&env, account.address).await?, B256::ZERO);
+
+        // A contract cannot be upgraded, even by simulation.
+        let from_contract = TransactionRequest {
+            from: Some(OBSERVER),
+            ..request.clone()
+        };
+        assert_call_reverts(
+            env.provider().call(from_contract).latest().await,
+            INativeMultisig::AccountHasCode {}.abi_encode(),
+        );
+
+        // The root signs the sole call.
+        let tx = account.transaction(&env, vec![call]);
+        let signature = TempoSignature::Primitive(root.sign(tx.signature_hash())?);
+        let receipt = account.submit(&mut env, tx, signature, true).await?;
+        assert_eq!(commitment(&env, account.address).await?, expected);
+        let upgraded = receipt
+            .logs()
+            .iter()
+            .filter(|log| log.address() == NATIVE_MULTISIG_ADDRESS)
+            .map(|log| INativeMultisig::AccountUpgraded::decode_log(&log.inner))
+            .collect::<Result<Vec<_>, _>>()?;
+        assert_eq!(upgraded.len(), 1);
+        let event = &upgraded[0].data;
+        assert_eq!(event.account, account.address);
+        assert_eq!(event.commitment, expected);
+        assert_eq!(event.salt, account.config.salt);
+        assert_eq!(event.threshold, account.config.threshold);
+        assert_eq!(event.owners, abi_owners(&account.config));
+
+        // The account is configured now, so a second upgrade reverts when simulated.
+        assert_call_reverts(
+            env.provider().call(request).latest().await,
+            INativeMultisig::AccountAlreadyConfigurable {}.abi_encode(),
+        );
+
+        // The version-one witness signs the next transaction, which rotates to version two.
+        let replacement = NativeAccount::new(seed + 8, 2);
+        let (next, rotate) = account.rotate_to(&replacement);
+        let tx = account.transaction(&env, vec![rotate]);
+        let signature = account.sign(&tx)?;
+        account.submit(&mut env, tx, signature, true).await?;
+        assert_eq!(
+            commitment(&env, account.address).await?,
+            next.commitment().unwrap()
+        );
+    }
     Ok(())
 }

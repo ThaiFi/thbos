@@ -7,7 +7,7 @@ use super::{
 use crate::utils::{TestNodeBuilder, make_genesis_at};
 use alloy::{
     network::ReceiptResponse,
-    primitives::{Address, B256, Bytes, U256},
+    primitives::{Address, B256, Bytes, U256, keccak256},
     providers::{Provider, RootProvider},
     rpc::types::TransactionRequest,
     signers::{SignerSync, local::PrivateKeySigner},
@@ -31,8 +31,9 @@ use tempo_contracts::precompiles::{DEFAULT_FEE_TOKEN, INativeMultisig, NATIVE_MU
 use tempo_primitives::{
     SignatureType, TempoTransaction, TempoTxEnvelope,
     transaction::{
-        Call, KeychainSignature, MultisigConfig, MultisigOwner, MultisigSignature,
-        PrimitiveSignature, TempoSignature, multisig_digest, tt_signature::derive_p256_address,
+        Call, KeychainSignature, MULTISIG_UPGRADE_DOMAIN, MultisigConfig, MultisigOwner,
+        MultisigSignature, PrimitiveSignature, TempoSignature, multisig_digest,
+        tt_signature::derive_p256_address,
     },
 };
 
@@ -80,6 +81,30 @@ impl NativeAccount {
             config,
             owners,
             nonce: 0,
+        }
+    }
+
+    /// The configuration an EOA `address` has after `upgradeAccount`: the upgrade salt, version
+    /// one, and an address that is not derived from the configuration.
+    fn migrated(address: Address, seed: u8, count: u8) -> Self {
+        let mut account = Self::new(seed, count);
+        account.address = address;
+        account.config.salt = keccak256([MULTISIG_UPGRADE_DOMAIN, address.as_slice()].concat());
+        account.config.version = 1;
+        account
+    }
+
+    /// The `upgradeAccount` call that commits this configuration for its address.
+    fn upgrade_call(&self) -> Call {
+        Call {
+            to: NATIVE_MULTISIG_ADDRESS.into(),
+            value: U256::ZERO,
+            input: INativeMultisig::upgradeAccountCall {
+                threshold: self.config.threshold,
+                owners: abi_owners(&self.config),
+            }
+            .abi_encode()
+            .into(),
         }
     }
 
