@@ -58,7 +58,9 @@ fn native_rotation_requires_registered_current_leaf_and_direct_authority() {
             native.update_config(account, &current, 1, owners.clone()),
             Err(NativeMultisigError::unauthorized_multisig_caller().into())
         );
-        native.set_authority(account, account).unwrap();
+        native
+            .set_authority(account, account, UpgradeEligibility::NotSoleCall)
+            .unwrap();
         assert_eq!(
             native.update_config(account, &current, 1, owners.clone()),
             Err(NativeMultisigError::invalid_config().into())

@@ -27,6 +27,14 @@ sol! {
             MultisigOwner[] owners
         );
 
+        event AccountUpgraded(
+            address indexed account,
+            bytes32 indexed commitment,
+            bytes32 salt,
+            uint8 threshold,
+            MultisigOwner[] owners
+        );
+
         function deriveAccount(bytes32 salt, uint8 threshold, MultisigOwner[] calldata owners)
             external
             pure
@@ -37,6 +45,11 @@ sol! {
             uint8 threshold,
             MultisigOwner[] calldata owners
         ) external;
+        /// Migrates `msg.sender` using `threshold` and sorted `owners`, returning the stored hash.
+        /// Only a direct primitive-root transaction with this call as its sole call may invoke it.
+        function upgradeAccount(uint8 threshold, MultisigOwner[] calldata owners)
+            external
+            returns (bytes32 commitment);
 
         error InvalidAccount();
         error InvalidConfig();
@@ -47,5 +60,9 @@ sol! {
         error DuplicateOwner();
         error InvalidOwnerOrder();
         error UnauthorizedMultisigCaller();
+        error PrimitiveRootRequired();
+        error UpgradeMustBeOnlyCall();
+        error AccountAlreadyConfigurable();
+        error AccountHasCode();
     }
 }

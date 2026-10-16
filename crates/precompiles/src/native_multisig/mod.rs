@@ -9,12 +9,13 @@ pub use tempo_chainspec::is_valid_native_account as valid_account;
 use tempo_contracts::precompiles::{
     INativeMultisig, NATIVE_MULTISIG_ADDRESS, NativeMultisigError, NativeMultisigEvent,
 };
-use tempo_precompiles_macros::contract;
+use tempo_precompiles_macros::{Storable, contract};
 use tempo_primitives::{
     TempoBlockEnv,
+    account::decode_config_commitment,
     transaction::{
         MultisigConfig, MultisigConfigError, MultisigOwner,
-        multisig::MULTISIG_ACCOUNT_CREATE2_PREIMAGE_LEN,
+        multisig::{MULTISIG_ACCOUNT_CREATE2_PREIMAGE_LEN, MULTISIG_UPGRADE_DOMAIN},
     },
 };
 
@@ -24,14 +25,37 @@ mod dispatch;
 pub struct NativeMultisig {
     tx_origin: Address,
     directly_authorized_account: Address,
+    upgrade_eligibility: UpgradeEligibility,
+}
+
+/// What the transaction allows `upgradeAccount` to do, as decided by the handler before execution.
+///
+/// Variants are ordered from the most to the least restrictive, so the zero value of an unseeded
+/// context rejects every migration.
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Storable)]
+pub enum UpgradeEligibility {
+    /// The transaction is not a lone, direct call to this precompile without authorizations.
+    NotSoleCall,
+    /// The transaction is a sole call, but its outer signature is not a primitive root signature.
+    NotPrimitiveRoot,
+    /// The transaction is a sole call signed by a primitive root key.
+    PrimitiveRoot,
 }
 
 impl NativeMultisig {
-    /// Seeds only the direct outer owner-quorum authority, never a delegate or sponsor.
-    pub fn set_authority(&mut self, origin: Address, directly_authorized: Address) -> Result<()> {
+    /// Seeds only the direct outer owner-quorum authority, never a delegate or sponsor, and
+    /// whether the transaction may migrate its sender.
+    pub fn set_authority(
+        &mut self,
+        origin: Address,
+        directly_authorized: Address,
+        upgrade_eligibility: UpgradeEligibility,
+    ) -> Result<()> {
         self.tx_origin.t_write(origin)?;
         self.directly_authorized_account
-            .t_write(directly_authorized)
+            .t_write(directly_authorized)?;
+        self.upgrade_eligibility.t_write(upgrade_eligibility)
     }
 
     fn derive_account(
@@ -106,6 +130,59 @@ impl NativeMultisig {
         self.emit_event(NativeMultisigEvent::multisig_config_updated(
             sender, next.salt, version, threshold, owners,
         ))
+    }
+
+    /// Installs a version-one configuration for `sender`, an EOA that signed with its root key.
+    ///
+    /// Checks fail in TIP-1113's order, so the first failing condition decides the error. The
+    /// root key may also be listed as an owner.
+    fn upgrade_account(
+        &mut self,
+        sender: Address,
+        threshold: u8,
+        owners: Vec<INativeMultisig::MultisigOwner>,
+    ) -> Result<B256> {
+        // The wrapper rejects delegatecall; a nested call has a contract as `msg.sender`.
+        let eligibility = self.upgrade_eligibility.t_read()?;
+        if eligibility == UpgradeEligibility::NotSoleCall || self.tx_origin.t_read()? != sender {
+            return Err(NativeMultisigError::upgrade_must_be_only_call().into());
+        }
+        if eligibility == UpgradeEligibility::NotPrimitiveRoot {
+            return Err(NativeMultisigError::primitive_root_required().into());
+        }
+        let (has_code, commitment) = self.storage.with_account_info(sender, |info| {
+            let commitment = decode_config_commitment(&info.extension, true)
+                .map_err(|error| TempoPrecompileError::Fatal(error.to_string()))?;
+            Ok((!info.is_empty_code_hash(), commitment))
+        })?;
+        if has_code {
+            return Err(NativeMultisigError::account_has_code().into());
+        }
+        if !commitment.is_zero() {
+            return Err(NativeMultisigError::account_already_configurable().into());
+        }
+        self.factory()?;
+        let salt = self
+            .storage
+            .keccak256(&[MULTISIG_UPGRADE_DOMAIN, sender.as_slice()].concat())?;
+        let upgraded = config(salt, 1, threshold, &owners);
+        upgraded
+            .validate_for_account(sender)
+            .map_err(|_| NativeMultisigError::invalid_config())?;
+        let hash = self.storage.keccak256(
+            &upgraded
+                .commitment_preimage()
+                .map_err(|_| NativeMultisigError::invalid_config())?,
+        )?;
+        if hash.is_zero() {
+            return Err(NativeMultisigError::invalid_config().into());
+        }
+        self.storage
+            .set_config_commitment(sender, hash, ConfigCommitmentWriteGas::Precompile)?;
+        self.emit_event(NativeMultisigEvent::account_upgraded(
+            sender, hash, salt, threshold, owners,
+        ))?;
+        Ok(hash)
     }
 
     fn factory(&self) -> Result<Address> {

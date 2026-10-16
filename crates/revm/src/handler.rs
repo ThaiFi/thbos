@@ -6,7 +6,7 @@ use std::{
     sync::{Arc, OnceLock},
 };
 
-use alloy_primitives::{Address, U256};
+use alloy_primitives::{Address, TxKind, U256};
 use reth_evm::EvmInternals;
 use revm::{
     Database,
@@ -35,7 +35,8 @@ use revm::{
 };
 use tempo_chainspec::{constants::gas::STORAGE_CREDIT_VALUE, hardfork::TempoHardfork};
 use tempo_contracts::precompiles::{
-    IAccountKeychain::SignatureType as PrecompileSignatureType, TIPFeeAMMError,
+    IAccountKeychain::SignatureType as PrecompileSignatureType, NATIVE_MULTISIG_ADDRESS,
+    TIPFeeAMMError,
 };
 use tempo_precompiles::{
     ECRECOVER_GAS,
@@ -44,7 +45,7 @@ use tempo_precompiles::{
         SelectorRule as PrecompileSelectorRule, TokenLimit,
     },
     error::TempoPrecompileError,
-    native_multisig::NativeMultisig,
+    native_multisig::{NativeMultisig, UpgradeEligibility},
     nonce::{INonce::getNonceCall, NonceManager},
     storage::{
         ConfigCommitmentWriteGas, Handler as _, PrecompileStorageProvider, StorageActions,
@@ -54,7 +55,7 @@ use tempo_precompiles::{
     tip20_channel_reserve::TIP20ChannelReserve,
 };
 use tempo_primitives::{
-    TempoAddressExt,
+    TempoAddressExt, TempoSignature,
     transaction::{
         MultisigSignature, SignatureType, TEMPO_EXPIRING_NONCE_KEY, calc_gas_balance_spending,
         validate_calls,
@@ -410,13 +411,39 @@ impl<DB: alloy_evm::Database, I> TempoEvmHandler<DB, I> {
                 let mut keychain = AccountKeychain::new();
                 keychain.set_tx_origin(ctx.tx.caller())?;
                 if ctx.cfg.spec.is_t14() {
-                    let direct = ctx
-                        .tx
-                        .tempo_tx_env
-                        .as_ref()
+                    let aa = ctx.tx.tempo_tx_env.as_deref();
+                    let direct = aa
                         .and_then(|aa| aa.signature.as_multisig())
                         .map_or(Address::ZERO, MultisigSignature::account);
-                    NativeMultisig::new().set_authority(ctx.tx.caller(), direct)?;
+                    // `upgradeAccount` must be the whole transaction: no other call and no
+                    // authorization or key authorization that could change the account beside it.
+                    let sole_call = match aa {
+                        None => {
+                            ctx.tx.kind() == TxKind::Call(NATIVE_MULTISIG_ADDRESS)
+                                && ctx.tx.authorization_list_len() == 0
+                        }
+                        Some(aa) => {
+                            matches!(
+                                aa.aa_calls.as_slice(),
+                                [call] if call.to == TxKind::Call(NATIVE_MULTISIG_ADDRESS)
+                            ) && aa.tempo_authorization_list.is_empty()
+                                && aa.key_authorization.is_none()
+                        }
+                    };
+                    let upgrade_eligibility = if !sole_call {
+                        UpgradeEligibility::NotSoleCall
+                    } else if aa
+                        .is_some_and(|aa| !matches!(aa.signature, TempoSignature::Primitive(_)))
+                    {
+                        UpgradeEligibility::NotPrimitiveRoot
+                    } else {
+                        UpgradeEligibility::PrimitiveRoot
+                    };
+                    NativeMultisig::new().set_authority(
+                        ctx.tx.caller(),
+                        direct,
+                        upgrade_eligibility,
+                    )?;
                 }
 
                 if let Some(channel_open_context_hash) = channel_open_context_hash {
