@@ -22,7 +22,7 @@ pub const MAX_MULTISIG_OWNER_SIGNATURE_BYTES: usize = 1 + MAX_WEBAUTHN_SIGNATURE
 /// Domain prefix for native multisig account CREATE2 salt derivation.
 pub const MULTISIG_ACCOUNT_DOMAIN: &[u8] = b"tempo:multisig:account";
 
-/// Safe Singleton Factory used to deploy the dedicated recovery factory.
+/// Safe Singleton Factory used to deploy the recovery factory, beacon and implementations.
 pub const MULTISIG_RECOVERY_SINGLETON_FACTORY: Address = SAFE_DEPLOYER_ADDRESS;
 
 /// Expected runtime-code hash of [`MULTISIG_RECOVERY_SINGLETON_FACTORY`].
