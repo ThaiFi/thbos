@@ -142,8 +142,7 @@ impl NativeMultisig {
         threshold: u8,
         owners: Vec<INativeMultisig::MultisigOwner>,
     ) -> Result<B256> {
-        // The handler's `seed_precompile_tx_context` grants a sole call only to a lone top-level
-        // call here; the wrapper rejects delegatecall, so `sender` is then the transaction caller.
+        // A sole call means `sender` is the tx caller; enforced by `seed_precompile_tx_context`.
         let eligibility = self.upgrade_eligibility.t_read()?;
         if eligibility == UpgradeEligibility::NotSoleCall {
             return Err(NativeMultisigError::upgrade_must_be_only_call().into());
