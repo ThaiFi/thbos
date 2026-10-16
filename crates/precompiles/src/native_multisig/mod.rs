@@ -142,9 +142,10 @@ impl NativeMultisig {
         threshold: u8,
         owners: Vec<INativeMultisig::MultisigOwner>,
     ) -> Result<B256> {
-        // The wrapper rejects delegatecall; a nested call has a contract as `msg.sender`.
+        // The handler's `seed_precompile_tx_context` grants a sole call only to a lone top-level
+        // call here; the wrapper rejects delegatecall, so `sender` is then the transaction caller.
         let eligibility = self.upgrade_eligibility.t_read()?;
-        if eligibility == UpgradeEligibility::NotSoleCall || self.tx_origin.t_read()? != sender {
+        if eligibility == UpgradeEligibility::NotSoleCall {
             return Err(NativeMultisigError::upgrade_must_be_only_call().into());
         }
         if eligibility == UpgradeEligibility::NotPrimitiveRoot {
