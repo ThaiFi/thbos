@@ -3275,3 +3275,45 @@ fn retired_root_authorization_list_entries_apply_before_t14() {
         );
     }
 }
+
+#[test]
+fn authorization_list_gas_is_unchanged_by_the_retired_root_skip() {
+    // The skip may only read the authorities revm itself loads: whatever the list holds, T14
+    // warms the same accounts and charges the same gas as T13, where nothing is skipped.
+    let target = Address::repeat_byte(0x55);
+    let sender = signer(2);
+    let x = Entry::new(SigKind::Secp256k1, 9, target, 5);
+    let rows = [
+        ("matching", x),
+        ("chain id 0", Entry { chain_id: 0, ..x }),
+        ("other chain id", Entry { chain_id: 2, ..x }),
+        ("nonce mismatch", Entry { nonce: 6, ..x }),
+        (
+            "nonce max",
+            Entry {
+                nonce: u64::MAX,
+                ..x
+            },
+        ),
+    ];
+    for aa in [false, true] {
+        for (name, entry) in rows {
+            for retired in [false, true] {
+                let label = format!("aa {aa}, {name}, retired {retired}");
+                let run = |spec: TempoHardfork| {
+                    let mut f = Fixture::with_spec(false, spec);
+                    seed_eoa(&mut f, x.address(), 5);
+                    if retired {
+                        retire(&mut f, x.address());
+                    }
+                    probe(&mut f, x.address());
+                    let tx = listed_tx(&sender, aa, PROBE, &[entry]);
+                    let result = f.run_as(sender.address(), &tx);
+                    assert!(result.is_success(), "{label}: {result:?}");
+                    result.tx_gas_used()
+                };
+                assert_eq!(run(TempoHardfork::T14), run(TempoHardfork::T13), "{label}");
+            }
+        }
+    }
+}
