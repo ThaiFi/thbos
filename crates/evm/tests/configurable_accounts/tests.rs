@@ -2902,6 +2902,9 @@ enum SigKind {
     Secp256k1,
     P256,
     WebAuthn,
+    /// The secp256k1 key signing as an access key of its own address, which it names as the
+    /// authority.
+    Keychain,
 }
 
 /// One authorization-list entry: the authority is derived from `kind` and `seed`.
@@ -2946,6 +2949,19 @@ impl Entry {
                 let key = signer(self.seed);
                 let signature = key.sign_hash_sync(&hash).unwrap();
                 (key.address(), TempoSignature::from(signature))
+            }
+            SigKind::Keychain => {
+                let key = signer(self.seed);
+                let signature = key
+                    .sign_hash_sync(&KeychainSignature::signing_hash(hash, key.address()))
+                    .unwrap();
+                (
+                    key.address(),
+                    TempoSignature::Keychain(KeychainSignature::new(
+                        key.address(),
+                        PrimitiveSignature::Secp256k1(signature),
+                    )),
+                )
             }
             SigKind::P256 | SigKind::WebAuthn => {
                 let key = SigningKey::from_slice(&[self.seed; 32]).unwrap();
@@ -3165,6 +3181,33 @@ fn retired_root_authorization_list_entries_skipped() {
 }
 
 #[test]
+fn retired_root_authorization_list_entries_skipped_after_a_same_block_migration() {
+    // TIP-1112: an entry the root key signed before migrating, relayed by a later transaction
+    // of the same block, is skipped.
+    let target = Address::repeat_byte(0x55);
+    let sender = signer(2);
+    let fresh = Entry::new(SigKind::Secp256k1, 6, target, 0);
+    for aa in [false, true] {
+        let mut f = Fixture::with_parent(false);
+        let account = f.account;
+        // Signed by the fixture's root key for the nonce its migration leaves.
+        let entry = Entry::new(SigKind::Secp256k1, 1, target, 4);
+        assert_eq!(entry.address(), account);
+        let tx = listed_tx(&sender, aa, Address::repeat_byte(0x73), &[entry, fresh]);
+        migrate(&mut f, 3, signer(3).address());
+
+        let result = f.run_as(sender.address(), &tx);
+        assert!(result.is_success(), "aa {aa}: {result:?}");
+        assert_eq!(account_state(&mut f, account), (4, None, true), "aa {aa}");
+        assert_eq!(
+            account_state(&mut f, fresh.address()),
+            (1, Some(target), false),
+            "aa {aa}"
+        );
+    }
+}
+
+#[test]
 fn retired_root_authorization_list_variants() {
     let target = Address::repeat_byte(0x55);
     let old_target = Address::repeat_byte(0x44);
@@ -3316,5 +3359,38 @@ fn authorization_list_gas_is_unchanged_by_the_retired_root_skip() {
                 assert_eq!(run(TempoHardfork::T14), run(TempoHardfork::T13), "{label}");
             }
         }
+    }
+}
+
+#[test]
+fn keychain_authorization_list_entries_stay_skipped() {
+    // The T0 filter drops a keychain-signed entry before the retired-root check reads its
+    // authority: retired or not, the named account is neither delegated nor warmed, as at T13.
+    let sender = signer(2);
+    let x = Entry::new(SigKind::Keychain, 9, Address::repeat_byte(0x55), 5);
+    for retired in [false, true] {
+        let run = |spec: TempoHardfork| {
+            let label = format!("{spec:?}, retired {retired}");
+            let mut f = Fixture::with_spec(false, spec);
+            seed_eoa(&mut f, x.address(), 5);
+            if retired {
+                retire(&mut f, x.address());
+            }
+            probe(&mut f, x.address());
+            let tx = listed_tx(&sender, true, PROBE, &[x]);
+            let result = f.run_as(sender.address(), &tx);
+            assert!(result.is_success(), "{label}: {result:?}");
+            assert_eq!(
+                account_state(&mut f, x.address()),
+                (5, None, retired),
+                "{label}"
+            );
+            result.tx_gas_used()
+        };
+        assert_eq!(
+            run(TempoHardfork::T14),
+            run(TempoHardfork::T13),
+            "retired {retired}"
+        );
     }
 }
