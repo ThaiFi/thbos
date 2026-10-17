@@ -2938,6 +2938,47 @@ struct Entry {
     nonce: u64,
 }
 
+/// The P256 or WebAuthn signature of the key seeded by `seed` over `hash`, and the key's address.
+fn p256_primitive(kind: SigKind, seed: u8, hash: B256) -> (Address, PrimitiveSignature) {
+    let key = SigningKey::from_slice(&[seed; 32]).unwrap();
+    let point = key.verifying_key().to_encoded_point(false);
+    let pub_key_x = B256::from_slice(point.x().unwrap());
+    let pub_key_y = B256::from_slice(point.y().unwrap());
+    let primitive = if matches!(kind, SigKind::P256) {
+        let signature: p256::ecdsa::Signature = key.sign_prehash(&Sha256::digest(hash)).unwrap();
+        let bytes = signature.to_bytes();
+        PrimitiveSignature::P256(P256SignatureWithPreHash {
+            r: B256::from_slice(&bytes[..32]),
+            s: normalize_p256_s(&bytes[32..]).unwrap(),
+            pub_key_x,
+            pub_key_y,
+            pre_hash: true,
+        })
+    } else {
+        let mut authenticator_data = vec![0u8; 37];
+        authenticator_data[..32].copy_from_slice(&[0xAA; 32]);
+        authenticator_data[32] = 0x01;
+        let client_data = format!(
+            r#"{{"type":"webauthn.get","challenge":"{}","origin":"https://tempo.xyz","crossOrigin":false}}"#,
+            URL_SAFE_NO_PAD.encode(hash)
+        );
+        let mut message = Sha256::new();
+        message.update(&authenticator_data);
+        message.update(Sha256::digest(client_data.as_bytes()));
+        let signature: p256::ecdsa::Signature = key.sign_prehash(&message.finalize()).unwrap();
+        let bytes = signature.to_bytes();
+        authenticator_data.extend_from_slice(client_data.as_bytes());
+        PrimitiveSignature::WebAuthn(WebAuthnSignature {
+            webauthn_data: authenticator_data.into(),
+            r: B256::from_slice(&bytes[..32]),
+            s: normalize_p256_s(&bytes[32..]).unwrap(),
+            pub_key_x,
+            pub_key_y,
+        })
+    };
+    (derive_p256_address(&pub_key_x, &pub_key_y), primitive)
+}
+
 impl Entry {
     fn new(kind: SigKind, seed: u8, target: Address, nonce: u64) -> Self {
         Self {
@@ -2985,48 +3026,8 @@ impl Entry {
                 )
             }
             SigKind::P256 | SigKind::WebAuthn => {
-                let key = SigningKey::from_slice(&[self.seed; 32]).unwrap();
-                let point = key.verifying_key().to_encoded_point(false);
-                let pub_key_x = B256::from_slice(point.x().unwrap());
-                let pub_key_y = B256::from_slice(point.y().unwrap());
-                let primitive = if matches!(self.kind, SigKind::P256) {
-                    let signature: p256::ecdsa::Signature =
-                        key.sign_prehash(&Sha256::digest(hash)).unwrap();
-                    let bytes = signature.to_bytes();
-                    PrimitiveSignature::P256(P256SignatureWithPreHash {
-                        r: B256::from_slice(&bytes[..32]),
-                        s: normalize_p256_s(&bytes[32..]).unwrap(),
-                        pub_key_x,
-                        pub_key_y,
-                        pre_hash: true,
-                    })
-                } else {
-                    let mut authenticator_data = vec![0u8; 37];
-                    authenticator_data[..32].copy_from_slice(&[0xAA; 32]);
-                    authenticator_data[32] = 0x01;
-                    let client_data = format!(
-                        r#"{{"type":"webauthn.get","challenge":"{}","origin":"https://tempo.xyz","crossOrigin":false}}"#,
-                        URL_SAFE_NO_PAD.encode(hash)
-                    );
-                    let mut message = Sha256::new();
-                    message.update(&authenticator_data);
-                    message.update(Sha256::digest(client_data.as_bytes()));
-                    let signature: p256::ecdsa::Signature =
-                        key.sign_prehash(&message.finalize()).unwrap();
-                    let bytes = signature.to_bytes();
-                    authenticator_data.extend_from_slice(client_data.as_bytes());
-                    PrimitiveSignature::WebAuthn(WebAuthnSignature {
-                        webauthn_data: authenticator_data.into(),
-                        r: B256::from_slice(&bytes[..32]),
-                        s: normalize_p256_s(&bytes[32..]).unwrap(),
-                        pub_key_x,
-                        pub_key_y,
-                    })
-                };
-                (
-                    derive_p256_address(&pub_key_x, &pub_key_y),
-                    TempoSignature::Primitive(primitive),
-                )
+                let (address, primitive) = p256_primitive(self.kind, self.seed, hash);
+                (address, TempoSignature::Primitive(primitive))
             }
         };
         (
@@ -4041,4 +4042,419 @@ fn retired_root_signature_checks_cost_the_commitment_read() {
             assert_eq!(after - before, read, "{action:?}, warm: {warm}");
         }
     }
+}
+
+/// The key kinds a keychain signature can carry: its inner signature is a primitive one.
+const KEY_KINDS: [SigKind; 3] = [SigKind::P256, SigKind::WebAuthn, SigKind::Secp256k1];
+
+/// A keychain signature naming `account`, made by the key of `kind` seeded by `seed` over `hash`,
+/// with that key's address.
+fn keychain_signature(kind: SigKind, seed: u8, account: Address, hash: B256) -> (Address, Bytes) {
+    let signing_hash = KeychainSignature::signing_hash(hash, account);
+    let (key, primitive) = match kind {
+        SigKind::Secp256k1 => {
+            let key = signer(seed);
+            let signature = key.sign_hash_sync(&signing_hash).unwrap();
+            (key.address(), PrimitiveSignature::Secp256k1(signature))
+        }
+        SigKind::P256 | SigKind::WebAuthn => p256_primitive(kind, seed, signing_hash),
+        SigKind::Keychain => panic!("a keychain signature wraps a primitive one"),
+    };
+    let signature = TempoSignature::Keychain(KeychainSignature::new(account, primitive));
+    (key, signature.to_bytes())
+}
+
+/// The keychain signature of the key seeded by `seed` as the root of its own address.
+fn root_keychain_signature(kind: SigKind, seed: u8, hash: B256) -> (Address, Bytes) {
+    let (address, _) = keychain_signature(kind, seed, Address::ZERO, hash);
+    keychain_signature(kind, seed, address, hash)
+}
+
+/// Grants `key` of `kind` to the fixture's account, signed by its root.
+fn grant_kind(f: &mut Fixture, nonce: u64, kind: SigKind, key: Address, admin: bool) {
+    let signature_type = match kind {
+        SigKind::Secp256k1 => SignatureType::Secp256k1,
+        SigKind::P256 => SignatureType::P256,
+        SigKind::WebAuthn => SignatureType::WebAuthn,
+        SigKind::Keychain => panic!("a key has a primitive signature type"),
+    };
+    let mut grant = KeyAuthorization::unrestricted(1, signature_type, key);
+    if admin {
+        grant = grant.into_admin(f.account);
+    }
+    let approval = f.owner.sign_hash_sync(&grant.signature_hash()).unwrap();
+    let tx = f.sign_primitive(TempoTransaction {
+        key_authorization: Some(grant.into_signed(approval)),
+        ..aa_tx(nonce, vec![f.getter()])
+    });
+    let result = f.run(&tx);
+    assert!(result.is_success(), "{kind:?} {key}: {result:?}");
+}
+
+#[derive(Clone, Copy, Debug)]
+enum Verifier {
+    Keychain,
+    KeychainAdmin,
+}
+
+impl Verifier {
+    fn call(self, account: Address, hash: B256, signature: Bytes) -> Call {
+        let input = match self {
+            Self::Keychain => ISignatureVerifier::verifyKeychainCall {
+                account,
+                hash,
+                signature,
+            }
+            .abi_encode(),
+            Self::KeychainAdmin => ISignatureVerifier::verifyKeychainAdminCall {
+                account,
+                hash,
+                signature,
+            }
+            .abi_encode(),
+        };
+        Call {
+            to: TxKind::Call(SIGNATURE_VERIFIER_ADDRESS),
+            value: U256::ZERO,
+            input: input.into(),
+        }
+    }
+}
+
+fn is_admin_key_call(account: Address, key_id: Address) -> Call {
+    Call {
+        to: TxKind::Call(ACCOUNT_KEYCHAIN_ADDRESS),
+        value: U256::ZERO,
+        input: IAccountKeychain::isAdminKeyCall {
+            account,
+            keyId: key_id,
+        }
+        .abi_encode()
+        .into(),
+    }
+}
+
+/// Sends `call` from an unrelated relayer, with `warm` in the access list, and returns the
+/// boolean it returns and the gas it used.
+fn bool_query(f: &mut Fixture, call: Call, warm: Option<Address>, label: &str) -> (bool, u64) {
+    let access_list = AccessList(
+        warm.into_iter()
+            .map(|address| AccessListItem {
+                address,
+                storage_keys: Vec::new(),
+            })
+            .collect(),
+    );
+    let result = send_listed(f, signer(9).address(), vec![call], access_list);
+    assert!(result.is_success(), "{label}: {result:?}");
+    let returned = bool::abi_decode(result.output().unwrap()).expect(label);
+    (returned, result.tx_gas_used())
+}
+
+#[test]
+fn retired_root_keychain_verifiers_reject() {
+    let hash = B256::repeat_byte(0x42);
+    for kind in KEY_KINDS {
+        for function in [Verifier::Keychain, Verifier::KeychainAdmin] {
+            let admin = matches!(function, Verifier::KeychainAdmin);
+            // An access key granted by the account: a committed key ID is rejected, an uncommitted
+            // one under a committed account is not.
+            for (key_committed, account_committed, expected) in [
+                (false, false, true),
+                (true, false, false),
+                (false, true, true),
+            ] {
+                let label = format!(
+                    "{kind:?} {function:?} key committed {key_committed}, account committed \
+                     {account_committed}"
+                );
+                let mut f = Fixture::with_parent(false);
+                let account = f.account;
+                let (key, signature) = keychain_signature(kind, 7, account, hash);
+                grant_kind(&mut f, 3, kind, key, admin);
+                if key_committed {
+                    retire(&mut f, key);
+                }
+                if account_committed {
+                    retire(&mut f, account);
+                }
+                let call = function.call(account, hash, signature);
+                assert_eq!(
+                    bool_query(&mut f, call, None, &label).0,
+                    expected,
+                    "{label}"
+                );
+            }
+        }
+        // The root key of its own address: the implicit admin, or a stored row of its own.
+        for committed in [false, true] {
+            let label = format!("{kind:?} root, committed {committed}");
+            let mut f = Fixture::with_parent(false);
+            let (root, signature) = root_keychain_signature(kind, 1, hash);
+            if matches!(kind, SigKind::Secp256k1) {
+                assert_eq!(root, f.account, "{label}");
+                // The fixture's root signs, so it can also store a non-admin row for itself.
+                grant_kind(&mut f, 3, kind, root, false);
+            }
+            if committed {
+                retire(&mut f, root);
+            }
+            let admin = Verifier::KeychainAdmin.call(root, hash, signature.clone());
+            assert_eq!(
+                bool_query(&mut f, admin, None, &label).0,
+                !committed,
+                "admin {label}"
+            );
+            if matches!(kind, SigKind::Secp256k1) {
+                let plain = Verifier::Keychain.call(root, hash, signature);
+                assert_eq!(
+                    bool_query(&mut f, plain, None, &label).0,
+                    !committed,
+                    "plain {label}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn retired_root_is_not_an_implicit_admin_key() {
+    let key = signer(7);
+    for committed in [false, true] {
+        let mut f = Fixture::with_parent(false);
+        let account = f.account;
+        // A stored non-admin row of the root's own address never makes it an admin key.
+        grant_kind(&mut f, 3, SigKind::Secp256k1, account, false);
+        grant_kind(&mut f, 4, SigKind::Secp256k1, key.address(), true);
+        if committed {
+            retire(&mut f, account);
+        }
+        let label = format!("(X, X), committed {committed}");
+        let call = is_admin_key_call(account, account);
+        assert_eq!(
+            bool_query(&mut f, call, None, &label).0,
+            !committed,
+            "{label}"
+        );
+        // An admin access key keeps its stored row, whether or not its account is retired.
+        let label = format!("(X, K), X committed {committed}");
+        let call = is_admin_key_call(account, key.address());
+        assert!(bool_query(&mut f, call, None, &label).0, "{label}");
+    }
+}
+
+#[test]
+fn retired_root_signatures_still_recover_and_keychain_format_is_unchanged() {
+    let hash = B256::repeat_byte(0x42);
+    let mut f = Fixture::with_parent(false);
+    let account = f.account;
+    retire(&mut f, account);
+    let signature = f.owner.sign_hash_sync(&hash).unwrap();
+    let raw: Bytes = PrimitiveSignature::Secp256k1(signature).to_bytes();
+    let recover = Call {
+        to: TxKind::Call(SIGNATURE_VERIFIER_ADDRESS),
+        value: U256::ZERO,
+        input: ISignatureVerifier::recoverCall {
+            hash,
+            signature: raw.clone(),
+        }
+        .abi_encode()
+        .into(),
+    };
+    let result = send(&mut f, signer(9).address(), vec![recover]);
+    assert!(result.is_success(), "{result:?}");
+    assert_eq!(
+        ISignatureVerifier::recoverCall::abi_decode_returns(result.output().unwrap()).unwrap(),
+        account
+    );
+    let verify = Call {
+        to: TxKind::Call(SIGNATURE_VERIFIER_ADDRESS),
+        value: U256::ZERO,
+        input: ISignatureVerifier::verifyCall {
+            signer: account,
+            hash,
+            signature: raw,
+        }
+        .abi_encode()
+        .into(),
+    };
+    assert!(bool_query(&mut f, verify, None, "verify").0);
+    // A multisig signature is not a keychain one, retired key or not.
+    for function in [Verifier::Keychain, Verifier::KeychainAdmin] {
+        let call = function.call(account, hash, vec![0x05].into());
+        let result = send(&mut f, signer(9).address(), vec![call]);
+        assert_reverts_with(
+            &result,
+            ISignatureVerifier::InvalidFormat {},
+            &format!("{function:?}"),
+        );
+    }
+}
+
+#[test]
+fn retired_root_keychain_checks_are_unchanged_before_t14() {
+    let hash = B256::repeat_byte(0x42);
+    for function in [Verifier::Keychain, Verifier::KeychainAdmin] {
+        let admin = matches!(function, Verifier::KeychainAdmin);
+        let label = format!("{function:?}");
+        // The commitment is seeded the way the pre-T14 authorization-list test does.
+        let mut f = Fixture::with_spec(false, TempoHardfork::T13);
+        let account = f.account;
+        let (key, signature) = keychain_signature(SigKind::Secp256k1, 7, account, hash);
+        grant_kind(&mut f, 3, SigKind::Secp256k1, key, admin);
+        retire(&mut f, key);
+        retire(&mut f, account);
+        let call = function.call(account, hash, signature);
+        assert!(
+            bool_query(&mut f, call, None, &label).0,
+            "access key {label}"
+        );
+    }
+    let mut f = Fixture::with_spec(false, TempoHardfork::T13);
+    let account = f.account;
+    retire(&mut f, account);
+    let (root, signature) = root_keychain_signature(SigKind::Secp256k1, 1, hash);
+    assert_eq!(root, account);
+    let call = Verifier::KeychainAdmin.call(account, hash, signature);
+    assert!(bool_query(&mut f, call, None, "root verifier").0);
+    let call = is_admin_key_call(account, account);
+    assert!(bool_query(&mut f, call, None, "isAdminKey").0);
+}
+
+#[derive(Clone, Copy, Debug)]
+enum KeychainCheck {
+    VerifyAccessKey,
+    VerifyAdminAccessKey,
+    VerifyAdminRoot,
+    IsAdminRoot,
+    IsAdminAccessKey { key_committed: bool },
+}
+
+/// Gas of one `check` at `spec` with the queried account (or the access key's, for the
+/// `IsAdminAccessKey` check) listed in the access list (warm) or not (cold). Each check returns
+/// true.
+fn keychain_check_gas(spec: TempoHardfork, check: KeychainCheck, warm: bool) -> u64 {
+    let hash = B256::repeat_byte(0x42);
+    let mut f = Fixture::with_spec(false, spec);
+    let account = f.account;
+    let (key, signature) = keychain_signature(SigKind::Secp256k1, 7, account, hash);
+    let (call, warm_account) = match check {
+        KeychainCheck::VerifyAccessKey => {
+            grant_kind(&mut f, 3, SigKind::Secp256k1, key, false);
+            (Verifier::Keychain.call(account, hash, signature), key)
+        }
+        KeychainCheck::VerifyAdminAccessKey => {
+            grant_kind(&mut f, 3, SigKind::Secp256k1, key, true);
+            (Verifier::KeychainAdmin.call(account, hash, signature), key)
+        }
+        KeychainCheck::VerifyAdminRoot => {
+            let (root, signature) = root_keychain_signature(SigKind::Secp256k1, 1, hash);
+            (Verifier::KeychainAdmin.call(root, hash, signature), root)
+        }
+        KeychainCheck::IsAdminRoot => (is_admin_key_call(account, account), account),
+        KeychainCheck::IsAdminAccessKey { key_committed } => {
+            grant_kind(&mut f, 3, SigKind::Secp256k1, key, true);
+            if key_committed {
+                retire(&mut f, key);
+            }
+            (is_admin_key_call(account, key), key)
+        }
+    };
+    let label = format!("{check:?} at {spec:?}, warm {warm}");
+    let (returned, gas) = bool_query(&mut f, call, warm.then_some(warm_account), &label);
+    assert!(returned, "{label}");
+    gas
+}
+
+#[test]
+fn retired_root_keychain_checks_cost_the_commitment_read() {
+    for check in [
+        KeychainCheck::VerifyAccessKey,
+        KeychainCheck::VerifyAdminAccessKey,
+        KeychainCheck::VerifyAdminRoot,
+        KeychainCheck::IsAdminRoot,
+    ] {
+        for warm in [false, true] {
+            let before = keychain_check_gas(TempoHardfork::T13, check, warm);
+            let after = keychain_check_gas(TempoHardfork::T14, check, warm);
+            // Reads follow the normal account-access schedule. An already loaded commitment adds
+            // no separate read or surcharge.
+            let read = if warm { 100 } else { 2600 };
+            assert_eq!(after - before, read, "{check:?}, warm: {warm}");
+        }
+    }
+    // `isAdminKey(P, K)` never reads K's commitment: committed or not, at T13 or T14, the gas of
+    // an admin access key with a stored row is the same.
+    for warm in [false, true] {
+        let expected = keychain_check_gas(
+            TempoHardfork::T13,
+            KeychainCheck::IsAdminAccessKey {
+                key_committed: false,
+            },
+            warm,
+        );
+        for (spec, key_committed) in [
+            (TempoHardfork::T13, true),
+            (TempoHardfork::T14, false),
+            (TempoHardfork::T14, true),
+        ] {
+            assert_eq!(
+                keychain_check_gas(
+                    spec,
+                    KeychainCheck::IsAdminAccessKey { key_committed },
+                    warm
+                ),
+                expected,
+                "{spec:?}, key committed {key_committed}, warm: {warm}"
+            );
+        }
+    }
+}
+
+/// Gas of `verifyKeychain` for a signature naming `named`, by a key of the fixture's account that
+/// is committed at T14 only, with the key's account cold.
+fn mismatched_account_gas(spec: TempoHardfork) -> (bool, u64) {
+    let hash = B256::repeat_byte(0x42);
+    let mut f = Fixture::with_spec(false, spec);
+    let account = f.account;
+    let (key, signature) = keychain_signature(SigKind::Secp256k1, 7, account, hash);
+    grant_kind(&mut f, 3, SigKind::Secp256k1, key, false);
+    retire(&mut f, key);
+    let call = Verifier::Keychain.call(signer(5).address(), hash, signature);
+    bool_query(&mut f, call, None, "mismatched account")
+}
+
+#[test]
+fn retired_root_keychain_verifier_checks_the_account_before_the_commitment() {
+    // A signature naming another account is rejected before the key's commitment is read: the
+    // same result and the same gas as at T13, where no commitment is read at all.
+    assert_eq!(
+        mismatched_account_gas(TempoHardfork::T14),
+        mismatched_account_gas(TempoHardfork::T13)
+    );
+    assert!(!mismatched_account_gas(TempoHardfork::T14).0);
+}
+
+#[test]
+fn retired_root_check_in_admin_caller_reads_the_warm_sender() {
+    // A non-admin row of the root's own address is the one way `transaction_key` names the
+    // account itself. The commitment read on that branch hits the already loaded sender.
+    let gas_at = |spec: TempoHardfork| {
+        let mut f = Fixture::with_spec(false, spec);
+        let (account, owner) = (f.account, f.owner.clone());
+        grant_kind(&mut f, 3, SigKind::Secp256k1, account, false);
+        let revoke = Call {
+            to: TxKind::Call(ACCOUNT_KEYCHAIN_ADDRESS),
+            value: U256::ZERO,
+            input: IAccountKeychain::revokeKeyCall { keyId: account }
+                .abi_encode()
+                .into(),
+        };
+        let tx = keychain_tx(&f, &owner, 4, vec![revoke]);
+        let result = f.run(&tx);
+        assert!(result.is_success(), "{spec:?}: {result:?}");
+        result.tx_gas_used()
+    };
+    // The sender is always loaded: one warm account access, nothing more.
+    assert_eq!(gas_at(TempoHardfork::T14) - gas_at(TempoHardfork::T13), 100);
 }
