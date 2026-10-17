@@ -5,8 +5,10 @@ use alloy_eips::{
     eip7702::{Authorization, SignedAuthorization},
 };
 use alloy_evm::{FromRecoveredTx, block::BlockExecutor};
-use alloy_primitives::{Bytes, KECCAK256_EMPTY, LogData, Signature, bytes, keccak256};
-use alloy_sol_types::{SolError, SolEvent};
+use alloy_primitives::{
+    Bytes, KECCAK256_EMPTY, LogData, Signature, aliases::U96, bytes, keccak256,
+};
+use alloy_sol_types::{SolError, SolEvent, SolValue};
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use p256::ecdsa::{SigningKey, signature::hazmat::PrehashSigner};
 use reth_chainspec::EthChainSpec;
@@ -39,15 +41,19 @@ use tempo_chainspec::{
     spec::{DEV, MODERATO},
 };
 use tempo_contracts::precompiles::{
-    ACCOUNT_KEYCHAIN_ADDRESS, AccountKeychainError, ISignatureVerifier, PATH_USD_ADDRESS,
-    SIGNATURE_VERIFIER_ADDRESS, account_keychain::IAccountKeychain, nonce::INonce, tip20::ITIP20,
+    ACCOUNT_KEYCHAIN_ADDRESS, AccountKeychainError, ISignatureVerifier, ITIP20ChannelReserve,
+    PATH_USD_ADDRESS, SIGNATURE_VERIFIER_ADDRESS, TIP20_CHANNEL_RESERVE_ADDRESS,
+    account_keychain::IAccountKeychain, nonce::INonce, tip20::ITIP20,
 };
 use tempo_evm::{
     StorageActionReplay, StorageActionReplayError, TempoEvmConfig, supports_storage_action_replay,
 };
 use tempo_precompiles::{
-    error::TempoPrecompileError, native_multisig::keccak_cost, nonce::NonceManager,
-    tip20::TIP20Token,
+    error::TempoPrecompileError,
+    native_multisig::keccak_cost,
+    nonce::NonceManager,
+    tip20::{PERMIT_TYPEHASH, TIP20Token},
+    tip20_channel_reserve::TIP20ChannelReserve,
 };
 use tempo_primitives::{
     Block as TempoBlock, SignatureType, TempoHeader, TempoTxEnvelope,
@@ -3407,5 +3413,603 @@ fn keychain_authorization_list_entries_stay_skipped() {
             run(TempoHardfork::T13),
             "retired {retired}"
         );
+    }
+}
+
+/// Executes `calls` as one AA transaction that `sender` sends at its current nonce.
+fn send(f: &mut Fixture, sender: Address, calls: Vec<Call>) -> ExecutionResult<HaltReason> {
+    send_listed(f, sender, calls, AccessList(Vec::new()))
+}
+
+fn send_listed(
+    f: &mut Fixture,
+    sender: Address,
+    calls: Vec<Call>,
+    access_list: AccessList,
+) -> ExecutionResult<HaltReason> {
+    let nonce = f
+        .evm
+        .db_mut()
+        .basic(sender)
+        .unwrap()
+        .map_or(0, |info| info.nonce);
+    let tx = f.sign_primitive(TempoTransaction {
+        access_list,
+        ..aa_tx(nonce, calls)
+    });
+    f.run_as(sender, &tx)
+}
+
+/// Asserts that `result` reverted with exactly `error` and logged nothing.
+fn assert_reverts_with(result: &ExecutionResult<HaltReason>, error: impl SolError, label: &str) {
+    assert!(
+        matches!(result, ExecutionResult::Revert { .. }),
+        "{label}: {result:?}"
+    );
+    assert_eq!(
+        result.output().unwrap().as_ref(),
+        error.abi_encode().as_slice(),
+        "{label}"
+    );
+    assert!(result.logs().is_empty(), "{label}");
+}
+
+fn permit_retired(account: Address) -> ITIP20::RootKeyRetired {
+    ITIP20::RootKeyRetired { account }
+}
+
+fn voucher_retired(account: Address) -> ITIP20ChannelReserve::RootKeyRetired {
+    ITIP20ChannelReserve::RootKeyRetired { account }
+}
+
+/// A path USD `permit` of `owner` to `spender`, signed by `key` over the token's current nonce.
+fn permit_signed(
+    f: &mut Fixture,
+    owner: Address,
+    key: &PrivateKeySigner,
+    spender: Address,
+    deadline: u64,
+) -> Call {
+    let (nonce, separator) =
+        StorageCtx::enter_ctx(f.evm.ctx_mut(), StorageActions::disabled(), || {
+            let token = TIP20Token::from_address(PATH_USD_ADDRESS)?;
+            Ok::<_, TempoPrecompileError>((
+                token.nonces(ITIP20::noncesCall { owner })?,
+                token.domain_separator()?,
+            ))
+        })
+        .unwrap();
+    let (value, deadline) = (U256::from(100), U256::from(deadline));
+    let struct_hash =
+        keccak256((PERMIT_TYPEHASH, owner, spender, value, nonce, deadline).abi_encode());
+    let digest = keccak256(
+        [
+            &[0x19, 0x01][..],
+            separator.as_slice(),
+            struct_hash.as_slice(),
+        ]
+        .concat(),
+    );
+    let signature = key.sign_hash_sync(&digest).unwrap();
+    Call {
+        to: TxKind::Call(PATH_USD_ADDRESS),
+        value: U256::ZERO,
+        input: ITIP20::permitCall {
+            owner,
+            spender,
+            value,
+            deadline,
+            v: 27 + u8::from(signature.v()),
+            r: signature.r().into(),
+            s: signature.s().into(),
+        }
+        .abi_encode()
+        .into(),
+    }
+}
+
+/// The permit nonce of `owner` and its path USD allowance for `spender`.
+fn permit_state(f: &mut Fixture, owner: Address, spender: Address) -> (U256, U256) {
+    StorageCtx::enter_ctx(f.evm.ctx_mut(), StorageActions::disabled(), || {
+        let token = TIP20Token::from_address(PATH_USD_ADDRESS)?;
+        Ok::<_, TempoPrecompileError>((
+            token.nonces(ITIP20::noncesCall { owner })?,
+            token.allowance(ITIP20::allowanceCall { owner, spender })?,
+        ))
+    })
+    .unwrap()
+}
+
+#[test]
+fn retired_root_permit_reverts() {
+    let (spender, relayer) = (signer(8).address(), signer(9).address());
+    let mut f = Fixture::with_parent(false);
+    let x = f.account;
+    let old_key = f.owner.clone();
+
+    // Signed while X's root key still works, relayed after it migrated: the attack path.
+    let early = permit_signed(&mut f, x, &old_key, spender, 1_000);
+    let early_for_x = permit_signed(&mut f, x, &old_key, signer(7).address(), 1_000);
+    let config = migrate(&mut f, 3, x);
+    assert_eq!(f.commitment(), config.commitment().unwrap());
+    let result = send(&mut f, relayer, vec![early]);
+    assert_reverts_with(&result, permit_retired(x), "relayed after migration");
+    assert_eq!(permit_state(&mut f, x, spender), (U256::ZERO, U256::ZERO));
+
+    // Signed after the migration with the old root key.
+    let late = permit_signed(&mut f, x, &old_key, spender, 1_000);
+    let result = send(&mut f, relayer, vec![late]);
+    assert_reverts_with(&result, permit_retired(x), "signed after migration");
+    assert_eq!(permit_state(&mut f, x, spender), (U256::ZERO, U256::ZERO));
+
+    // X relays its own old permit through its native multisig.
+    f.config = config;
+    let tx = f.signed(4, vec![early_for_x]);
+    let result = f.run(&tx);
+    assert_reverts_with(&result, permit_retired(x), "relayed by X");
+    assert_eq!(
+        permit_state(&mut f, x, signer(7).address()),
+        (U256::ZERO, U256::ZERO)
+    );
+}
+
+#[test]
+fn retired_root_permit_error_order() {
+    let (owner, spender, relayer) = (signer(4), signer(8).address(), signer(9).address());
+    let x = owner.address();
+    let mut f = Fixture::with_parent(false);
+    retire(&mut f, x);
+    f.evm.ctx_mut().block.timestamp = U256::from(2000);
+
+    // The control side of each order: a valid, unexpired signature by the committed owner.
+    let valid = permit_signed(&mut f, x, &owner, spender, 3_000);
+    let result = send(&mut f, relayer, vec![valid]);
+    assert_reverts_with(&result, permit_retired(x), "valid permit");
+
+    // A signature by another key is an invalid signature, not a retired root.
+    let forged = permit_signed(&mut f, x, &signer(5), spender, 3_000);
+    let result = send(&mut f, relayer, vec![forged]);
+    assert_reverts_with(&result, ITIP20::InvalidSignature {}, "forged permit");
+    // An uncommitted owner gets the same error.
+    let other = signer(6);
+    let forged = permit_signed(&mut f, other.address(), &signer(5), spender, 3_000);
+    let result = send(&mut f, relayer, vec![forged]);
+    assert_reverts_with(&result, ITIP20::InvalidSignature {}, "forged, uncommitted");
+
+    // An expired deadline keeps its own error for the committed owner.
+    let expired = permit_signed(&mut f, x, &owner, spender, 1_000);
+    let result = send(&mut f, relayer, vec![expired]);
+    assert_reverts_with(&result, ITIP20::PermitExpired {}, "expired permit");
+    assert_eq!(permit_state(&mut f, x, spender), (U256::ZERO, U256::ZERO));
+}
+
+#[test]
+fn retired_root_permit_stays_allowed() {
+    let (owner, spender, relayer) = (signer(4), signer(8).address(), signer(9).address());
+    let mut f = Fixture::with_parent(false);
+    // Only the owner's root key is at stake: a committed spender is no authority here.
+    retire(&mut f, spender);
+    let permit = permit_signed(&mut f, owner.address(), &owner, spender, 1_000);
+    let result = send(&mut f, relayer, vec![permit]);
+    assert!(result.is_success(), "{result:?}");
+    assert_eq!(
+        permit_state(&mut f, owner.address(), spender),
+        (U256::ONE, U256::from(100))
+    );
+    assert_eq!(result.logs().len(), 1);
+}
+
+#[test]
+fn retired_root_permit_inactive_before_t14() {
+    let (owner, spender, relayer) = (signer(4), signer(8).address(), signer(9).address());
+    let mut f = Fixture::with_spec(false, TempoHardfork::T13);
+    retire(&mut f, owner.address());
+    let permit = permit_signed(&mut f, owner.address(), &owner, spender, 1_000);
+    let result = send(&mut f, relayer, vec![permit]);
+    assert!(result.is_success(), "{result:?}");
+    assert_eq!(
+        permit_state(&mut f, owner.address(), spender),
+        (U256::ONE, U256::from(100))
+    );
+}
+
+fn nonce_of(f: &mut Fixture, account: Address) -> u64 {
+    f.evm
+        .db_mut()
+        .basic(account)
+        .unwrap()
+        .map_or(0, |info| info.nonce)
+}
+
+/// An open path USD channel and its identity.
+struct Opened {
+    id: B256,
+    descriptor: ITIP20ChannelReserve::ChannelDescriptor,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum Redeem {
+    Settle,
+    Close,
+}
+
+impl Redeem {
+    /// The payee's call redeeming `amount` of the channel with `signature`.
+    fn call(self, channel: &Opened, amount: u64, signature: Bytes) -> Call {
+        let descriptor = channel.descriptor.clone();
+        let cumulative_amount = U96::from(amount);
+        let input = match self {
+            Self::Settle => ITIP20ChannelReserve::settleCall {
+                descriptor,
+                cumulativeAmount: cumulative_amount,
+                signature,
+            }
+            .abi_encode(),
+            Self::Close => ITIP20ChannelReserve::closeCall {
+                descriptor,
+                cumulativeAmount: cumulative_amount,
+                captureAmount: cumulative_amount,
+                signature,
+            }
+            .abi_encode(),
+        };
+        Call {
+            to: TxKind::Call(TIP20_CHANNEL_RESERVE_ADDRESS),
+            value: U256::ZERO,
+            input: input.into(),
+        }
+    }
+}
+
+/// Funds `payer` with `deposit` and opens a channel to `payee` with the given voucher signer.
+fn open_channel(
+    f: &mut Fixture,
+    payer: Address,
+    payee: Address,
+    authorized_signer: Address,
+    deposit: u64,
+) -> Opened {
+    // Genesis initializes the precompile; the fixture does not.
+    if f.evm
+        .db_mut()
+        .basic(TIP20_CHANNEL_RESERVE_ADDRESS)
+        .unwrap()
+        .is_none()
+    {
+        StorageCtx::enter_ctx(f.evm.ctx_mut(), StorageActions::disabled(), || {
+            TIP20ChannelReserve::new().initialize()
+        })
+        .unwrap();
+        let state = f.evm.ctx_mut().journaled_state.finalize();
+        f.evm.db_mut().commit(state);
+    }
+    fund(f, payer, deposit);
+    let call = Call {
+        to: TxKind::Call(TIP20_CHANNEL_RESERVE_ADDRESS),
+        value: U256::ZERO,
+        input: ITIP20ChannelReserve::openCall {
+            payee,
+            operator: Address::ZERO,
+            token: PATH_USD_ADDRESS,
+            deposit: U96::from(deposit),
+            salt: B256::repeat_byte(0x5a),
+            authorizedSigner: authorized_signer,
+        }
+        .abi_encode()
+        .into(),
+    };
+    let result = send(f, payer, vec![call]);
+    assert!(result.is_success(), "{result:?}");
+    let opened = result
+        .logs()
+        .iter()
+        .find_map(|log| ITIP20ChannelReserve::ChannelOpened::decode_log(log).ok())
+        .expect("channel opened")
+        .data;
+    Opened {
+        id: opened.channelId,
+        descriptor: ITIP20ChannelReserve::ChannelDescriptor {
+            payer,
+            payee,
+            operator: Address::ZERO,
+            token: PATH_USD_ADDRESS,
+            salt: opened.salt,
+            authorizedSigner: authorized_signer,
+            expiringNonceHash: opened.expiringNonceHash,
+        },
+    }
+}
+
+/// A voucher of `key` for `amount` cumulative units of the channel.
+fn voucher(f: &mut Fixture, channel: &Opened, key: &PrivateKeySigner, amount: u64) -> Bytes {
+    let digest = StorageCtx::enter_ctx(f.evm.ctx_mut(), StorageActions::disabled(), || {
+        TIP20ChannelReserve::new().get_voucher_digest(ITIP20ChannelReserve::getVoucherDigestCall {
+            channelId: channel.id,
+            cumulativeAmount: U96::from(amount),
+        })
+    })
+    .unwrap();
+    Bytes::from(key.sign_hash_sync(&digest).unwrap().as_bytes())
+}
+
+/// Settled amount, deposit and close request of the channel, with the balances of its payee and
+/// payer and of the precompile that holds the deposit.
+type ChannelSnapshot = (U96, U96, u32, U256, U256, U256);
+
+fn channel_snapshot(f: &mut Fixture, channel: &Opened) -> ChannelSnapshot {
+    let state = StorageCtx::enter_ctx(f.evm.ctx_mut(), StorageActions::disabled(), || {
+        TIP20ChannelReserve::new().get_channel_state(ITIP20ChannelReserve::getChannelStateCall {
+            channelId: channel.id,
+        })
+    })
+    .unwrap();
+    (
+        state.settled,
+        state.deposit,
+        state.closeRequestedAt,
+        balance(f, channel.descriptor.payee),
+        balance(f, channel.descriptor.payer),
+        balance(f, TIP20_CHANNEL_RESERVE_ADDRESS),
+    )
+}
+
+/// A channel from `payer` to a fresh payee, one voucher of `payer`'s key for 60 units, and the
+/// voucher signer's configuration still uncommitted.
+fn voucher_setup(
+    f: &mut Fixture,
+    payer: &PrivateKeySigner,
+    authorized_signer: &PrivateKeySigner,
+) -> (Opened, Bytes) {
+    let authorized = if authorized_signer.address() == payer.address() {
+        Address::ZERO
+    } else {
+        authorized_signer.address()
+    };
+    let channel = open_channel(f, payer.address(), signer(5).address(), authorized, 100);
+    let signature = voucher(f, &channel, authorized_signer, 60);
+    (channel, signature)
+}
+
+#[test]
+fn retired_root_channel_voucher_reverts() {
+    let payee = signer(5).address();
+    for redeem in [Redeem::Settle, Redeem::Close] {
+        // The payer is committed and signs for itself.
+        let payer = signer(4);
+        let mut f = Fixture::with_parent(false);
+        let (channel, signature) = voucher_setup(&mut f, &payer, &payer);
+        retire(&mut f, payer.address());
+        let before = channel_snapshot(&mut f, &channel);
+        let call = redeem.call(&channel, 60, signature);
+        let result = send(&mut f, payee, vec![call]);
+        assert_reverts_with(&result, voucher_retired(payer.address()), "payer signs");
+        assert_eq!(channel_snapshot(&mut f, &channel), before, "{redeem:?}");
+
+        // The authorized signer is committed, the payer is not: the signer's root key signed.
+        let (payer, delegate) = (signer(4), signer(6));
+        let mut f = Fixture::with_parent(false);
+        let (channel, signature) = voucher_setup(&mut f, &payer, &delegate);
+        retire(&mut f, delegate.address());
+        let before = channel_snapshot(&mut f, &channel);
+        let call = redeem.call(&channel, 60, signature);
+        let result = send(&mut f, payee, vec![call]);
+        assert_reverts_with(&result, voucher_retired(delegate.address()), "signer");
+        assert_eq!(channel_snapshot(&mut f, &channel), before, "{redeem:?}");
+
+        // The same through a real migration of the payer, in a block after the voucher was signed
+        // (this harness has one block environment; the node test uses real blocks).
+        let mut f = Fixture::with_parent(false);
+        let (account, owner) = (f.account, f.owner.clone());
+        let channel = open_channel(&mut f, account, payee, Address::ZERO, 100);
+        let signature = voucher(&mut f, &channel, &owner, 60);
+        let nonce = nonce_of(&mut f, account);
+        migrate(&mut f, nonce, signer(2).address());
+        let before = channel_snapshot(&mut f, &channel);
+        let call = redeem.call(&channel, 60, signature);
+        let result = send(&mut f, payee, vec![call]);
+        assert_reverts_with(&result, voucher_retired(account), "migrated payer");
+        assert_eq!(channel_snapshot(&mut f, &channel), before, "{redeem:?}");
+    }
+}
+
+#[test]
+fn retired_root_channel_voucher_stays_allowed() {
+    let (payer, delegate, payee) = (signer(4), signer(6), signer(5).address());
+    for redeem in [Redeem::Settle, Redeem::Close] {
+        // The payer is committed but its authorized signer is not: only the signer's root key
+        // signed, so the voucher is good.
+        let mut f = Fixture::with_parent(false);
+        let (channel, signature) = voucher_setup(&mut f, &payer, &delegate);
+        retire(&mut f, payer.address());
+        let before = channel_snapshot(&mut f, &channel);
+        let call = redeem.call(&channel, 60, signature);
+        let result = send(&mut f, payee, vec![call]);
+        assert!(result.is_success(), "{redeem:?}: {result:?}");
+        let after = channel_snapshot(&mut f, &channel);
+        assert_eq!(after.3, before.3 + U256::from(60), "{redeem:?}: payee");
+        assert_ne!(after, before, "{redeem:?}");
+    }
+}
+
+#[test]
+fn retired_root_channel_close_without_capture_stays_allowed() {
+    // Closing without capturing anything verifies no voucher, so a retired payer still gets its
+    // refund through the payee's close.
+    let (payer, payee) = (signer(4), signer(5).address());
+    let mut f = Fixture::with_parent(false);
+    let (channel, signature) = voucher_setup(&mut f, &payer, &payer);
+    retire(&mut f, payer.address());
+    let before = channel_snapshot(&mut f, &channel);
+    let call = Call {
+        to: TxKind::Call(TIP20_CHANNEL_RESERVE_ADDRESS),
+        value: U256::ZERO,
+        input: ITIP20ChannelReserve::closeCall {
+            descriptor: channel.descriptor.clone(),
+            cumulativeAmount: U96::from(60),
+            captureAmount: U96::ZERO,
+            signature,
+        }
+        .abi_encode()
+        .into(),
+    };
+    let result = send(&mut f, payee, vec![call]);
+    assert!(result.is_success(), "{result:?}");
+    let after = channel_snapshot(&mut f, &channel);
+    assert_eq!(after.3, before.3, "payee");
+    assert_eq!(after.4, before.4 + U256::from(100), "payer refund");
+}
+
+#[test]
+fn retired_root_channel_voucher_error_order() {
+    let (payer, payee) = (signer(4), signer(5).address());
+    for redeem in [Redeem::Settle, Redeem::Close] {
+        let mut f = Fixture::with_parent(false);
+        let (channel, valid) = voucher_setup(&mut f, &payer, &payer);
+        retire(&mut f, payer.address());
+        // Another key's voucher, and garbage, keep the existing signature error for a committed
+        // signer; only a voucher the committed signer really signed is a retired root key.
+        let forged = voucher(&mut f, &channel, &signer(7), 60);
+        for (label, signature) in [("forged", forged), ("garbage", Bytes::from(vec![0x42; 65]))] {
+            let call = redeem.call(&channel, 60, signature);
+            let result = send(&mut f, payee, vec![call]);
+            assert_reverts_with(
+                &result,
+                ITIP20ChannelReserve::InvalidSignature {},
+                &format!("{redeem:?} {label}"),
+            );
+        }
+        let call = redeem.call(&channel, 60, valid);
+        let result = send(&mut f, payee, vec![call]);
+        assert_reverts_with(&result, voucher_retired(payer.address()), "valid");
+    }
+}
+
+#[test]
+fn retired_root_channel_voucher_inactive_before_t14() {
+    let (payer, payee) = (signer(4), signer(5).address());
+    for redeem in [Redeem::Settle, Redeem::Close] {
+        let mut f = Fixture::with_spec(false, TempoHardfork::T13);
+        let (channel, signature) = voucher_setup(&mut f, &payer, &payer);
+        retire(&mut f, payer.address());
+        let before = channel_snapshot(&mut f, &channel);
+        let call = redeem.call(&channel, 60, signature);
+        let result = send(&mut f, payee, vec![call]);
+        assert!(result.is_success(), "{redeem:?}: {result:?}");
+        assert_eq!(
+            channel_snapshot(&mut f, &channel).3,
+            before.3 + U256::from(60)
+        );
+    }
+}
+
+#[test]
+fn channel_settle_and_close_replay_only_from_t14() {
+    let (payer, payee) = (signer(4), signer(5).address());
+    let mut f = Fixture::with_parent(false);
+    let (channel, signature) = voucher_setup(&mut f, &payer, &payer);
+    let primitive = TempoSignature::from(Signature::test_signature());
+    let envelope = |calls: Vec<Call>| -> TempoTxEnvelope {
+        aa_tx(0, calls).into_signed(primitive.clone()).into()
+    };
+    let transfer = Call {
+        to: TxKind::Call(PATH_USD_ADDRESS),
+        value: U256::ZERO,
+        input: ITIP20::transferCall {
+            to: payee,
+            amount: U256::ONE,
+        }
+        .abi_encode()
+        .into(),
+    };
+    assert!(supports_storage_action_replay(
+        &envelope(vec![transfer.clone()]),
+        TempoHardfork::T13
+    ));
+    for redeem in [Redeem::Settle, Redeem::Close] {
+        let call = redeem.call(&channel, 60, signature.clone());
+        // Settle and close verify a signature the replay cannot gate, so they run sequentially.
+        for calls in [
+            vec![call.clone()],
+            vec![transfer.clone(), call.clone()],
+            vec![call, transfer.clone()],
+        ] {
+            let tx = envelope(calls);
+            assert!(
+                supports_storage_action_replay(&tx, TempoHardfork::T13),
+                "{redeem:?} before T14"
+            );
+            assert!(
+                !supports_storage_action_replay(&tx, TempoHardfork::T14),
+                "{redeem:?} from T14"
+            );
+        }
+    }
+    // The other channel calls verify no voucher.
+    let top_up = Call {
+        to: TxKind::Call(TIP20_CHANNEL_RESERVE_ADDRESS),
+        value: U256::ZERO,
+        input: ITIP20ChannelReserve::topUpCall {
+            descriptor: channel.descriptor,
+            additionalDeposit: U96::ONE,
+        }
+        .abi_encode()
+        .into(),
+    };
+    assert!(supports_storage_action_replay(
+        &envelope(vec![top_up]),
+        TempoHardfork::T14
+    ));
+}
+
+#[derive(Clone, Copy, Debug)]
+enum SignedAction {
+    Permit,
+    Redeem(Redeem),
+}
+
+/// Gas of one `action` verifying the signature of an uncommitted key, with that key's account
+/// listed in the access list (warm) or not (cold).
+fn signature_gas(spec: TempoHardfork, action: SignedAction, warm: bool) -> u64 {
+    let (key, payee, relayer) = (signer(4), signer(5).address(), signer(9).address());
+    let mut f = Fixture::with_spec(false, spec);
+    let (sender, call) = match action {
+        SignedAction::Permit => (
+            relayer,
+            permit_signed(&mut f, key.address(), &key, signer(8).address(), 1_000),
+        ),
+        SignedAction::Redeem(redeem) => {
+            let (channel, signature) = voucher_setup(&mut f, &key, &key);
+            (payee, redeem.call(&channel, 60, signature))
+        }
+    };
+    let access_list = if warm {
+        AccessList(vec![AccessListItem {
+            address: key.address(),
+            storage_keys: Vec::new(),
+        }])
+    } else {
+        AccessList(Vec::new())
+    };
+    let result = send_listed(&mut f, sender, vec![call], access_list);
+    assert!(result.is_success(), "{action:?} at {spec:?}: {result:?}");
+    result.tx_gas_used()
+}
+
+#[test]
+fn retired_root_signature_checks_cost_the_commitment_read() {
+    for action in [
+        SignedAction::Permit,
+        SignedAction::Redeem(Redeem::Settle),
+        SignedAction::Redeem(Redeem::Close),
+    ] {
+        for warm in [false, true] {
+            let before = signature_gas(TempoHardfork::T13, action, warm);
+            let after = signature_gas(TempoHardfork::T14, action, warm);
+            // Reads follow the normal account-access schedule: a cold account load, or a warm
+            // one when the key's account is in the access list. An already loaded commitment adds
+            // nothing on top.
+            let read = if warm { 100 } else { 2600 };
+            assert_eq!(after - before, read, "{action:?}, warm: {warm}");
+        }
     }
 }
