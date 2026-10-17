@@ -4443,31 +4443,50 @@ fn retired_root_keychain_checks_cost_the_commitment_read() {
     }
 }
 
-/// Gas of `function` for a signature naming another account than the one queried, made by a key
-/// of the fixture's account that is committed (and so retired) at T14 only.
-fn mismatched_account_gas(spec: TempoHardfork, function: Verifier) -> (bool, u64) {
+/// The result and gas of `function` for a signature of an admin access key of the fixture's
+/// account whose own address is committed (and so retired at T14 only), checked against that
+/// account or, when `mismatched`, against another one than the signature names.
+fn retired_key_check(spec: TempoHardfork, function: Verifier, mismatched: bool) -> (bool, u64) {
     let hash = B256::repeat_byte(0x42);
     let mut f = Fixture::with_spec(false, spec);
     let account = f.account;
     let (key, signature) = keychain_signature(SigKind::Secp256k1, 7, account, hash);
     grant_kind(&mut f, 3, SigKind::Secp256k1, key, true);
     retire(&mut f, key);
-    let call = function.call(signer(5).address(), hash, signature);
-    bool_query(&mut f, call, None, "mismatched account")
+    let checked = if mismatched {
+        signer(5).address()
+    } else {
+        account
+    };
+    let call = function.call(checked, hash, signature);
+    bool_query(
+        &mut f,
+        call,
+        None,
+        &format!("{function:?}, mismatched: {mismatched}"),
+    )
 }
 
 #[test]
-fn retired_root_keychain_verifiers_check_the_account_before_the_commitment() {
-    // A signature naming another account is rejected before the key's commitment is read: the
-    // same result and the same gas as at T13, where no commitment is read at all.
+fn retired_root_keychain_verifiers_check_in_order() {
+    // Cold reads: the key's commitment, and the keychain slot of its grant.
+    let (read, lookup) = (2600, 2100);
     for function in [Verifier::Keychain, Verifier::KeychainAdmin] {
-        let after = mismatched_account_gas(TempoHardfork::T14, function);
+        // A signature naming another account is rejected before the key's commitment is read:
+        // the same result and the same gas as at T13, where no commitment is read at all.
+        let after = retired_key_check(TempoHardfork::T14, function, true);
         assert!(!after.0, "{function:?}");
         assert_eq!(
             after,
-            mismatched_account_gas(TempoHardfork::T13, function),
+            retired_key_check(TempoHardfork::T13, function, true),
             "{function:?}"
         );
+        // A retired key is rejected before its grant is looked up: the commitment read replaces
+        // the grant lookup that accepts the same signature at T13.
+        let (accepted, before) = retired_key_check(TempoHardfork::T13, function, false);
+        let (rejected, after) = retired_key_check(TempoHardfork::T14, function, false);
+        assert!(accepted && !rejected, "{function:?}");
+        assert_eq!(after + lookup, before + read, "{function:?}");
     }
 }
 
