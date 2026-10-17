@@ -97,7 +97,9 @@ where
     /// was recorded.
     ///
     /// The replay ran on the parent state, so a migration earlier in this block is invisible to
-    /// it, and replay skips the handler check that retires the root key from T14.
+    /// it, and replay skips the handler check that retires the root key from T14. These are the
+    /// only primitive roots a replay can name: [`supports_storage_action_replay`] admits neither a
+    /// keychain signature nor a key authorization.
     fn ensure_root_keys_active(&mut self, tx_env: &TempoTxEnv) -> Result<(), BlockExecutionError> {
         if !self.inner.evm.ctx().cfg.spec.is_t14() {
             return Ok(());
