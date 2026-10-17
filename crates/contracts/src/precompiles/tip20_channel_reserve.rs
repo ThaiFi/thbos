@@ -214,6 +214,8 @@ crate::sol! {
         error ExpiringNonceHashNotSet();
         /// Voucher signature did not recover to the expected signer.
         error InvalidSignature();
+        /// The voucher's expected signer has a retired root key (a configuration commitment).
+        error RootKeyRetired(address account);
         /// Voucher or capture amount exceeds the channel deposit.
         error AmountExceedsDeposit();
         /// Settlement amount must be greater than the current settled amount.
