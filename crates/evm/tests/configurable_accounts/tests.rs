@@ -2891,3 +2891,387 @@ fn retired_root_error_order_and_access_gas() {
         cold
     );
 }
+
+#[derive(Clone, Copy, Debug)]
+enum SigKind {
+    Secp256k1,
+    P256,
+    WebAuthn,
+}
+
+/// One authorization-list entry: the authority is derived from `kind` and `seed`.
+#[derive(Clone, Copy, Debug)]
+struct Entry {
+    kind: SigKind,
+    seed: u8,
+    chain_id: u64,
+    target: Address,
+    nonce: u64,
+}
+
+impl Entry {
+    fn new(kind: SigKind, seed: u8, target: Address, nonce: u64) -> Self {
+        Self {
+            kind,
+            seed,
+            chain_id: 1,
+            target,
+            nonce,
+        }
+    }
+
+    fn authorization(&self) -> Authorization {
+        Authorization {
+            chain_id: U256::from(self.chain_id),
+            address: self.target,
+            nonce: self.nonce,
+        }
+    }
+
+    fn address(&self) -> Address {
+        self.sign().0
+    }
+
+    /// The authority and the entry signed by it with its own key type.
+    fn sign(&self) -> (Address, TempoSignedAuthorization) {
+        use p256::ecdsa::{SigningKey, signature::hazmat::PrehashSigner};
+        use sha2::{Digest, Sha256};
+        use tempo_primitives::transaction::{
+            derive_p256_address,
+            tt_signature::{P256SignatureWithPreHash, WebAuthnSignature, normalize_p256_s},
+        };
+
+        let authorization = self.authorization();
+        let hash = authorization.signature_hash();
+        let (address, signature) = match self.kind {
+            SigKind::Secp256k1 => {
+                let key = signer(self.seed);
+                let signature = key.sign_hash_sync(&hash).unwrap();
+                (key.address(), TempoSignature::from(signature))
+            }
+            SigKind::P256 | SigKind::WebAuthn => {
+                let key = SigningKey::from_slice(&[self.seed; 32]).unwrap();
+                let point = key.verifying_key().to_encoded_point(false);
+                let pub_key_x = B256::from_slice(point.x().unwrap());
+                let pub_key_y = B256::from_slice(point.y().unwrap());
+                let primitive = if matches!(self.kind, SigKind::P256) {
+                    let signature: p256::ecdsa::Signature =
+                        key.sign_prehash(&Sha256::digest(hash)).unwrap();
+                    let bytes = signature.to_bytes();
+                    PrimitiveSignature::P256(P256SignatureWithPreHash {
+                        r: B256::from_slice(&bytes[..32]),
+                        s: normalize_p256_s(&bytes[32..]).unwrap(),
+                        pub_key_x,
+                        pub_key_y,
+                        pre_hash: true,
+                    })
+                } else {
+                    use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+
+                    let mut authenticator_data = vec![0u8; 37];
+                    authenticator_data[..32].copy_from_slice(&[0xAA; 32]);
+                    authenticator_data[32] = 0x01;
+                    let client_data = format!(
+                        r#"{{"type":"webauthn.get","challenge":"{}","origin":"https://tempo.xyz","crossOrigin":false}}"#,
+                        URL_SAFE_NO_PAD.encode(hash)
+                    );
+                    let mut message = Sha256::new();
+                    message.update(&authenticator_data);
+                    message.update(Sha256::digest(client_data.as_bytes()));
+                    let signature: p256::ecdsa::Signature =
+                        key.sign_prehash(&message.finalize()).unwrap();
+                    let bytes = signature.to_bytes();
+                    authenticator_data.extend_from_slice(client_data.as_bytes());
+                    PrimitiveSignature::WebAuthn(WebAuthnSignature {
+                        webauthn_data: authenticator_data.into(),
+                        r: B256::from_slice(&bytes[..32]),
+                        s: normalize_p256_s(&bytes[32..]).unwrap(),
+                        pub_key_x,
+                        pub_key_y,
+                    })
+                };
+                (
+                    derive_p256_address(&pub_key_x, &pub_key_y),
+                    TempoSignature::Primitive(primitive),
+                )
+            }
+        };
+        (
+            address,
+            TempoSignedAuthorization::new_unchecked(authorization, signature),
+        )
+    }
+
+    /// The entry as an EIP-7702 authorization, which only a secp256k1 authority can sign.
+    fn legacy(&self) -> SignedAuthorization {
+        assert!(matches!(self.kind, SigKind::Secp256k1), "{self:?}");
+        let authorization = self.authorization();
+        let signature = signer(self.seed)
+            .sign_hash_sync(&authorization.signature_hash())
+            .unwrap();
+        authorization.into_signed(signature)
+    }
+}
+
+/// A transaction sent by `sender` (nonce 0) that calls `to` and carries `entries`, as an
+/// EIP-7702 transaction or as an AA transaction's `tempo_authorization_list`.
+fn listed_tx(
+    sender: &PrivateKeySigner,
+    aa: bool,
+    to: Address,
+    entries: &[Entry],
+) -> TempoTxEnvelope {
+    if aa {
+        let tx = TempoTransaction {
+            tempo_authorization_list: entries.iter().map(|entry| entry.sign().1).collect(),
+            ..aa_tx(
+                0,
+                vec![Call {
+                    to: TxKind::Call(to),
+                    value: U256::ZERO,
+                    input: Bytes::new(),
+                }],
+            )
+        };
+        let signature = sender.sign_hash_sync(&tx.signature_hash()).unwrap();
+        TempoTxEnvelope::AA(tx.into_signed(signature.into()))
+    } else {
+        let tx = TxEip7702 {
+            chain_id: 1,
+            nonce: 0,
+            gas_limit: 1_000_000,
+            max_fee_per_gas: 0,
+            max_priority_fee_per_gas: 0,
+            to,
+            value: U256::ZERO,
+            access_list: AccessList(Vec::new()),
+            authorization_list: entries.iter().map(Entry::legacy).collect(),
+            input: Bytes::new(),
+        };
+        let signature = sender.sign_hash_sync(&tx.signature_hash()).unwrap();
+        TempoTxEnvelope::Eip7702(tx.into_signed(signature))
+    }
+}
+
+/// Seeds `address` as an existing account without code at `nonce`.
+fn seed_eoa(f: &mut Fixture, address: Address, nonce: u64) {
+    f.evm.db_mut().insert_account(
+        address,
+        AccountInfo {
+            nonce,
+            ..AccountInfo::from_balance(U256::from(1))
+        },
+    );
+}
+
+/// The nonce, the 7702 delegation target (`None` without code) and whether the account's
+/// configuration commitment is set.
+fn account_state(f: &mut Fixture, address: Address) -> (u64, Option<Address>, bool) {
+    let info = f.evm.db_mut().basic(address).unwrap().unwrap_or_default();
+    let delegation = (info.code_hash != KECCAK256_EMPTY).then(|| {
+        let code = info
+            .code
+            .clone()
+            .unwrap_or_else(|| f.evm.db_mut().code_by_hash(info.code_hash).unwrap());
+        let bytes = code.original_bytes();
+        assert_eq!(bytes[..3], [0xef, 0x01, 0x00], "{bytes:?}");
+        Address::from_slice(&bytes[3..])
+    });
+    let retired = !decode_config_commitment(&info.extension, true)
+        .unwrap()
+        .is_zero();
+    (info.nonce, delegation, retired)
+}
+
+/// A call target that touches `account`'s code size: its gas shows whether the account is warm.
+const PROBE: Address = Address::repeat_byte(0x99);
+
+fn probe(f: &mut Fixture, account: Address) {
+    f.install_contract(
+        PROBE,
+        [&[0x73u8][..], account.as_slice(), &[0x3b, 0x50, 0x00]].concat(),
+    );
+}
+
+#[test]
+fn retired_root_authorization_list_entries_skipped() {
+    let target = Address::repeat_byte(0x55);
+    let sender = signer(2);
+    let existing = Entry::new(SigKind::Secp256k1, 7, target, 2);
+    let fresh = Entry::new(SigKind::Secp256k1, 6, target, 0);
+
+    for (aa, kind) in [
+        (false, SigKind::Secp256k1),
+        (true, SigKind::Secp256k1),
+        (true, SigKind::P256),
+        (true, SigKind::WebAuthn),
+    ] {
+        let label = format!("aa {aa}, {kind:?}");
+        let x = Entry::new(kind, 9, target, 5);
+        let mismatched = Entry { nonce: 6, ..x };
+        // Runs the transaction with `entry` for the authority at nonce 5, retired or not.
+        let run = |entry: Entry, retire_x: bool| {
+            let mut f = Fixture::with_parent(false);
+            seed_eoa(&mut f, x.address(), 5);
+            seed_eoa(&mut f, existing.address(), 2);
+            if retire_x {
+                retire(&mut f, x.address());
+            }
+            probe(&mut f, x.address());
+            let tx = listed_tx(&sender, aa, PROBE, &[entry, existing, fresh]);
+            let result = f.run_as(sender.address(), &tx);
+            assert!(result.is_success(), "{label}: {result:?}");
+            (f, result.tx_gas_used())
+        };
+
+        let (mut f, skipped_gas) = run(x, true);
+        // The retired authority is untouched, the other entries applied.
+        assert_eq!(
+            account_state(&mut f, x.address()),
+            (5, None, true),
+            "{label}"
+        );
+        assert_eq!(
+            account_state(&mut f, existing.address()),
+            (3, Some(target), false),
+            "{label}"
+        );
+        assert_eq!(
+            account_state(&mut f, fresh.address()),
+            (1, Some(target), false),
+            "{label}"
+        );
+
+        // Same gas, warming and refunds as an entry revm itself skips for its nonce.
+        let (mut control, mismatched_gas) = run(mismatched, false);
+        assert_eq!(
+            account_state(&mut control, x.address()),
+            (5, None, false),
+            "{label}"
+        );
+        assert_eq!(skipped_gas, mismatched_gas, "{label}");
+
+        // Without the retirement the entry applies. Its gas is the same too: the authorization
+        // refund is disabled since T1, so only the warming above is observable.
+        let (mut applied, applied_gas) = run(x, false);
+        assert_eq!(
+            account_state(&mut applied, x.address()),
+            (6, Some(target), false),
+            "{label}"
+        );
+        assert_eq!(applied_gas, skipped_gas, "{label}");
+    }
+}
+
+#[test]
+fn retired_root_authorization_list_variants() {
+    let target = Address::repeat_byte(0x55);
+    let old_target = Address::repeat_byte(0x44);
+    let sender = signer(2);
+    let fresh = Entry::new(SigKind::Secp256k1, 6, target, 0);
+    let x = Entry::new(SigKind::Secp256k1, 9, target, 5);
+    let address = x.address();
+
+    // (name, the account's seeded nonce and delegation, the entries before `fresh`).
+    let rows: Vec<(&str, u64, Option<Address>, Vec<Entry>)> = vec![
+        // A wildcard chain id is loaded by revm like a matching one.
+        ("chain id 0", 5, None, vec![Entry { chain_id: 0, ..x }]),
+        // An account never used as an EOA (a native account's derived address) at nonce 0.
+        ("nonce 0", 0, None, vec![Entry { nonce: 0, ..x }]),
+        // Neither an authorization to clear nor one to replace removes the delegation.
+        (
+            "clear delegation",
+            5,
+            Some(old_target),
+            vec![Entry {
+                target: Address::ZERO,
+                ..x
+            }],
+        ),
+        (
+            "replace delegation",
+            5,
+            Some(old_target),
+            vec![Entry { target, ..x }],
+        ),
+        // Every entry of the authority is skipped, whatever its nonce.
+        (
+            "repeated",
+            5,
+            None,
+            vec![x, Entry { nonce: 6, ..x }, Entry { nonce: 5, ..x }],
+        ),
+    ];
+    for aa in [false, true] {
+        for (name, nonce, delegation, entries) in &rows {
+            let label = format!("aa {aa}, {name}");
+            let mut f = Fixture::with_parent(false);
+            let mut info = AccountInfo {
+                nonce: *nonce,
+                ..AccountInfo::from_balance(U256::from(1))
+            };
+            if let Some(old) = delegation {
+                info = info.with_code(Bytecode::new_eip7702(*old));
+            }
+            f.evm.db_mut().insert_account(address, info);
+            retire(&mut f, address);
+            let mut entries = entries.clone();
+            entries.push(fresh);
+            let tx = listed_tx(&sender, aa, Address::repeat_byte(0x73), &entries);
+            let result = f.run_as(sender.address(), &tx);
+            assert!(result.is_success(), "{label}: {result:?}");
+            assert_eq!(
+                account_state(&mut f, address),
+                (*nonce, *delegation, true),
+                "{label}"
+            );
+            assert_eq!(
+                account_state(&mut f, fresh.address()),
+                (1, Some(target), false),
+                "{label}"
+            );
+        }
+    }
+}
+
+#[test]
+fn retired_root_address_remains_a_delegation_target() {
+    // G30: only the retired authority is skipped; another EOA may delegate to its address.
+    let sender = signer(2);
+    let x = Entry::new(SigKind::Secp256k1, 9, Address::ZERO, 5).address();
+    let other = Entry::new(SigKind::Secp256k1, 6, x, 0);
+    for aa in [false, true] {
+        let mut f = Fixture::with_parent(false);
+        seed_eoa(&mut f, x, 5);
+        retire(&mut f, x);
+        let tx = listed_tx(&sender, aa, other.address(), &[other]);
+        let result = f.run_as(sender.address(), &tx);
+        assert!(result.is_success(), "aa {aa}: {result:?}");
+        assert_eq!(
+            account_state(&mut f, other.address()),
+            (1, Some(x), false),
+            "aa {aa}"
+        );
+        assert_eq!(account_state(&mut f, x), (5, None, true), "aa {aa}");
+    }
+}
+
+#[test]
+fn retired_root_authorization_list_entries_apply_before_t14() {
+    let target = Address::repeat_byte(0x55);
+    let sender = signer(2);
+    let x = Entry::new(SigKind::Secp256k1, 9, target, 5);
+    for aa in [false, true] {
+        let mut f = Fixture::with_spec(false, TempoHardfork::T13);
+        seed_eoa(&mut f, x.address(), 5);
+        retire(&mut f, x.address());
+        let tx = listed_tx(&sender, aa, Address::repeat_byte(0x73), &[x]);
+        let result = f.run_as(sender.address(), &tx);
+        assert!(result.is_success(), "aa {aa}: {result:?}");
+        assert_eq!(
+            account_state(&mut f, x.address()),
+            (6, Some(target), true),
+            "aa {aa}"
+        );
+    }
+}

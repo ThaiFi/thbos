@@ -189,9 +189,17 @@ impl Fixture {
     where
         TempoTxEnv: FromRecoveredTx<T>,
     {
+        self.run_as(self.account, tx)
+    }
+
+    /// Executes `tx` sent by `sender` and commits its state, whether or not it reverts.
+    fn run_as<T>(&mut self, sender: Address, tx: &T) -> ExecutionResult<HaltReason>
+    where
+        TempoTxEnv: FromRecoveredTx<T>,
+    {
         let output = self
             .evm
-            .transact(TempoTxEnv::from_recovered_tx(tx, self.account))
+            .transact(TempoTxEnv::from_recovered_tx(tx, sender))
             .unwrap();
         self.evm.db_mut().commit(output.state);
         output.result
