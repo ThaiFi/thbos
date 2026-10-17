@@ -305,8 +305,13 @@ use tempo_node::{
     node::{TempoNode, TempoNodeArgs},
     rpc::error::TempoEthApiError,
 };
+use tempo_payload_builder::DEFAULT_BUILD_TIME_MULTIPLIER;
 use tempo_payload_types::{TempoBuiltPayload, TempoPayloadAttributes};
 use tempo_precompiles::{PATH_USD_ADDRESS, TIP20_FACTORY_ADDRESS, tip20::ISSUER_ROLE};
+use tempo_transaction_pool::{
+    tt_2d_pool::DEFAULT_MAX_TXS_PER_LANE,
+    validator::{DEFAULT_AA_VALID_AFTER_MAX_SECS, DEFAULT_MAX_TEMPO_AUTHORIZATIONS},
+};
 
 /// Creates a test TIP20 token with issuer role granted to the caller
 pub(crate) async fn setup_test_token<P>(
@@ -641,8 +646,17 @@ impl TestNodeBuilder {
 
         let parallel = self.parallel_builder;
         let args = TempoNodeArgs {
+            aa_valid_after_max_secs: DEFAULT_AA_VALID_AFTER_MAX_SECS,
+            max_tempo_authorizations: DEFAULT_MAX_TEMPO_AUTHORIZATIONS,
+            max_txs_per_lane: DEFAULT_MAX_TXS_PER_LANE,
+            txpool_filter: None,
+            builder_state_provider_metrics: false,
+            builder_disable_prewarming: false,
+            builder_enable_prewarming: true,
             builder_parallel: parallel,
-            ..Default::default()
+            engine_disable_execution_cache_sharing_with_builder: false,
+            builder_build_time_multiplier: DEFAULT_BUILD_TIME_MULTIPLIER,
+            shadow_replay: None,
         };
         let (node, _wallet) = tempo_test_setup(1, Arc::new(chain_spec))
             .with_node(move |_| TempoNode::new(&args, None))

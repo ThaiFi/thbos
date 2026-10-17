@@ -648,13 +648,24 @@ async fn retired_root_rpc_rejects_send_and_allows_calls() -> eyre::Result<()> {
         let request = TransactionRequest {
             from: Some(account.address),
             to: Some(NATIVE_MULTISIG_ADDRESS.into()),
+            gas_price: None,
+            max_fee_per_gas: None,
+            max_priority_fee_per_gas: None,
+            max_fee_per_blob_gas: None,
+            gas: Some(GAS_LIMIT),
+            value: None,
             input: INativeMultisig::getConfigCommitmentCall {
                 account: account.address,
             }
             .abi_encode()
             .into(),
-            gas: Some(GAS_LIMIT),
-            ..Default::default()
+            nonce: None,
+            chain_id: None,
+            access_list: None,
+            transaction_type: None,
+            blob_versioned_hashes: None,
+            sidecar: None,
+            authorization_list: None,
         };
         let output = env.provider().call(request.clone()).latest().await?;
         assert_eq!(
