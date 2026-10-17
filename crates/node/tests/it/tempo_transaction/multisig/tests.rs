@@ -598,3 +598,74 @@ async fn eoa_migration_rpc_estimate_send_and_rotate() -> eyre::Result<()> {
     }
     Ok(())
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn retired_root_rpc_rejects_send_and_allows_calls() -> eyre::Result<()> {
+    let mut env = environment().await?;
+    for (index, kind) in [
+        SignatureType::Secp256k1,
+        SignatureType::P256,
+        SignatureType::WebAuthn,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let seed = 0x30 + 0x10 * index as u8;
+        let root = OwnerKey::new(seed, kind);
+        let mut account = NativeAccount::migrated(root.address(), seed + 1, 3);
+        env.fund_account(account.address).await?;
+
+        // Before the migration the root key is the account's authority.
+        let tx = account.transaction(&env, vec![noop()]);
+        let signature = TempoSignature::Primitive(root.sign(tx.signature_hash())?);
+        account.submit(&mut env, tx, signature, true).await?;
+
+        let call = account.upgrade_call();
+        let tx = account.transaction(&env, vec![call]);
+        let signature = TempoSignature::Primitive(root.sign(tx.signature_hash())?);
+        account.submit(&mut env, tx, signature, true).await?;
+        assert_eq!(
+            commitment(&env, account.address).await?,
+            account.config.commitment().unwrap()
+        );
+
+        // The root key cannot send any more, whatever the transaction does.
+        let retired = format!(
+            "root key of {} is retired and cannot act as the transaction sender",
+            account.address
+        );
+        let tx = account.transaction(&env, vec![noop()]);
+        let signature = TempoSignature::Primitive(root.sign(tx.signature_hash())?);
+        let error = reject(&env, tx, signature).await?;
+        assert!(error.contains(&retired), "{error}");
+
+        // The witness still can, and the rejected transaction used no nonce.
+        let tx = account.transaction(&env, vec![noop()]);
+        let signature = account.sign(&tx)?;
+        account.submit(&mut env, tx, signature, true).await?;
+
+        // Calls and gas estimates from the retired address are simulations, which stay allowed.
+        let request = TransactionRequest {
+            from: Some(account.address),
+            to: Some(NATIVE_MULTISIG_ADDRESS.into()),
+            input: INativeMultisig::getConfigCommitmentCall {
+                account: account.address,
+            }
+            .abi_encode()
+            .into(),
+            gas: Some(GAS_LIMIT),
+            ..Default::default()
+        };
+        let output = env.provider().call(request.clone()).latest().await?;
+        assert_eq!(
+            output,
+            Bytes::from(
+                INativeMultisig::getConfigCommitmentCall::abi_encode_returns(
+                    &account.config.commitment().unwrap()
+                )
+            )
+        );
+        assert!(env.provider().estimate_gas(request).latest().await? > 0);
+    }
+    Ok(())
+}
