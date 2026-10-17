@@ -64,6 +64,7 @@ pub(crate) fn collect_l2_block_evidence<T, R>(
     transactions: &[T],
     receipts: &[R],
     block: BlockNumHash,
+    default_fee_token: Address,
 ) -> eyre::Result<L2BlockEvidence>
 where
     T: TxHashRef + Transaction,
@@ -125,7 +126,7 @@ where
 
     let mut collector = EventCollector::default();
     for (transaction, receipt) in transactions.iter().zip(receipts) {
-        collector.extract_receipt(transaction, receipt, block.number)?;
+        collector.extract_receipt(transaction, receipt, block.number, default_fee_token)?;
     }
 
     collector.finish(block.number)

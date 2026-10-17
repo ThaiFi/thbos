@@ -22,7 +22,7 @@ use zone_primitives::constants::{
 };
 
 use crate::{
-    ZoneResult,
+    ZoneFeeManager, ZoneResult,
     ecies::{AUTHENTICATED_WITHDRAWAL_ENCRYPTED_SIZE, decode_compressed_public_key},
     storage::{L1State, L1StorageReader},
 };
@@ -184,16 +184,23 @@ impl ZoneOutbox {
         }
 
         let fee = self.calculate_fee_unchecked(call.gasLimit)?;
-        if caller == fee_payer {
-            let total = call
-                .amount
-                .checked_add(fee)
-                .ok_or_else(TempoPrecompileError::under_overflow)?;
-            self.transfer_and_burn(&mut zone_token, caller, total)?;
-        } else {
+        if fee == 0 {
             self.transfer_and_burn(&mut zone_token, caller, call.amount)?;
-            if fee != 0 {
-                self.transfer_and_burn(&mut zone_token, fee_payer, fee)?;
+        } else {
+            let fee_token = ZoneFeeManager::new().default_fee_token()?;
+            if caller == fee_payer && call.token == fee_token {
+                let total = call
+                    .amount
+                    .checked_add(fee)
+                    .ok_or_else(TempoPrecompileError::under_overflow)?;
+                self.transfer_and_burn(&mut zone_token, caller, total)?;
+            } else {
+                let mut fee_token = TIP20Token::from_address(fee_token)?;
+                if !fee_token.is_initialized()? {
+                    return Err(TempoPrecompileError::from(TIP20Error::uninitialized()).into());
+                }
+                self.transfer_and_burn(&mut zone_token, caller, call.amount)?;
+                self.transfer_and_burn(&mut fee_token, fee_payer, fee)?;
             }
         }
 

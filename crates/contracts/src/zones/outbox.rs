@@ -77,6 +77,7 @@ crate::sol! {
         function pendingWithdrawalsCount() external view returns (uint256);
         function getPendingWithdrawals() external view returns (PendingWithdrawal[] memory);
         function consumeFallbackRecipient(uint64 fallbackNonce) external returns (address recipient);
+        /// @notice Returns the fee in the Zone default token captured from the portal at initialization.
         function calculateWithdrawalFee(uint64 gasLimit) external view returns (uint128 fee);
         function MAX_CALLBACK_DATA_SIZE() external view returns (uint256);
         function MAX_WITHDRAWAL_GAS_LIMIT() external view returns (uint64);

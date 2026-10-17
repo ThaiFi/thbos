@@ -4,6 +4,7 @@ use std::{collections::BTreeSet, future::Future, time::Duration};
 
 use alloy_consensus::BlockHeader as _;
 use alloy_eips::BlockNumHash;
+use alloy_primitives::Address;
 use alloy_provider::{DynProvider, Provider as _, ProviderBuilder};
 use alloy_rpc_client::{ConnectionConfig, RpcClient, WebSocketConfig};
 use futures::{StreamExt as _, TryStreamExt as _, future};
@@ -139,6 +140,7 @@ where
         config: &config,
         metrics,
         latency: LatencyTracker::default(),
+        default_fee_token: bootstrap.default_fee_token,
     };
     while let Some(notification) = ctx.notifications.try_next().await? {
         if !matches!(&notification, ExExNotification::ChainCommitted { .. }) {
@@ -285,6 +287,7 @@ struct VerificationContext<'a> {
     config: &'a CheckerConfig,
     metrics: &'a CheckerMetrics,
     latency: LatencyTracker,
+    default_fee_token: Address,
 }
 
 fn record_retry_attempt(
@@ -394,8 +397,13 @@ where
     let (config, metrics) = (context.config, context.metrics);
     let zone = BlockRef::from(block.num_hash());
     let fail = |error| BlockError::Finding { zone, error };
-    let l2 = collect_l2_block_evidence(&block.body().transactions, receipts, zone.into())
-        .map_err(fail)?;
+    let l2 = collect_l2_block_evidence(
+        &block.body().transactions,
+        receipts,
+        zone.into(),
+        context.default_fee_token,
+    )
+    .map_err(fail)?;
     let tempo_parent = BlockNumHash::from(prior.metadata.imported_tempo);
     let mut l1_backoff = Backoff::new();
     let (tempo, tempo_block) = if let Some(anchor) = l2.l1_anchor() {
