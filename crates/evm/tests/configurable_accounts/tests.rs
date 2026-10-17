@@ -1,7 +1,7 @@
 use super::*;
 use alloy_consensus::{Header, SignableTransaction, TxEip1559, TxEip2930, TxEip7702, TxLegacy};
 use alloy_eips::{
-    eip2930::AccessList,
+    eip2930::{AccessList, AccessListItem},
     eip7702::{Authorization, SignedAuthorization},
 };
 use alloy_evm::{FromRecoveredTx, block::BlockExecutor};
@@ -51,10 +51,13 @@ use tempo_primitives::{
     account::encode_config_commitment,
     transaction::{
         AccountSignature, CallScope, KeyAuthorization, KeychainSignature, MULTISIG_CONFIG_DOMAIN,
-        TempoSignedAuthorization, TokenLimit, calc_gas_balance_spending,
+        SignedKeyAuthorization, TempoSignedAuthorization, TokenLimit, calc_gas_balance_spending,
     },
 };
-use tempo_revm::{TempoInvalidTransaction, TempoTxEnv, native_multisig::NativeMultisigError};
+use tempo_revm::{
+    ExecutionContext, TempoInvalidTransaction, TempoTxEnv, error::RootKeyRole,
+    native_multisig::NativeMultisigError,
+};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum GrantOutcome {
@@ -2228,4 +2231,593 @@ fn eoa_migration_inactive_before_t14() {
             nonce + 1
         );
     }
+}
+
+/// Commits a nonzero configuration commitment for `account`, as a migration or a native
+/// registration would, keeping its other fields.
+fn retire(f: &mut Fixture, account: Address) {
+    let info = f
+        .evm
+        .db_mut()
+        .basic(account)
+        .unwrap()
+        .unwrap_or_else(|| AccountInfo::from_balance(U256::ZERO));
+    f.evm.db_mut().insert_account(
+        account,
+        info.with_extension(encode_config_commitment(B256::repeat_byte(0x77))),
+    );
+}
+
+/// Migrates the fixture's account for real, to a configuration owned by `owner`.
+fn migrate(f: &mut Fixture, nonce: u64, owner: Address) -> MultisigConfig {
+    let config = f.upgraded(1, owner_set(vec![owner]));
+    let tx = f.primitive(nonce, vec![Fixture::upgrade(&config)]);
+    let result = f.run(&tx);
+    assert_upgraded(f, &result, &config);
+    config
+}
+
+/// The environment of `tx` sent by `sender`, optionally as a plain RPC simulation request.
+fn env_of<T>(tx: &T, sender: Address, simulation: bool) -> TempoTxEnv
+where
+    TempoTxEnv: FromRecoveredTx<T>,
+{
+    let mut env = TempoTxEnv::from_recovered_tx(tx, sender);
+    if simulation {
+        env.execution_context = ExecutionContext::Simulation;
+    }
+    env
+}
+
+/// The validation error `tx` fails with when sent by `sender`.
+fn rejection<T>(f: &mut Fixture, tx: &T, sender: Address) -> TempoInvalidTransaction
+where
+    TempoTxEnv: FromRecoveredTx<T>,
+{
+    match f.evm.transact(env_of(tx, sender, false)) {
+        Err(EVMError::Transaction(error)) => error,
+        other => panic!("expected a validation error, got {other:?}"),
+    }
+}
+
+fn retired(account: Address, role: RootKeyRole) -> TempoInvalidTransaction {
+    TempoInvalidTransaction::RootKeyRetired { account, role }
+}
+
+/// Signs `tx` as the account's native multisig, with the fixture's current configuration.
+fn multisig_signed(f: &Fixture, tx: TempoTransaction) -> AASigned {
+    let digest = multisig_digest(tx.signature_hash(), f.account, f.config.version);
+    let signature = MultisigSignature::try_new(
+        f.account,
+        f.config.clone(),
+        vec![PrimitiveSignature::Secp256k1(
+            f.owner.sign_hash_sync(&digest).unwrap(),
+        )],
+    )
+    .unwrap();
+    tx.into_signed(TempoSignature::Multisig(signature))
+}
+
+/// `tx` with `payer` as its fee payer, for sender `sender`.
+fn sponsored(
+    mut tx: TempoTransaction,
+    payer: &PrivateKeySigner,
+    sender: Address,
+) -> TempoTransaction {
+    tx.fee_payer_signature = Some(
+        payer
+            .sign_hash_sync(&tx.fee_payer_signature_hash(sender))
+            .unwrap(),
+    );
+    tx
+}
+
+/// `tx` signed by the access key `key` on behalf of `parent`.
+fn keychain_signed(tx: TempoTransaction, key: &PrivateKeySigner, parent: Address) -> AASigned {
+    let signature = key
+        .sign_hash_sync(&KeychainSignature::signing_hash(
+            tx.signature_hash(),
+            parent,
+        ))
+        .unwrap();
+    tx.into_signed(TempoSignature::Keychain(KeychainSignature::new(
+        parent,
+        PrimitiveSignature::Secp256k1(signature),
+    )))
+}
+
+/// A grant of `key` for the account, signed by `signer` (a primitive root or admin key).
+fn grant_by(signer: &PrivateKeySigner, key: Address) -> SignedKeyAuthorization {
+    let grant = KeyAuthorization::unrestricted(1, SignatureType::Secp256k1, key);
+    let signature = signer.sign_hash_sync(&grant.signature_hash()).unwrap();
+    grant.into_signed(signature)
+}
+
+#[test]
+fn retired_root_rejects_sender_signatures() {
+    let other = signer(2).address();
+    // A P256 and a WebAuthn signature are primitive too; only their type reaches validation.
+    let p256 = PrimitiveSignature::from_bytes(&[&[0x01u8][..], &[0x11; 129][..]].concat()).unwrap();
+    let webauthn =
+        PrimitiveSignature::from_bytes(&[&[0x02u8][..], &[0x22; 37 + 20 + 128][..]].concat())
+            .unwrap();
+    for kind in [RootTx::Legacy, RootTx::Eip2930, RootTx::Eip1559, RootTx::Aa] {
+        let mut f = Fixture::with_parent(false);
+        // Before the migration the same signatures are accepted.
+        let tx = root_tx(&f, kind, 3, f.getter());
+        let result = f.run(&tx);
+        assert!(result.is_success(), "{kind:?}: {result:?}");
+        migrate(&mut f, 4, other);
+        let account = f.account;
+
+        let tx = root_tx(&f, kind, 5, f.getter());
+        let error = rejection(&mut f, &tx, account);
+        assert_eq!(error, retired(account, RootKeyRole::Sender), "{kind:?}");
+        assert!(!error.is_bad_transaction(), "{kind:?}");
+        // A repeated migration is a root-signed transaction like any other.
+        let again = f.upgraded(1, owner_set(vec![signer(3).address()]));
+        let tx = root_tx(&f, kind, 5, Fixture::upgrade(&again));
+        assert_eq!(
+            rejection(&mut f, &tx, account),
+            retired(account, RootKeyRole::Sender),
+            "{kind:?}"
+        );
+        assert_eq!(
+            f.commitment(),
+            f.upgraded(1, owner_set(vec![other])).commitment().unwrap()
+        );
+        assert_eq!(f.evm.db_mut().basic(account).unwrap().unwrap().nonce, 5);
+    }
+
+    let mut f = Fixture::with_parent(false);
+    migrate(&mut f, 3, other);
+    let account = f.account;
+    let expected = retired(account, RootKeyRole::Sender);
+    // EIP-7702, a 2D nonce lane, and the other primitive signature types.
+    let tx = type4(
+        &f,
+        4,
+        other,
+        Bytes::new(),
+        vec![authorization(&f.owner, other, 5)],
+    );
+    assert_eq!(rejection(&mut f, &tx, account), expected);
+    let lane = TempoTransaction {
+        nonce_key: U256::ONE,
+        ..aa_tx(0, vec![f.getter()])
+    };
+    let tx = f.sign_primitive(lane.clone());
+    assert_eq!(rejection(&mut f, &tx, account), expected);
+    for signature in [p256, webauthn] {
+        let tx = aa_tx(4, vec![f.getter()]).into_signed(TempoSignature::Primitive(signature));
+        assert_eq!(rejection(&mut f, &tx, account), expected);
+    }
+
+    // A plain RPC simulation does not check the sender.
+    let tx = f.primitive(4, vec![f.getter()]);
+    let output = f.evm.transact(env_of(&tx, account, true)).unwrap();
+    assert!(output.result.is_success(), "{:?}", output.result);
+
+    // The retirement starts at T14: the same state is accepted before it.
+    let mut before = Fixture::with_spec(false, TempoHardfork::T13);
+    let account = before.account;
+    retire(&mut before, account);
+    let tx = before.primitive(3, vec![before.getter()]);
+    let result = before.run(&tx);
+    assert!(result.is_success(), "{result:?}");
+}
+
+#[test]
+fn retired_root_rejects_delegated_roles() {
+    let new_key = signer(7);
+    let other = signer(2).address();
+
+    // G22 (a): the bootstrap flow, a root-signed grant used by the new key in the same
+    // transaction, is accepted before the migration and rejected after it.
+    for migrated in [false, true] {
+        let mut f = Fixture::with_parent(false);
+        if migrated {
+            migrate(&mut f, 3, other);
+        }
+        let nonce = if migrated { 4 } else { 3 };
+        let account = f.account;
+        let tx = TempoTransaction {
+            key_authorization: Some(grant_by(&f.owner, new_key.address())),
+            ..aa_tx(nonce, vec![f.getter()])
+        };
+        let tx = keychain_signed(tx, &new_key, account);
+        if migrated {
+            assert_eq!(
+                rejection(&mut f, &tx, account),
+                retired(account, RootKeyRole::KeyAuthorizationSigner)
+            );
+        } else {
+            let result = f.run(&tx);
+            assert!(result.is_success(), "{result:?}");
+        }
+    }
+
+    // G22 (b): a native transaction of the migrated account may not carry a grant signed by its
+    // retired root; the multisig-signed grant is accepted (see the guard test).
+    let mut f = Fixture::with_parent(false);
+    let root = f.owner.address();
+    f.config = migrate(&mut f, 3, root);
+    let account = f.account;
+    let tx = TempoTransaction {
+        key_authorization: Some(grant_by(&f.owner, new_key.address())),
+        ..aa_tx(4, vec![f.getter()])
+    };
+    let tx = multisig_signed(&f, tx);
+    assert_eq!(
+        rejection(&mut f, &tx, account),
+        retired(account, RootKeyRole::KeyAuthorizationSigner)
+    );
+
+    // G22 (c) and G21: an admin access key that migrated can neither sign a grant nor sign
+    // transactions; its parent is not affected.
+    let mut f = Fixture::with_parent(false);
+    let admin = signer(4);
+    grant_key(&mut f, 3, &admin, true, 0);
+    let account = f.account;
+    let admin_grant = |f: &Fixture| {
+        let grant = KeyAuthorization::unrestricted(1, SignatureType::Secp256k1, new_key.address())
+            .with_account(f.account);
+        let signature = admin.sign_hash_sync(&grant.signature_hash()).unwrap();
+        grant.into_signed(signature)
+    };
+    let tx = TempoTransaction {
+        key_authorization: Some(admin_grant(&f)),
+        ..aa_tx(4, vec![f.getter()])
+    };
+    let tx = keychain_signed(tx, &admin, account);
+    // Control: the admin key still works while it has no commitment.
+    let output = f.evm.transact(env_of(&tx, account, false)).unwrap();
+    assert!(output.result.is_success(), "{:?}", output.result);
+    retire(&mut f, admin.address());
+    assert_eq!(
+        rejection(&mut f, &tx, account),
+        retired(admin.address(), RootKeyRole::KeyAuthorizationSigner)
+    );
+    let tx = keychain_signed(aa_tx(4, vec![f.getter()]), &admin, account);
+    assert_eq!(
+        rejection(&mut f, &tx, account),
+        retired(admin.address(), RootKeyRole::AccessKey)
+    );
+
+    // G20: a sponsor that migrates after signing can no longer pay, even for a transaction
+    // it signed earlier.
+    let mut f = Fixture::with_parent(false);
+    let sponsor = signer(5);
+    let account = f.account;
+    let tx = sponsored(aa_tx(3, vec![f.getter()]), &sponsor, account);
+    let tx = f.sign_primitive(tx);
+    let output = f.evm.transact(env_of(&tx, account, false)).unwrap();
+    assert!(output.result.is_success(), "{:?}", output.result);
+    retire(&mut f, sponsor.address());
+    assert_eq!(
+        rejection(&mut f, &tx, account),
+        retired(sponsor.address(), RootKeyRole::FeePayer)
+    );
+    // Simulation checks every role but the sender.
+    let error = f.evm.transact(env_of(&tx, account, true)).unwrap_err();
+    assert!(
+        matches!(
+            error,
+            EVMError::Transaction(ref error)
+                if *error == retired(sponsor.address(), RootKeyRole::FeePayer)
+        ),
+        "{error:?}"
+    );
+
+    // G21, G47 and G49: the treasury granted the primitive key B, then B migrates.
+    let mut f = Fixture::with_parent(false);
+    let key = signer(6);
+    grant_key(&mut f, 3, &key, false, 0);
+    let account = f.account;
+    let tx = keychain_tx(&f, &key, 4, vec![f.getter()]);
+    let output = f.evm.transact(env_of(&tx, account, false)).unwrap();
+    assert!(output.result.is_success(), "{:?}", output.result);
+    retire(&mut f, key.address());
+    let expected = retired(key.address(), RootKeyRole::AccessKey);
+    assert_eq!(rejection(&mut f, &tx, account), expected);
+    // Simulation replaces the recovered key ID with the request's override.
+    let mut env = env_of(&tx, account, true);
+    env.tempo_tx_env.as_mut().unwrap().override_key_id = Some(key.address());
+    let error = f.evm.transact(env).unwrap_err();
+    assert!(
+        matches!(error, EVMError::Transaction(ref error) if *error == expected),
+        "{error:?}"
+    );
+    // The treasury cannot register the retired key ID again: the grant is rejected as a reuse.
+    let regrant = f.sign_primitive(TempoTransaction {
+        key_authorization: Some(grant_by(&f.owner, key.address())),
+        ..aa_tx(4, vec![f.getter()])
+    });
+    assert!(matches!(
+        rejection(&mut f, &regrant, account),
+        TempoInvalidTransaction::KeychainPrecompileError { .. }
+    ));
+}
+
+#[test]
+fn retired_root_keeps_owner_parent_and_sender_authority() {
+    // G23: what stays valid for a migrated account X.
+    let mut f = Fixture::with_parent(false);
+    let old_key = signer(2);
+    grant_key(&mut f, 3, &old_key, false, 0);
+    // X lists its retired root as the owner of its new configuration (G24).
+    let root = f.owner.address();
+    f.config = migrate(&mut f, 4, root);
+    let account = f.account;
+    fund(&mut f, account, 50_000_000);
+    let transfer = Call {
+        to: TxKind::Call(PATH_USD_ADDRESS),
+        value: U256::ZERO,
+        input: ITIP20::transferCall {
+            to: Address::repeat_byte(0x66),
+            amount: U256::from(10),
+        }
+        .abi_encode()
+        .into(),
+    };
+    let revoke = Call {
+        to: TxKind::Call(ACCOUNT_KEYCHAIN_ADDRESS),
+        value: U256::ZERO,
+        input: IAccountKeychain::revokeKeyCall {
+            keyId: old_key.address(),
+        }
+        .abi_encode()
+        .into(),
+    };
+
+    // X's old uncommitted access key still signs for X.
+    let tx = keychain_tx(&f, &old_key, 5, vec![f.getter()]);
+    let result = f.run(&tx);
+    assert!(result.is_success(), "{result:?}");
+
+    // X pays its own fees in a multisig transaction, and its calls authenticate as X.
+    let before = balance(&mut f, account);
+    let tx = multisig_signed(
+        &f,
+        TempoTransaction {
+            max_fee_per_gas: 1,
+            max_priority_fee_per_gas: 1,
+            fee_token: Some(PATH_USD_ADDRESS),
+            ..aa_tx(6, vec![transfer.clone()])
+        },
+    );
+    let result = f.run(&tx);
+    assert!(result.is_success(), "{result:?}");
+    let fee = calc_gas_balance_spending(result.tx_gas_used(), 1);
+    assert!(fee > U256::ZERO);
+    assert_eq!(
+        balance(&mut f, account),
+        before - fee - U256::from(10),
+        "the transfer and the fee both come from X"
+    );
+    // Root-level keychain administration (no access key) is still X's to use.
+    let tx = multisig_signed(&f, aa_tx(7, vec![revoke]));
+    let result = f.run(&tx);
+    assert!(result.is_success(), "{result:?}");
+    let tx = keychain_tx(&f, &old_key, 8, vec![f.getter()]);
+    // The revocation took effect: the keychain, not the retirement, now rejects the key.
+    assert!(matches!(
+        rejection(&mut f, &tx, account),
+        TempoInvalidTransaction::KeychainValidationFailed { .. }
+    ));
+
+    // A multisig-signed grant is accepted: the grant's signature is not a primitive root.
+    let grant = KeyAuthorization::unrestricted(1, SignatureType::Secp256k1, signer(8).address());
+    let grant_signature = AccountSignature::Multisig(
+        MultisigSignature::try_new(
+            account,
+            f.config.clone(),
+            vec![PrimitiveSignature::Secp256k1(
+                f.owner
+                    .sign_hash_sync(&multisig_digest(
+                        grant.signature_hash(),
+                        account,
+                        f.config.version,
+                    ))
+                    .unwrap(),
+            )],
+        )
+        .unwrap(),
+    );
+    let tx = multisig_signed(
+        &f,
+        TempoTransaction {
+            key_authorization: Some(grant.into_signed(grant_signature)),
+            ..aa_tx(8, vec![f.getter()])
+        },
+    );
+    let result = f.run(&tx);
+    assert!(result.is_success(), "{result:?}");
+
+    // G24: another multisig M that lists the retired X accepts X's approval.
+    let mut m = Fixture::new();
+    let owner = m.owner.address();
+    retire(&mut m, owner);
+    let tx = m.signed(3, vec![m.getter()]);
+    let result = m.run(&tx);
+    assert!(result.is_success(), "{result:?}");
+}
+
+/// Gas used by `tx` at `spec` on a fresh unmigrated fixture with the access key `key` granted.
+fn gas_at(
+    spec: TempoHardfork,
+    key: &PrivateKeySigner,
+    tx: impl FnOnce(&Fixture) -> AASigned,
+) -> u64 {
+    let mut f = Fixture::with_spec(false, spec);
+    grant_key(&mut f, 3, key, false, 0);
+    let tx = tx(&f);
+    let result = f.run(&tx);
+    assert!(result.is_success(), "{spec:?}: {result:?}");
+    // Before the minimum-gas floor, which hides small differences.
+    result.gas().total_gas_spent()
+}
+
+#[test]
+fn retired_root_error_order_and_access_gas() {
+    let (signer_s, payer, key) = (signer(4), signer(5), signer(6));
+    let mut f = Fixture::with_parent(false);
+    let account = f.account;
+    // Every role names a retired account: the sender, the grant signer, the fee payer, and the
+    // access key.
+    for address in [account, signer_s.address(), payer.address(), key.address()] {
+        retire(&mut f, address);
+    }
+    let target = signer(7).address();
+    // A root-signed grant for a root-signed transaction; an admin-signed grant must travel with
+    // its own admin key.
+    let root_grant = grant_by(&f.owner, target);
+    let admin_grant = {
+        let grant = KeyAuthorization::unrestricted(1, SignatureType::Secp256k1, target)
+            .with_account(account);
+        let signature = signer_s.sign_hash_sync(&grant.signature_hash()).unwrap();
+        grant.into_signed(signature)
+    };
+    let sponsor = |tx: TempoTransaction| sponsored(tx, &payer, account);
+
+    // Sender, then key authorization signer, then fee payer, then access key.
+    let tx = f.sign_primitive(sponsor(TempoTransaction {
+        key_authorization: Some(root_grant.clone()),
+        ..aa_tx(3, vec![f.getter()])
+    }));
+    assert_eq!(
+        rejection(&mut f, &tx, account),
+        retired(account, RootKeyRole::Sender)
+    );
+    let tx = keychain_signed(
+        sponsor(TempoTransaction {
+            key_authorization: Some(admin_grant.clone()),
+            ..aa_tx(3, vec![f.getter()])
+        }),
+        &signer_s,
+        account,
+    );
+    assert_eq!(
+        rejection(&mut f, &tx, account),
+        retired(signer_s.address(), RootKeyRole::KeyAuthorizationSigner)
+    );
+    let tx = keychain_signed(sponsor(aa_tx(3, vec![f.getter()])), &key, account);
+    assert_eq!(
+        rejection(&mut f, &tx, account),
+        retired(payer.address(), RootKeyRole::FeePayer)
+    );
+    let tx = keychain_signed(aa_tx(3, vec![f.getter()]), &key, account);
+    assert_eq!(
+        rejection(&mut f, &tx, account),
+        retired(key.address(), RootKeyRole::AccessKey)
+    );
+
+    // Request validation comes first: the sponsor may not be the sender.
+    let tx = f.sign_primitive(sponsored(aa_tx(3, vec![f.getter()]), &f.owner, account));
+    assert_eq!(
+        rejection(&mut f, &tx, account),
+        TempoInvalidTransaction::SelfSponsoredFeePayer
+    );
+    // Native role errors come next: the stored commitment is not the witness's configuration.
+    let witness_owner = signer(2);
+    let witness_config = f.upgraded(1, owner_set(vec![witness_owner.address()]));
+    let native_tx = TempoTransaction {
+        key_authorization: Some(root_grant),
+        ..aa_tx(3, vec![f.getter()])
+    };
+    let digest = multisig_digest(native_tx.signature_hash(), account, witness_config.version);
+    let witness = MultisigSignature::try_new(
+        account,
+        witness_config,
+        vec![PrimitiveSignature::Secp256k1(
+            witness_owner.sign_hash_sync(&digest).unwrap(),
+        )],
+    )
+    .unwrap();
+    let tx = native_tx.into_signed(TempoSignature::Multisig(witness));
+    assert!(matches!(
+        rejection(&mut f, &tx, account),
+        TempoInvalidTransaction::NativeMultisig(
+            NativeMultisigError::ConfigurationCommitmentMismatch { .. }
+        )
+    ));
+    // Nonce, intrinsic gas and balance errors come after, with or without a commitment.
+    let mut fresh = Fixture::with_parent(false);
+    for (label, edit) in [
+        (
+            "nonce",
+            (|tx: &mut TempoTransaction| tx.nonce = 99) as fn(&mut TempoTransaction),
+        ),
+        ("intrinsic gas", |tx| tx.gas_limit = 1),
+        ("balance", |tx| {
+            tx.max_fee_per_gas = 1_000_000_000_000;
+            tx.fee_token = Some(PATH_USD_ADDRESS);
+        }),
+    ] {
+        let mut tx = aa_tx(3, vec![f.getter()]);
+        edit(&mut tx);
+        let signed = f.sign_primitive(tx);
+        assert_eq!(
+            rejection(&mut f, &signed, account),
+            retired(account, RootKeyRole::Sender),
+            "{label}"
+        );
+        let other = rejection(&mut fresh, &signed, account);
+        assert!(
+            !matches!(other, TempoInvalidTransaction::RootKeyRetired { .. }),
+            "{label}: {other:?}"
+        );
+    }
+
+    // Gas: each distinct non-caller role account is charged one account access from T14.
+    let params = tempo_gas_params(TempoHardfork::T14);
+    let warm = params.warm_storage_read_cost();
+    let cold = warm + params.cold_account_additional_cost();
+    let other = signer(8);
+    let delta = |tx: &dyn Fn(&Fixture) -> AASigned| {
+        gas_at(TempoHardfork::T14, &key, tx) - gas_at(TempoHardfork::T13, &key, tx)
+    };
+    let listed = AccessList(vec![AccessListItem {
+        address: payer.address(),
+        storage_keys: Vec::new(),
+    }]);
+    // T14 prices every transaction a little differently, with or without role checks; the
+    // role charges are measured on top of a plain transaction.
+    let base = delta(&|f| f.primitive(4, vec![f.getter()]));
+    // The caller is free, even as the grant signer.
+    let grant_tx = |f: &Fixture| {
+        let grant = KeyAuthorization::unrestricted(1, SignatureType::Secp256k1, other.address());
+        let signature = f.owner.sign_hash_sync(&grant.signature_hash()).unwrap();
+        f.sign_primitive(TempoTransaction {
+            key_authorization: Some(grant.into_signed(signature)),
+            ..aa_tx(4, vec![f.getter()])
+        })
+    };
+    assert_eq!(delta(&grant_tx), base);
+    // A cold fee payer costs a cold access, an access-listed one a warm access.
+    let paid = |f: &Fixture, payer: &PrivateKeySigner, list: &AccessList| {
+        f.sign_primitive(sponsored(
+            TempoTransaction {
+                access_list: list.clone(),
+                ..aa_tx(4, vec![f.getter()])
+            },
+            payer,
+            f.account,
+        ))
+    };
+    assert_eq!(
+        delta(&|f| paid(f, &payer, &AccessList(Vec::new()))),
+        base + cold
+    );
+    assert_eq!(delta(&|f| paid(f, &payer, &listed)), base + warm);
+    // The access key and the fee payer are one account here: one access, not two.
+    let keyed = |f: &Fixture, payer: &PrivateKeySigner| {
+        keychain_signed(
+            sponsored(aa_tx(4, vec![f.getter()]), payer, f.account),
+            &key,
+            f.account,
+        )
+    };
+    assert_eq!(delta(&|f| keyed(f, &key)), base + cold);
+    assert_eq!(delta(&|f| keyed(f, &payer)), base + 2 * cold);
 }
