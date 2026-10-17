@@ -13,6 +13,7 @@ use reth_tasks::{TaskExecutor, WorkerPool};
 use reth_transaction_pool::{
     BestTransactions, PoolTransaction, error::InvalidPoolTransactionError,
 };
+use tempo_chainspec::TempoHardfork;
 use tempo_evm::{
     ExpiringNonceReplay, StorageActionReplay, TempoEvmConfig, evm::TempoEvm,
     supports_storage_action_replay,
@@ -186,7 +187,7 @@ impl BestTransactionsPrewarming {
         Provider: StateProviderFactory + Clone + 'static,
     {
         let replay = WorkerPool::with_worker_mut(|worker| {
-            if prewarm.parallel && !is_parallel_candidate(&tx) {
+            if prewarm.parallel && !is_parallel_candidate(&tx, prewarm.evm_env.cfg_env.spec) {
                 return None;
             }
 
@@ -491,8 +492,8 @@ fn is_invalidated_buffered_transaction(
     }
 }
 
-/// Returns true if the transaction is a candidate for parallel prewarming.
-fn is_parallel_candidate(tx: &BestTransaction) -> bool {
+/// Returns true if the transaction is a candidate for parallel prewarming in a block at `spec`.
+fn is_parallel_candidate(tx: &BestTransaction, spec: TempoHardfork) -> bool {
     // Payment lane transactions
     tx.transaction.is_payment()
         // 2D or expiring nonces, no protocol nonces
@@ -501,7 +502,7 @@ fn is_parallel_candidate(tx: &BestTransaction) -> bool {
             .nonce_key_ref()
             .is_some_and(|nonce_key| !nonce_key.is_zero())
         // No configurable-account roles or keychain/multisig calls that replay cannot reproduce
-        && supports_storage_action_replay(tx.transaction.inner())
+        && supports_storage_action_replay(tx.transaction.inner(), spec)
 }
 
 #[cfg(test)]
@@ -664,7 +665,7 @@ mod tests {
     fn inline_grants_disable_parallel_replay() {
         let sender = Address::repeat_byte(0x11);
         let payment = test_payment_tx(sender, 500_000);
-        assert!(is_parallel_candidate(&payment));
+        assert!(is_parallel_candidate(&payment, TempoHardfork::T14));
         for key_type in [SignatureType::Secp256k1, SignatureType::Multisig] {
             let mut tx = payment.transaction.inner().as_aa().unwrap().tx().clone();
             tx.key_authorization = Some(
@@ -685,7 +686,7 @@ mod tests {
                 "grant must reach the replay classifier"
             );
             assert!(
-                !is_parallel_candidate(&Arc::new(candidate)),
+                !is_parallel_candidate(&Arc::new(candidate), TempoHardfork::T14),
                 "inline {key_type:?} grant must execute through the handler"
             );
         }

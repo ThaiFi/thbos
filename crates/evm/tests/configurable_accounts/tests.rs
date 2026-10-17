@@ -646,12 +646,15 @@ fn native_replay_rejects_account_authorization() {
     let mut f = Fixture::new();
     let signed = f.signed(3, vec![f.getter()]);
     let native: TempoTxEnvelope = signed.clone().into();
-    assert!(!supports_storage_action_replay(&native));
+    assert!(!supports_storage_action_replay(&native, TempoHardfork::T14));
     let primitive = TempoSignature::from(Signature::test_signature());
     let mut ordinary_tx = signed.tx().clone();
     ordinary_tx.calls[0].to = TxKind::Call(PATH_USD_ADDRESS);
     let ordinary: TempoTxEnvelope = ordinary_tx.clone().into_signed(primitive.clone()).into();
-    assert!(supports_storage_action_replay(&ordinary));
+    assert!(supports_storage_action_replay(
+        &ordinary,
+        TempoHardfork::T14
+    ));
     let mut rejected = vec![native];
     for target in [ACCOUNT_KEYCHAIN_ADDRESS, NATIVE_MULTISIG_ADDRESS] {
         for index in 0..2 {
@@ -659,7 +662,10 @@ fn native_replay_rejects_account_authorization() {
             tx.calls.push(tx.calls[0].clone());
             tx.calls[index].to = TxKind::Call(target);
             let envelope = tx.into_signed(primitive.clone()).into();
-            assert!(!supports_storage_action_replay(&envelope));
+            assert!(!supports_storage_action_replay(
+                &envelope,
+                TempoHardfork::T14
+            ));
             rejected.push(envelope);
         }
     }
@@ -673,7 +679,10 @@ fn native_replay_rejects_account_authorization() {
     .abi_encode()
     .into();
     let verifier: TempoTxEnvelope = verifier_tx.into_signed(primitive.clone()).into();
-    assert!(!supports_storage_action_replay(&verifier));
+    assert!(!supports_storage_action_replay(
+        &verifier,
+        TempoHardfork::T14
+    ));
     rejected.push(verifier);
     let mut pure_verifier = ordinary_tx.clone();
     pure_verifier.calls[0].to = TxKind::Call(SIGNATURE_VERIFIER_ADDRESS);
@@ -685,7 +694,8 @@ fn native_replay_rejects_account_authorization() {
     .abi_encode()
     .into();
     assert!(supports_storage_action_replay(
-        &pure_verifier.into_signed(primitive.clone()).into()
+        &pure_verifier.into_signed(primitive.clone()).into(),
+        TempoHardfork::T14
     ));
     let mut tx = ordinary_tx;
     tx.key_authorization = Some(
@@ -693,13 +703,15 @@ fn native_replay_rejects_account_authorization() {
             .into_signed(signed.signature().as_multisig().unwrap().clone()),
     );
     assert!(!supports_storage_action_replay(
-        &tx.clone().into_signed(primitive.clone()).into()
+        &tx.clone().into_signed(primitive.clone()).into(),
+        TempoHardfork::T14
     ));
     // Even a primitive-signed primitive grant reads parent metadata at T14.
     tx.key_authorization.as_mut().unwrap().signature =
         AccountSignature::try_from(primitive.clone()).unwrap();
     assert!(!supports_storage_action_replay(
-        &tx.into_signed(primitive).into()
+        &tx.into_signed(primitive).into(),
+        TempoHardfork::T14
     ));
     let output = f
         .evm
@@ -974,7 +986,10 @@ fn native_signed_parent_delegate_case(outcome: GrantOutcome, gas_price: u128) {
                     )))
             };
             let signed = sign(&tx);
-            assert!(!supports_storage_action_replay(&signed.clone().into()));
+            assert!(!supports_storage_action_replay(
+                &signed.clone().into(),
+                TempoHardfork::T14
+            ));
             let output = f
                 .evm
                 .transact(TempoTxEnv::from_recovered_tx(&signed, parent))

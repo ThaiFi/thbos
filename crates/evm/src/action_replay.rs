@@ -17,7 +17,11 @@ use reth_revm::{
     context::result::{ExecutionResult, HaltReason},
     state::{Account, EvmState, EvmStorageSlot, TransactionId},
 };
-use tempo_contracts::precompiles::{ISignatureVerifier, SIGNATURE_VERIFIER_ADDRESS};
+use tempo_chainspec::TempoHardfork;
+use tempo_contracts::precompiles::{
+    ISignatureVerifier, ITIP20ChannelReserve, SIGNATURE_VERIFIER_ADDRESS,
+    TIP20_CHANNEL_RESERVE_ADDRESS,
+};
 use tempo_precompiles::{
     ACCOUNT_KEYCHAIN_ADDRESS, NATIVE_MULTISIG_ADDRESS, NONCE_PRECOMPILE_ADDRESS,
     nonce::NonceManager,
@@ -41,7 +45,7 @@ where
         result_closure: impl FnOnce(&TempoTxResult),
     ) -> Result<(), BlockExecutionError> {
         let (tx_env, recovered) = tx.into_parts();
-        if !supports_storage_action_replay(recovered.tx()) {
+        if !supports_storage_action_replay(recovered.tx(), self.inner.evm.ctx().cfg.spec) {
             return Err(StorageActionReplayError::UnsupportedAuthorization.into());
         }
         self.ensure_root_keys_active(&tx_env)?;
@@ -641,7 +645,11 @@ impl ExpiringNonceReplayState {
 /// `AccountKeychain`, `NativeMultisig`, or `verifyMultisig` must execute through the handler.
 /// These exclusions apply even before T14; this only disables the
 /// replay optimization, not historical transaction execution.
-pub fn supports_storage_action_replay(tx: &TempoTxEnvelope) -> bool {
+///
+/// From T14, `TIP20ChannelReserve` `settle` and `close` are excluded too: their voucher signer's
+/// commitment must be read at the transaction's position in the block (TIP-1112), and a replay
+/// that skips the handler or errors would drop the transaction instead of including it reverted.
+pub fn supports_storage_action_replay(tx: &TempoTxEnvelope, spec: TempoHardfork) -> bool {
     tx.as_aa().is_none_or(|aa| {
         matches!(aa.signature(), TempoSignature::Primitive(_))
             && aa.tx().key_authorization.is_none()
@@ -651,6 +659,10 @@ pub fn supports_storage_action_replay(tx: &TempoTxEnvelope) -> bool {
             TxKind::Call(ACCOUNT_KEYCHAIN_ADDRESS | NATIVE_MULTISIG_ADDRESS)
         ) || (to == TxKind::Call(SIGNATURE_VERIFIER_ADDRESS)
             && input.starts_with(&ISignatureVerifier::verifyMultisigCall::SELECTOR))
+            || (spec.is_t14()
+                && to == TxKind::Call(TIP20_CHANNEL_RESERVE_ADDRESS)
+                && (input.starts_with(&ITIP20ChannelReserve::settleCall::SELECTOR)
+                    || input.starts_with(&ITIP20ChannelReserve::closeCall::SELECTOR)))
     })
 }
 
