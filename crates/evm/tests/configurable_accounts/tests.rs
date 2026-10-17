@@ -7,6 +7,8 @@ use alloy_eips::{
 use alloy_evm::{FromRecoveredTx, block::BlockExecutor};
 use alloy_primitives::{Bytes, KECCAK256_EMPTY, LogData, Signature, bytes, keccak256};
 use alloy_sol_types::{SolError, SolEvent};
+use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+use p256::ecdsa::{SigningKey, signature::hazmat::PrehashSigner};
 use reth_chainspec::EthChainSpec;
 use reth_ethereum_primitives::Block as EthereumBlock;
 use reth_evm::ConfigureEvm;
@@ -30,6 +32,7 @@ use revm::{
     state::EvmStorageSlot,
 };
 use serde_json::json;
+use sha2::{Digest, Sha256};
 use std::sync::Arc;
 use tempo_chainspec::{
     TempoChainSpec,
@@ -52,6 +55,8 @@ use tempo_primitives::{
     transaction::{
         AccountSignature, CallScope, KeyAuthorization, KeychainSignature, MULTISIG_CONFIG_DOMAIN,
         SignedKeyAuthorization, TempoSignedAuthorization, TokenLimit, calc_gas_balance_spending,
+        derive_p256_address,
+        tt_signature::{P256SignatureWithPreHash, WebAuthnSignature, normalize_p256_s},
     },
 };
 use tempo_revm::{
@@ -2934,13 +2939,6 @@ impl Entry {
 
     /// The authority and the entry signed by it with its own key type.
     fn sign(&self) -> (Address, TempoSignedAuthorization) {
-        use p256::ecdsa::{SigningKey, signature::hazmat::PrehashSigner};
-        use sha2::{Digest, Sha256};
-        use tempo_primitives::transaction::{
-            derive_p256_address,
-            tt_signature::{P256SignatureWithPreHash, WebAuthnSignature, normalize_p256_s},
-        };
-
         let authorization = self.authorization();
         let hash = authorization.signature_hash();
         let (address, signature) = match self.kind {
@@ -2966,8 +2964,6 @@ impl Entry {
                         pre_hash: true,
                     })
                 } else {
-                    use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
-
                     let mut authenticator_data = vec![0u8; 37];
                     authenticator_data[..32].copy_from_slice(&[0xAA; 32]);
                     authenticator_data[32] = 0x01;
@@ -3067,7 +3063,12 @@ fn seed_eoa(f: &mut Fixture, address: Address, nonce: u64) {
 /// The nonce, the 7702 delegation target (`None` without code) and whether the account's
 /// configuration commitment is set.
 fn account_state(f: &mut Fixture, address: Address) -> (u64, Option<Address>, bool) {
-    let info = f.evm.db_mut().basic(address).unwrap().unwrap_or_default();
+    let info = f
+        .evm
+        .db_mut()
+        .basic(address)
+        .unwrap()
+        .unwrap_or_else(|| AccountInfo::from_balance(U256::ZERO));
     let delegation = (info.code_hash != KECCAK256_EMPTY).then(|| {
         let code = info
             .code
@@ -3176,7 +3177,7 @@ fn retired_root_authorization_list_variants() {
     let rows: Vec<(&str, u64, Option<Address>, Vec<Entry>)> = vec![
         // A wildcard chain id is loaded by revm like a matching one.
         ("chain id 0", 5, None, vec![Entry { chain_id: 0, ..x }]),
-        // An account never used as an EOA (a native account's derived address) at nonce 0.
+        // An EOA migrated on a 2D nonce lane keeps protocol nonce 0, where its entry would apply.
         ("nonce 0", 0, None, vec![Entry { nonce: 0, ..x }]),
         // Neither an authorization to clear nor one to replace removes the delegation.
         (
