@@ -128,10 +128,17 @@ fn native_registration_charges_empty_sender_creation_once() {
             .config();
         let proof_and_write = initial_account_proof_gas(config) + 20_000;
         let creates_account = nonce_key == TEMPO_EXPIRING_NONCE_KEY && !funded;
+        // The fee payer is a role account, charged one cold access.
+        let fee_payer_access = if nonce_key == TEMPO_EXPIRING_NONCE_KEY {
+            gas_params.warm_storage_read_cost() + gas_params.cold_account_additional_cost()
+        } else {
+            0
+        };
         let actual = test.validate_initial_tx_gas();
         assert_eq!(
             actual.initial_regular_gas() - base.initial_regular_gas(),
             proof_and_write
+                + fee_payer_access
                 + if creates_account {
                     gas_params.get(GasId::new_account_cost())
                 } else {

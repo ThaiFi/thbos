@@ -1,4 +1,5 @@
 use super::*;
+use crate::error::RootKeyRole;
 use alloy_eips::eip2930::AccessList;
 use alloy_evm::FromRecoveredTx;
 use alloy_signer::SignerSync;
@@ -265,8 +266,8 @@ fn native_grant_type_is_gated_in_handler(spec: TempoHardfork) {
 #[test_case::test_case(GrantCase::PrimitiveGrantAndUse; "committed_keychain_parent")]
 fn native_handler_rejects_account_code(case: GrantCase) {
     let fixture = NativeAccessFixture::new();
-    // The positive committed-parent control also proves T14 retains primitive
-    // root authority; only adding account code changes the expected outcome.
+    // A committed parent no longer signs a grant with its primitive root key (TIP-1112), and
+    // account code is rejected before that.
     for code in [
         None,
         Some(Bytecode::new_legacy(Bytes::from_static(&[0x00]))),
@@ -298,6 +299,17 @@ fn native_handler_rejects_account_code(case: GrantCase) {
                     Err(EVMError::Transaction(TempoInvalidTransaction::NativeMultisig(
                         NativeMultisigError::InvalidAccount { account: actual }
                     ))) if actual == account
+                ),
+                "{case:?}: {result:?}"
+            );
+        } else if matches!(case, GrantCase::PrimitiveGrantAndUse) {
+            assert!(
+                matches!(
+                    result,
+                    Err(EVMError::Transaction(TempoInvalidTransaction::RootKeyRetired {
+                        account: actual,
+                        role: RootKeyRole::KeyAuthorizationSigner,
+                    })) if actual == account
                 ),
                 "{case:?}: {result:?}"
             );
