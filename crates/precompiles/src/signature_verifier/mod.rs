@@ -44,10 +44,14 @@ impl SignatureVerifier {
             .map_err(|_| SignatureVerifierError::invalid_signature().into())
     }
 
+    /// Returns whether `signature` is an active access-key signature for `account`.
+    ///
+    /// From T14, `false` when the recovered key ID has a nonzero account commitment (TIP-1112):
+    /// its bare root authority is retired, whichever grant it is used under.
     pub fn verify_keychain(&self, account: Address, hash: B256, signature: Bytes) -> Result<bool> {
         let (embedded_account, key_id, signature_type) =
             self.recover_keychain_key(hash, signature)?;
-        if embedded_account != account {
+        if embedded_account != account || self.is_retired_root(key_id)? {
             return Ok(false);
         }
 
@@ -56,6 +60,11 @@ impl SignatureVerifier {
             .is_some())
     }
 
+    /// Returns whether `signature` is an active admin access-key signature for `account`, or its
+    /// root key's.
+    ///
+    /// From T14, `false` when the recovered key ID has a nonzero account commitment (TIP-1112),
+    /// including the implicit root of `account` itself.
     pub fn verify_keychain_admin(
         &self,
         account: Address,
@@ -64,7 +73,7 @@ impl SignatureVerifier {
     ) -> Result<bool> {
         let (embedded_account, key_id, signature_type) =
             self.recover_keychain_key(hash, signature)?;
-        if embedded_account != account {
+        if embedded_account != account || self.is_retired_root(key_id)? {
             return Ok(false);
         }
 
@@ -117,6 +126,13 @@ impl SignatureVerifier {
             .verify_approvals(hash)
             .map_err(|_| SignatureVerifierError::invalid_signature())?;
         Ok(true)
+    }
+
+    /// Returns whether `key_id` is a retired root key (TIP-1112): from T14, an address with a
+    /// nonzero account commitment no longer acts through its own key. Reads the commitment at call
+    /// time, so a migration earlier in the block counts.
+    fn is_retired_root(&self, key_id: Address) -> Result<bool> {
+        Ok(self.storage.spec().is_t14() && !self.storage.config_commitment(key_id)?.is_zero())
     }
 
     /// Returns the active access key, or `None` when the keychain rejects it.
