@@ -3,11 +3,12 @@ use crate::{
     ExecutionContext, TempoInvalidTransaction, TempoTxEnv, error::RootKeyRole,
     handler::pays_nonce_zero_account_gas,
 };
-use alloy_primitives::{Address, B256};
+use alloy_primitives::{Address, B256, U256};
 use revm::{
     Database,
-    context::{JournalTr, result::EVMError},
+    context::{JournalTr, result::EVMError, transaction::AuthorizationTr},
     context_interface::cfg::{GasId, GasParams},
+    handler::pre_execution::apply_auth_list,
     state::AccountInfo,
 };
 use tempo_chainspec::hardfork::TempoHardfork;
@@ -296,6 +297,43 @@ fn validate_root_keys<J: JournalTr>(
         check(journal, key_id, RootKeyRole::AccessKey)?;
     }
     Ok(extra_gas)
+}
+
+/// Applies an authorization list through revm's [`apply_auth_list`] and returns the number of
+/// refunded accounts.
+///
+/// From T14, entries whose authority has a nonzero configuration commitment are skipped
+/// (TIP-1112): they install no delegation, remove none, bump no nonce and earn no refund.
+/// Other entries behave exactly as in revm.
+///
+/// Only entries revm would load are checked: chain id 0 or `chain_id`, nonce below
+/// `u64::MAX` and a recoverable authority (`apply_auth_list` skips the rest before loading
+/// anything). The checked authority is loaded, as revm does for an entry it skips on code or
+/// nonce, so warmth and refunds stay identical to the same entry with a mismatched nonce.
+/// The commitment is read once, before any entry applies: delegation never changes it.
+pub(crate) fn apply_authorizations<J: JournalTr, A: AuthorizationTr>(
+    journal: &mut J,
+    chain_id: u64,
+    spec: TempoHardfork,
+    authorizations: impl Iterator<Item = A>,
+) -> NativeValidationResult<u64, <J::Database as Database>::Error> {
+    if !spec.is_t14() {
+        return apply_auth_list(chain_id, authorizations, journal);
+    }
+    let mut active = Vec::new();
+    for authorization in authorizations {
+        let chain = authorization.chain_id();
+        let loaded_by_revm =
+            (chain.is_zero() || chain == U256::from(chain_id)) && authorization.nonce() != u64::MAX;
+        if loaded_by_revm && let Some(authority) = authorization.authority() {
+            let loaded = journal.load_account(authority)?;
+            if !config_commitment(&loaded.data.info)?.is_zero() {
+                continue;
+            }
+        }
+        active.push(authorization);
+    }
+    apply_auth_list(chain_id, active.into_iter(), journal)
 }
 
 /// Whether account loads need transaction warmth installed first.

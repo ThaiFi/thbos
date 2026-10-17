@@ -22,7 +22,7 @@ use revm::{
     },
     handler::{
         EvmTr, FrameResult, FrameTr, Handler, MainnetHandler, post_execution,
-        pre_execution::{self, apply_auth_list, calculate_caller_fee},
+        pre_execution::{self, calculate_caller_fee},
         precompile_output_to_interpreter_result, validation,
     },
     inspector::{Inspector, InspectorHandler},
@@ -1015,20 +1015,22 @@ where
         let refunded_accounts = if has_aa_auth_list {
             let tempo_tx_env = ctx.tx.tempo_tx_env.as_ref().unwrap();
 
-            apply_auth_list::<_, Self::Error>(
+            native_multisig::apply_authorizations(
+                &mut ctx.journaled_state,
                 ctx.cfg.chain_id,
+                spec,
                 tempo_tx_env
                     .tempo_authorization_list
                     .iter()
                     // T0 hardfork: skip keychain signatures in auth list processing
                     .filter(|auth| !(spec.is_t0() && auth.signature().is_keychain())),
-                &mut ctx.journaled_state,
             )?
         } else {
-            apply_auth_list::<_, Self::Error>(
-                ctx.cfg.chain_id,
-                ctx.tx.authorization_list(),
+            native_multisig::apply_authorizations(
                 &mut ctx.journaled_state,
+                ctx.cfg.chain_id,
+                spec,
+                ctx.tx.authorization_list(),
             )?
         };
 
