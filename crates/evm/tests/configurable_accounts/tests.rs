@@ -4236,6 +4236,16 @@ fn retired_root_is_not_an_implicit_admin_key() {
             !committed,
             "{label}"
         );
+        if committed {
+            // The retired root falls through to the stored-row lookup, like any other key ID:
+            // the same gas as an unknown key's, plus the one warm commitment read.
+            let root = is_admin_key_call(account, account);
+            let (_, root_gas) = bool_query(&mut f, root, Some(account), &label);
+            let unknown = is_admin_key_call(account, signer(8).address());
+            let (admin, unknown_gas) = bool_query(&mut f, unknown, Some(account), &label);
+            assert!(!admin, "{label}");
+            assert_eq!(root_gas - unknown_gas, 100, "{label}");
+        }
         // An admin access key keeps its stored row, whether or not its account is retired.
         let label = format!("(X, K), X committed {committed}");
         let call = is_admin_key_call(account, key.address());
