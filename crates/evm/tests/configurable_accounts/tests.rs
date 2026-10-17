@@ -26,7 +26,7 @@ use reth_trie_db::{
     DatabaseHashedCursorFactory, DatabaseStateRoot, DatabaseTrieCursorFactory, with_adapter,
 };
 use revm::{
-    context::result::{EVMError, ExecutionResult},
+    context::result::{EVMError, ExecutionResult, InvalidTransaction},
     state::EvmStorageSlot,
 };
 use serde_json::json;
@@ -2397,6 +2397,14 @@ fn retired_root_rejects_sender_signatures() {
     let tx = f.primitive(4, vec![f.getter()]);
     let output = f.evm.transact(env_of(&tx, account, true)).unwrap();
     assert!(output.result.is_success(), "{:?}", output.result);
+    // A request of unspecified origin is not a simulation: the sender is checked.
+    let mut env = env_of(&tx, account, false);
+    env.execution_context = ExecutionContext::Unspecified;
+    let error = f.evm.transact(env).unwrap_err();
+    assert!(
+        matches!(error, EVMError::Transaction(ref error) if *error == expected),
+        "{error:?}"
+    );
 
     // The retirement starts at T14: the same state is accepted before it.
     let mut before = Fixture::with_spec(false, TempoHardfork::T13);
@@ -2542,10 +2550,13 @@ fn retired_root_rejects_delegated_roles() {
         key_authorization: Some(grant_by(&f.owner, key.address())),
         ..aa_tx(4, vec![f.getter()])
     });
-    assert!(matches!(
+    assert_eq!(
         rejection(&mut f, &regrant, account),
-        TempoInvalidTransaction::KeychainPrecompileError { .. }
-    ));
+        TempoInvalidTransaction::KeychainPrecompileError {
+            reason: TempoPrecompileError::from(AccountKeychainError::key_already_exists())
+                .to_string()
+        }
+    );
 }
 
 #[test]
@@ -2752,17 +2763,7 @@ fn retired_root_error_order_and_access_gas() {
     ));
     // Nonce, intrinsic gas and balance errors come after, with or without a commitment.
     let mut fresh = Fixture::with_parent(false);
-    for (label, edit) in [
-        (
-            "nonce",
-            (|tx: &mut TempoTransaction| tx.nonce = 99) as fn(&mut TempoTransaction),
-        ),
-        ("intrinsic gas", |tx| tx.gas_limit = 1),
-        ("balance", |tx| {
-            tx.max_fee_per_gas = 1_000_000_000_000;
-            tx.fee_token = Some(PATH_USD_ADDRESS);
-        }),
-    ] {
+    let mut fresh_rejection = |label: &str, edit: fn(&mut TempoTransaction)| {
         let mut tx = aa_tx(3, vec![f.getter()]);
         edit(&mut tx);
         let signed = f.sign_primitive(tx);
@@ -2771,12 +2772,35 @@ fn retired_root_error_order_and_access_gas() {
             retired(account, RootKeyRole::Sender),
             "{label}"
         );
-        let other = rejection(&mut fresh, &signed, account);
-        assert!(
-            !matches!(other, TempoInvalidTransaction::RootKeyRetired { .. }),
-            "{label}: {other:?}"
-        );
-    }
+        rejection(&mut fresh, &signed, account)
+    };
+    assert_eq!(
+        fresh_rejection("nonce", |tx| tx.nonce = 99),
+        TempoInvalidTransaction::EthInvalidTransaction(InvalidTransaction::NonceTooHigh {
+            tx: 99,
+            state: 3
+        })
+    );
+    let error = fresh_rejection("intrinsic gas", |tx| tx.gas_limit = 1);
+    assert!(
+        matches!(
+            error,
+            TempoInvalidTransaction::EthInvalidTransaction(
+                InvalidTransaction::CallGasCostMoreThanGasLimit { gas_limit: 1, .. }
+            )
+        ),
+        "{error:?}"
+    );
+    assert_eq!(
+        fresh_rejection("balance", |tx| {
+            tx.max_fee_per_gas = 1_000_000_000_000;
+            tx.fee_token = Some(PATH_USD_ADDRESS);
+        }),
+        TempoInvalidTransaction::EthInvalidTransaction(InvalidTransaction::LackOfFundForMaxFee {
+            fee: Box::new(calc_gas_balance_spending(1_000_000, 1_000_000_000_000)),
+            balance: Box::new(U256::ZERO),
+        })
+    );
 
     // Gas: each distinct non-caller role account is charged one account access from T14.
     let params = tempo_gas_params(TempoHardfork::T14);
@@ -2829,4 +2853,41 @@ fn retired_root_error_order_and_access_gas() {
     };
     assert_eq!(delta(&|f| keyed(f, &key)), base + cold);
     assert_eq!(delta(&|f| keyed(f, &payer)), base + 2 * cold);
+    // An access-listed access key costs a warm access.
+    let key_listed = AccessList(vec![AccessListItem {
+        address: key.address(),
+        storage_keys: Vec::new(),
+    }]);
+    assert_eq!(
+        delta(&|f| keychain_signed(
+            TempoTransaction {
+                access_list: key_listed.clone(),
+                ..aa_tx(4, vec![f.getter()])
+            },
+            &key,
+            f.account
+        )),
+        base + warm
+    );
+    // A multisig grant to the fee payer adds nothing to the fee payer's access; one to another
+    // account adds a cold access. The delegate charge exists only at T14, so the two transactions
+    // are compared at T14.
+    let delegated = |delegate: Address| {
+        gas_at(TempoHardfork::T14, &key, |f| {
+            let grant = KeyAuthorization::unrestricted(1, SignatureType::Multisig, delegate);
+            let signature = f.owner.sign_hash_sync(&grant.signature_hash()).unwrap();
+            f.sign_primitive(sponsored(
+                TempoTransaction {
+                    key_authorization: Some(grant.into_signed(signature)),
+                    ..aa_tx(4, vec![f.getter()])
+                },
+                &payer,
+                f.account,
+            ))
+        })
+    };
+    assert_eq!(
+        delegated(other.address()) - delegated(payer.address()),
+        cold
+    );
 }
