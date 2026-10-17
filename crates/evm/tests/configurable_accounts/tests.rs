@@ -4145,7 +4145,24 @@ fn bool_query(f: &mut Fixture, call: Call, warm: Option<Address>, label: &str) -
             })
             .collect(),
     );
-    let result = send_listed(f, signer(9).address(), vec![call], access_list);
+    let relayer = signer(9).address();
+    let nonce = f
+        .evm
+        .db_mut()
+        .basic(relayer)
+        .unwrap()
+        .map_or(0, |info| info.nonce);
+    let tx = f.sign_primitive(TempoTransaction {
+        access_list,
+        ..aa_tx(nonce, vec![call])
+    });
+    // A precompile failure surfaces as an EVM error, not a revert: report it with the label.
+    let output = f
+        .evm
+        .transact(TempoTxEnv::from_recovered_tx(&tx, relayer))
+        .unwrap_or_else(|error| panic!("{label}: {error:?}"));
+    f.evm.db_mut().commit(output.state);
+    let result = output.result;
     assert!(result.is_success(), "{label}: {result:?}");
     let returned = bool::abi_decode(result.output().unwrap()).expect(label);
     (returned, result.tx_gas_used())
@@ -4244,7 +4261,7 @@ fn retired_root_is_not_an_implicit_admin_key() {
             let unknown = is_admin_key_call(account, signer(8).address());
             let (admin, unknown_gas) = bool_query(&mut f, unknown, Some(account), &label);
             assert!(!admin, "{label}");
-            assert_eq!(root_gas - unknown_gas, 100, "{label}");
+            assert_eq!(root_gas, unknown_gas + 100, "{label}");
         }
         // An admin access key keeps its stored row, whether or not its account is retired.
         let label = format!("(X, K), X committed {committed}");
@@ -4426,28 +4443,32 @@ fn retired_root_keychain_checks_cost_the_commitment_read() {
     }
 }
 
-/// Gas of `verifyKeychain` for a signature naming `named`, by a key of the fixture's account that
-/// is committed at T14 only, with the key's account cold.
-fn mismatched_account_gas(spec: TempoHardfork) -> (bool, u64) {
+/// Gas of `function` for a signature naming another account than the one queried, made by a key
+/// of the fixture's account that is committed (and so retired) at T14 only.
+fn mismatched_account_gas(spec: TempoHardfork, function: Verifier) -> (bool, u64) {
     let hash = B256::repeat_byte(0x42);
     let mut f = Fixture::with_spec(false, spec);
     let account = f.account;
     let (key, signature) = keychain_signature(SigKind::Secp256k1, 7, account, hash);
-    grant_kind(&mut f, 3, SigKind::Secp256k1, key, false);
+    grant_kind(&mut f, 3, SigKind::Secp256k1, key, true);
     retire(&mut f, key);
-    let call = Verifier::Keychain.call(signer(5).address(), hash, signature);
+    let call = function.call(signer(5).address(), hash, signature);
     bool_query(&mut f, call, None, "mismatched account")
 }
 
 #[test]
-fn retired_root_keychain_verifier_checks_the_account_before_the_commitment() {
+fn retired_root_keychain_verifiers_check_the_account_before_the_commitment() {
     // A signature naming another account is rejected before the key's commitment is read: the
     // same result and the same gas as at T13, where no commitment is read at all.
-    assert_eq!(
-        mismatched_account_gas(TempoHardfork::T14),
-        mismatched_account_gas(TempoHardfork::T13)
-    );
-    assert!(!mismatched_account_gas(TempoHardfork::T14).0);
+    for function in [Verifier::Keychain, Verifier::KeychainAdmin] {
+        let after = mismatched_account_gas(TempoHardfork::T14, function);
+        assert!(!after.0, "{function:?}");
+        assert_eq!(
+            after,
+            mismatched_account_gas(TempoHardfork::T13, function),
+            "{function:?}"
+        );
+    }
 }
 
 #[test]
