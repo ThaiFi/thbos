@@ -2173,7 +2173,7 @@ where
         &self,
         evm: &mut Self::Evm,
     ) -> Result<InitialAndFloorGas, Self::Error> {
-        if native_multisig::has_account_access(evm.ctx_ref().tx()) {
+        if native_multisig::has_account_access(evm.ctx_ref().tx(), *evm.ctx_ref().cfg().spec()) {
             // Native intrinsic validation loads additional accounts before normal pre-execution.
             // Install transaction warmth first so access-listed/beneficiary accounts are priced
             // correctly. Upstream repeats this idempotent setup before applying authorizations.

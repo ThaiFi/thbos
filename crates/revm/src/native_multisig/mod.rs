@@ -1,12 +1,14 @@
 //! Bounded native authorization shared by execution, pool validation, and simulation.
 use crate::{
-    ExecutionContext, TempoInvalidTransaction, TempoTxEnv, handler::pays_nonce_zero_account_gas,
+    ExecutionContext, TempoInvalidTransaction, TempoTxEnv, error::RootKeyRole,
+    handler::pays_nonce_zero_account_gas,
 };
 use alloy_primitives::{Address, B256};
 use revm::{
     Database,
     context::{JournalTr, result::EVMError},
     context_interface::cfg::{GasId, GasParams},
+    state::AccountInfo,
 };
 use tempo_chainspec::hardfork::TempoHardfork;
 use tempo_precompiles::{
@@ -99,7 +101,15 @@ pub fn authorizations(tx: &TempoTxEnv) -> [Option<NativeAuthorization<'_>>; 2] {
     [outer, grant]
 }
 
-/// Validates all native actors without cryptography, returning regular and state intrinsic gas.
+/// Validates the account state every transaction role depends on, returning regular and state
+/// intrinsic gas. Does no signature or quorum verification of its own (see [`verify`]), except
+/// that T14 key-authorization and access-key identities are recovered to name the accounts
+/// whose root-key retirement is checked.
+///
+/// Native roles are checked first. At T14, bare primitive authority is then rejected with
+/// [`TempoInvalidTransaction::RootKeyRetired`] for any account with a nonzero configuration
+/// commitment, in the order sender, key authorization signer, fee payer, access key. RPC
+/// simulation skips only the sender check.
 /// Loads and warms accounts, but does not register commitments.
 /// Caller must charge both components and check fee affordability before `verify`.
 /// Transaction access-list and beneficiary warmth must be initialized before these account loads.
@@ -110,9 +120,33 @@ pub fn validate_state<J: JournalTr>(
     spec: TempoHardfork,
     gas: &GasParams,
 ) -> NativeValidationResult<(u64, u64), <J::Database as Database>::Error> {
+    let (mut extra_gas, state_gas, mut accounts) =
+        validate_native_roles(journal, tx, block, spec, gas)?;
+    if spec.is_t14() {
+        extra_gas += validate_root_keys(journal, tx, gas, &mut accounts)?;
+    }
+    Ok((
+        extra_gas + grant_delegate_access_gas(journal, tx, spec, gas, &accounts)?,
+        state_gas,
+    ))
+}
+
+fn config_commitment<DbError>(info: &AccountInfo) -> NativeValidationResult<B256, DbError> {
+    decode_config_commitment(&info.extension, true)
+        .map_err(|error| EVMError::Custom(error.to_string()))
+}
+
+/// Native roles only: returns extra gas, state gas, and the native role accounts already loaded.
+fn validate_native_roles<J: JournalTr>(
+    journal: &mut J,
+    tx: &TempoTxEnv,
+    block: &TempoBlockEnv,
+    spec: TempoHardfork,
+    gas: &GasParams,
+) -> NativeValidationResult<(u64, u64, Vec<Address>), <J::Database as Database>::Error> {
     // Non-AA transactions have no native roles or grant delegate.
     let Some(aa) = tx.tempo_tx_env.as_ref() else {
-        return Ok((0, 0));
+        return Ok((0, 0, Vec::new()));
     };
     let roles = authorizations(tx);
     let invalid = |error| EVMError::Transaction(TempoInvalidTransaction::NativeMultisig(error));
@@ -127,8 +161,7 @@ pub fn validate_state<J: JournalTr>(
     }
     if spec.is_t14() && aa.signature.is_keychain() {
         let caller = journal.load_account(tx.caller)?;
-        let commitment = decode_config_commitment(&caller.data.info.extension, true)
-            .map_err(|error| EVMError::Custom(error.to_string()))?;
+        let commitment = config_commitment(&caller.data.info)?;
         if !commitment.is_zero() && !caller.data.info.is_empty_code_hash() {
             return Err(EVMError::Transaction(
                 TempoInvalidTransaction::NativeMultisig(NativeMultisigError::InvalidAccount {
@@ -138,7 +171,7 @@ pub fn validate_state<J: JournalTr>(
         }
     }
     if roles.iter().all(Option::is_none) {
-        return Ok((grant_delegate_access_gas(journal, tx, spec, gas, &[])?, 0));
+        return Ok((0, 0, Vec::new()));
     }
     // Grant signers may be admin access keys; later checks bind them to the caller.
     if let Some(signature) = aa.signature.as_multisig()
@@ -170,8 +203,7 @@ pub fn validate_state<J: JournalTr>(
                 account: address,
             }));
         }
-        let commitment = decode_config_commitment(&info.extension, true)
-            .map_err(|error| EVMError::Custom(error.to_string()))?;
+        let commitment = config_commitment(info)?;
         let first = !accounts.contains(&address);
         if first && address != tx.caller {
             extra_gas += account_access_gas(gas, loaded.is_cold);
@@ -200,20 +232,88 @@ pub fn validate_state<J: JournalTr>(
             }
         }
     }
-    Ok((
-        extra_gas + grant_delegate_access_gas(journal, tx, spec, gas, &accounts)?,
-        state_gas,
-    ))
+    Ok((extra_gas, state_gas, accounts))
 }
 
-/// Includes a separately named grant recipient, which need not sign this transaction.
-pub(crate) fn has_account_access(tx: &TempoTxEnv) -> bool {
+/// Rejects bare primitive authority of accounts with a nonzero commitment (TIP-1112).
+///
+/// Each distinct non-caller account is charged one account access, deduplicated against
+/// `accounts` (which collects every charged account). Multisig signers and delegates are native
+/// accounts that always carry a commitment and are never primitive roots, so only primitive
+/// signatures are checked.
+fn validate_root_keys<J: JournalTr>(
+    journal: &mut J,
+    tx: &TempoTxEnv,
+    gas: &GasParams,
+    accounts: &mut Vec<Address>,
+) -> NativeValidationResult<u64, <J::Database as Database>::Error> {
+    let mut extra_gas = 0;
+    let mut check = |journal: &mut J,
+                     account: Address,
+                     role: RootKeyRole|
+     -> NativeValidationResult<(), <J::Database as Database>::Error> {
+        let loaded = journal.load_account(account)?;
+        let commitment = config_commitment(&loaded.data.info)?;
+        if account != tx.caller && !accounts.contains(&account) {
+            extra_gas += account_access_gas(gas, loaded.is_cold);
+        }
+        accounts.push(account);
+        if commitment.is_zero() {
+            Ok(())
+        } else {
+            Err(TempoInvalidTransaction::RootKeyRetired { account, role }.into())
+        }
+    };
+    let aa = tx.tempo_tx_env.as_ref();
+    // RPC simulation supplies a placeholder sender signature.
+    let simulation = matches!(tx.execution_context(), ExecutionContext::Simulation);
+    if !simulation && aa.is_none_or(|aa| matches!(aa.signature, TempoSignature::Primitive(_))) {
+        check(journal, tx.caller, RootKeyRole::Sender)?;
+    }
+    let Some(aa) = aa else {
+        return Ok(extra_gas);
+    };
+    if let Some(auth) = &aa.key_authorization
+        && auth.signature.as_multisig().is_none()
+    {
+        let signer = auth
+            .recover_signer()
+            .map_err(|_| TempoInvalidTransaction::KeyAuthorizationSignatureRecoveryFailed)?;
+        check(journal, signer, RootKeyRole::KeyAuthorizationSigner)?;
+    }
+    if tx.has_fee_payer_signature() {
+        check(journal, tx.fee_payer()?, RootKeyRole::FeePayer)?;
+    }
+    if let Some(keychain) = aa.signature.as_keychain()
+        && keychain.signature.as_multisig().is_none()
+    {
+        let key_id = match aa.override_key_id {
+            Some(key_id) => key_id,
+            None => keychain
+                .key_id(&aa.signature_hash)
+                .map_err(|_| TempoInvalidTransaction::AccessKeyRecoveryFailed)?,
+        };
+        check(journal, key_id, RootKeyRole::AccessKey)?;
+    }
+    Ok(extra_gas)
+}
+
+/// Whether account loads need transaction warmth installed first.
+///
+/// Includes a separately named grant recipient, which need not sign this transaction. From T14
+/// it also covers every non-caller account a root-key check can load: fee payer, access key
+/// and key authorization signer.
+pub(crate) fn has_account_access(tx: &TempoTxEnv, spec: TempoHardfork) -> bool {
     tx.tempo_tx_env.as_ref().is_some_and(|aa| {
         // A direct or keychain-wrapped native quorum has no primitive signature type.
         aa.signature.primitive_signature_type().is_none()
             || aa.key_authorization.as_ref().is_some_and(|auth| {
                 auth.signature.as_multisig().is_some() || auth.key_type == SignatureType::Multisig
             })
+            || (spec.is_t14()
+                && (tx.has_fee_payer_signature()
+                    || aa.signature.is_keychain()
+                    || aa.key_authorization.is_some()))
     })
 }
 

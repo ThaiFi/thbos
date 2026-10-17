@@ -6,6 +6,30 @@ use alloy_primitives::{Address, U256};
 use revm::context::result::{EVMError, ExecutionResult, HaltReason, InvalidTransaction};
 use tempo_primitives::transaction::{KeyAuthorizationChainIdError, KeychainVersionError};
 
+/// Authority role a primitive key can fill in a transaction (TIP-1112).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum RootKeyRole {
+    /// Direct transaction sender.
+    Sender,
+    /// Signer of a primitive-signed key authorization.
+    KeyAuthorizationSigner,
+    /// Fee payer.
+    FeePayer,
+    /// Access key identity of a keychain signature.
+    AccessKey,
+}
+
+impl core::fmt::Display for RootKeyRole {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(match self {
+            Self::Sender => "the transaction sender",
+            Self::KeyAuthorizationSigner => "a key authorization signer",
+            Self::FeePayer => "the fee payer",
+            Self::AccessKey => "an access key",
+        })
+    }
+}
+
 /// Tempo-specific invalid transaction errors.
 ///
 /// This enum extends the standard Ethereum [`InvalidTransaction`] with Tempo-specific
@@ -15,6 +39,17 @@ pub enum TempoInvalidTransaction {
     /// Native account authorization failure.
     #[error(transparent)]
     NativeMultisig(#[from] NativeMultisigError),
+    /// A primitive key acted alone in `role` for an account with a nonzero configuration
+    /// commitment (TIP-1112).
+    ///
+    /// State-dependent: a migration can be undone by a reorg, so the transaction is not bad.
+    #[error("root key of {account} is retired and cannot act as {role}")]
+    RootKeyRetired {
+        /// Account whose bare primitive authority is retired.
+        account: Address,
+        /// Authority role the retired key tried to fill.
+        role: RootKeyRole,
+    },
     /// Standard Ethereum transaction validation error.
     #[error(transparent)]
     EthInvalidTransaction(#[from] InvalidTransaction),
@@ -321,7 +356,8 @@ impl TempoInvalidTransaction {
             | Self::CallsValidation(_) => true,
 
             // State- or fork-dependent: may resolve as the chain advances.
-            Self::ValidAfter { .. }
+            Self::RootKeyRetired { .. }
+            | Self::ValidAfter { .. }
             | Self::ValidBefore { .. }
             | Self::ExpiringNonceNonceNotZero
             | Self::InvalidFeeToken(_)
