@@ -669,3 +669,76 @@ async fn retired_root_rpc_rejects_send_and_allows_calls() -> eyre::Result<()> {
     }
     Ok(())
 }
+
+/// The parallel builder replays a payment recorded on the parent state, so it must not commit a
+/// root-signed payment from an account that migrates earlier in the same block.
+#[tokio::test(flavor = "multi_thread")]
+async fn parallel_builder_skips_root_payment_after_same_block_migration() -> eyre::Result<()> {
+    let mut env = environment_with(TestNodeBuilder::new().with_parallel_builder()).await?;
+    let recipient = Address::repeat_byte(0x7a);
+    // Two root-signed payments on a 2D nonce lane, the first from an account that migrates in this
+    // block. The migration pays a higher tip, so the builder executes it first.
+    let migrating = OwnerKey::new(0x30, SignatureType::Secp256k1);
+    let account = NativeAccount::migrated(migrating.address(), 0x31, 3);
+    let bystander = OwnerKey::new(0x40, SignatureType::Secp256k1);
+    env.fund_account(account.address).await?;
+    env.fund_account(bystander.address()).await?;
+
+    let provider = tempo_provider(&env);
+    let mut migrate = account.transaction(&env, vec![account.upgrade_call()]);
+    migrate.max_priority_fee_per_gas *= 2;
+    migrate.max_fee_per_gas *= 2;
+    let payment = |owner: &OwnerKey| -> eyre::Result<TempoTxEnvelope> {
+        let mut tx = create_basic_aa_tx(
+            env.chain_id(),
+            0,
+            vec![create_transfer_call(
+                DEFAULT_FEE_TOKEN,
+                recipient,
+                U256::from(1),
+            )],
+            GAS_LIMIT,
+        );
+        tx.nonce_key = U256::from(1);
+        let signature = TempoSignature::Primitive(owner.sign(tx.signature_hash())?);
+        Ok(tx.into_signed(signature).into())
+    };
+    let migrate_signature = TempoSignature::Primitive(migrating.sign(migrate.signature_hash())?);
+    let migrate: TempoTxEnvelope = migrate.into_signed(migrate_signature).into();
+    let retired_payment = payment(&migrating)?;
+    let live_payment = payment(&bystander)?;
+    // The bystander's payment pays the same tip as the retired one and stays valid.
+    let mut hashes = Vec::new();
+    for tx in [&migrate, &retired_payment, &live_payment] {
+        hashes.push(
+            *provider
+                .send_raw_transaction(&tx.encoded_2718())
+                .await?
+                .tx_hash(),
+        );
+    }
+    env.setup.node.advance_block().await?;
+
+    let migrated = provider
+        .get_transaction_receipt(hashes[0])
+        .await?
+        .ok_or_else(|| eyre!("migration not included"))?;
+    assert!(migrated.status(), "{migrated:?}");
+    assert_eq!(
+        commitment(&env, account.address).await?,
+        account.config.commitment().unwrap()
+    );
+    let live = provider
+        .get_transaction_receipt(hashes[2])
+        .await?
+        .ok_or_else(|| eyre!("unmigrated account's payment not included"))?;
+    assert_eq!(live.block_number, migrated.block_number);
+    assert!(live.status(), "{live:?}");
+    let token = ITIP20::new(DEFAULT_FEE_TOKEN, env.provider());
+    assert_eq!(token.balanceOf(recipient).call().await?, U256::from(1));
+    assert!(
+        provider.get_transaction_receipt(hashes[1]).await?.is_none(),
+        "root-signed payment from a migrated account was included"
+    );
+    Ok(())
+}

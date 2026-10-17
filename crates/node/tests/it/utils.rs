@@ -301,7 +301,10 @@ use tempo_contracts::precompiles::{
     ITIP20::{self, ITIP20Instance},
     ITIP20Factory,
 };
-use tempo_node::{node::TempoNode, rpc::error::TempoEthApiError};
+use tempo_node::{
+    node::{TempoNode, TempoNodeArgs},
+    rpc::error::TempoEthApiError,
+};
 use tempo_payload_types::{TempoBuiltPayload, TempoPayloadAttributes};
 use tempo_precompiles::{PATH_USD_ADDRESS, TIP20_FACTORY_ADDRESS, tip20::ISSUER_ROLE};
 
@@ -538,6 +541,7 @@ pub(crate) struct TestNodeBuilder {
     external_rpc: Option<Url>,
     dynamic_validator: Option<Arc<std::sync::Mutex<Address>>>,
     schedule: ForkSchedule,
+    parallel_builder: bool,
 }
 
 impl TestNodeBuilder {
@@ -552,7 +556,20 @@ impl TestNodeBuilder {
             external_rpc: None,
             dynamic_validator: None,
             schedule: ForkSchedule::Devnet,
+            parallel_builder: false,
         }
+    }
+
+    /// Build payloads with the speculative parallel builder (`--builder.parallel`).
+    ///
+    /// The parallel builder reports an empty pool while prewarming has no transaction ready, unless
+    /// the payload carries a build budget, as consensus payloads do. This sets one, so a block
+    /// holds every transaction that was in the pool when the payload job started.
+    ///
+    /// Only [`Self::build_with_node_access`] honours this.
+    pub(crate) fn with_parallel_builder(mut self) -> Self {
+        self.parallel_builder = true;
+        self
     }
 
     /// Set the fork schedule (Devnet, Testnet, or Mainnet)
@@ -622,7 +639,22 @@ impl TestNodeBuilder {
         let chain_spec = self.build_chain_spec()?;
         let hardfork = chain_spec.tempo_hardfork_at(0);
 
+        let parallel = self.parallel_builder;
+        let args = TempoNodeArgs {
+            builder_parallel: parallel,
+            ..Default::default()
+        };
         let (node, _wallet) = tempo_test_setup(1, Arc::new(chain_spec))
+            .with_node(move |_| TempoNode::new(&args, None))
+            .with_attributes_generator(move |timestamp| {
+                let attributes =
+                    TempoPayloadAttributes::new(None, timestamp, 0, Bytes::new(), None);
+                if parallel {
+                    attributes.with_payload_build_budget(Duration::from_millis(500))
+                } else {
+                    attributes
+                }
+            })
             .with_dev_mode(true)
             .build_single()
             .await?;

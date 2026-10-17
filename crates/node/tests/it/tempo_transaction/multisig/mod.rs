@@ -338,6 +338,10 @@ async fn reject(
 }
 
 async fn environment() -> eyre::Result<Localnet> {
+    environment_with(TestNodeBuilder::new()).await
+}
+
+async fn environment_with(node: TestNodeBuilder) -> eyre::Result<Localnet> {
     init_test_tracing();
     let mut genesis: Value = from_str(&make_genesis_at(TempoHardfork::T14))?;
     genesis["config"]["t14Time"] = json!(0);
@@ -352,7 +356,7 @@ async fn environment() -> eyre::Result<Localnet> {
     code.extend_from_slice(NATIVE_MULTISIG_ADDRESS.as_slice());
     code.extend_from_slice(&[0x5a, 0xfa, 0x50, 0x5f, 0x51, 0x5f, 0x55, 0x00]);
     genesis["alloc"][format!("{OBSERVER}")] = json!({"balance": "0x0", "code": Bytes::from(code)});
-    let setup = TestNodeBuilder::new()
+    let setup = node
         .with_genesis(to_string(&genesis)?)
         .build_with_node_access()
         .await?;
