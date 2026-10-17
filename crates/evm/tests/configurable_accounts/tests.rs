@@ -3584,6 +3584,35 @@ fn retired_root_permit_error_order() {
 }
 
 #[test]
+fn retired_root_permit_reverts_before_writing() {
+    let (owner, spender, relayer) = (signer(4), signer(8).address(), signer(9).address());
+    let x = owner.address();
+    let mut retired = Fixture::with_parent(false);
+    let mut stale = Fixture::with_parent(false);
+    let permit = permit_signed(&mut retired, x, &owner, spender, 1_000);
+    // Each fixture grants one permit first (another owner's in `retired`, one spending X's nonce 0
+    // in `stale`), so the two relays below read the same state apart from X's permit nonce.
+    for (f, earlier) in [(&mut retired, signer(6)), (&mut stale, owner.clone())] {
+        let call = permit_signed(f, earlier.address(), &earlier, signer(7).address(), 1_000);
+        let result = send(f, signer(10).address(), vec![call]);
+        assert!(result.is_success(), "{result:?}");
+        retire(f, x);
+    }
+
+    // The valid permit of the committed owner reverts with `RootKeyRetired`; the same permit
+    // over a spent nonce fails the signature check instead.
+    let result = send(&mut retired, relayer, vec![permit.clone()]);
+    assert_reverts_with(&result, permit_retired(x), "valid permit");
+    let retired_gas = result.tx_gas_used();
+    let result = send(&mut stale, relayer, vec![permit]);
+    assert_reverts_with(&result, ITIP20::InvalidSignature {}, "stale permit");
+
+    // Both read the nonce and recover the signer, and the retired permit adds only the cold
+    // commitment read: it reverts before the nonce and allowance writes, whose gas a revert keeps.
+    assert_eq!(retired_gas - result.tx_gas_used(), 2600);
+}
+
+#[test]
 fn retired_root_permit_stays_allowed() {
     let (owner, spender, relayer) = (signer(4), signer(8).address(), signer(9).address());
     let mut f = Fixture::with_parent(false);
