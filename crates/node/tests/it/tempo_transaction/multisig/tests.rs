@@ -670,6 +670,68 @@ async fn retired_root_rpc_rejects_send_and_allows_calls() -> eyre::Result<()> {
     Ok(())
 }
 
+/// A root-signed transaction queued behind its account's migration stays out of the chain once the
+/// migration commits, and the root key cannot replace it (TIP-1112).
+#[tokio::test(flavor = "multi_thread")]
+async fn root_transaction_queued_behind_migration_is_not_included() -> eyre::Result<()> {
+    let mut env = environment().await?;
+    let root = OwnerKey::new(0x30, SignatureType::Secp256k1);
+    let mut account = NativeAccount::migrated(root.address(), 0x31, 3);
+    env.fund_account(account.address).await?;
+
+    // The migration (nonce n) and a root-signed transaction (nonce n + 1) are pending together.
+    let migrate = account.transaction(&env, vec![account.upgrade_call()]);
+    let queued = create_basic_aa_tx(env.chain_id(), account.nonce + 1, vec![noop()], GAS_LIMIT);
+    let provider = tempo_provider(&env);
+    let mut hashes = Vec::new();
+    for tx in [migrate, queued.clone()] {
+        let signature = TempoSignature::Primitive(root.sign(tx.signature_hash())?);
+        let envelope: TempoTxEnvelope = tx.into_signed(signature).into();
+        hashes.push(
+            *provider
+                .send_raw_transaction(&envelope.encoded_2718())
+                .await?
+                .tx_hash(),
+        );
+    }
+    env.setup.node.advance_block().await?;
+
+    let migrated = provider
+        .get_transaction_receipt(hashes[0])
+        .await?
+        .ok_or_else(|| eyre!("migration not included"))?;
+    assert!(migrated.status(), "{migrated:?}");
+    assert_eq!(
+        commitment(&env, account.address).await?,
+        account.config.commitment().unwrap()
+    );
+    account.nonce += 1;
+
+    // The builder skips the queued transaction in the migration's block and in the next one.
+    env.setup.node.advance_block().await?;
+    assert!(
+        provider.get_transaction_receipt(hashes[1]).await?.is_none(),
+        "root-signed transaction queued behind the migration was included"
+    );
+    assert_eq!(
+        provider.get_transaction_count(account.address).await?,
+        account.nonce
+    );
+
+    // A fee-bumped replacement signed by the root key is rejected.
+    let mut replacement = queued;
+    replacement.max_priority_fee_per_gas *= 2;
+    replacement.max_fee_per_gas *= 2;
+    let signature = TempoSignature::Primitive(root.sign(replacement.signature_hash())?);
+    let error = reject(&env, replacement, signature).await?;
+    let retired = format!(
+        "root key of {} is retired and cannot act as the transaction sender",
+        account.address
+    );
+    assert!(error.contains(&retired), "{error}");
+    Ok(())
+}
+
 /// The parallel builder replays a payment recorded on the parent state, so it must not commit a
 /// root-signed payment from an account that migrates earlier in the same block.
 #[tokio::test(flavor = "multi_thread")]
