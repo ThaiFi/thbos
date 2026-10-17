@@ -2386,7 +2386,7 @@ fn retired_root_rejects_sender_signatures() {
         nonce_key: U256::ONE,
         ..aa_tx(0, vec![f.getter()])
     };
-    let tx = f.sign_primitive(lane.clone());
+    let tx = f.sign_primitive(lane);
     assert_eq!(rejection(&mut f, &tx, account), expected);
     for signature in [p256, webauthn] {
         let tx = aa_tx(4, vec![f.getter()]).into_signed(TempoSignature::Primitive(signature));
@@ -2583,7 +2583,7 @@ fn retired_root_keeps_owner_parent_and_sender_authority() {
             max_fee_per_gas: 1,
             max_priority_fee_per_gas: 1,
             fee_token: Some(PATH_USD_ADDRESS),
-            ..aa_tx(6, vec![transfer.clone()])
+            ..aa_tx(6, vec![transfer])
         },
     );
     let result = f.run(&tx);
@@ -2691,7 +2691,7 @@ fn retired_root_error_order_and_access_gas() {
     );
     let tx = keychain_signed(
         sponsor(TempoTransaction {
-            key_authorization: Some(admin_grant.clone()),
+            key_authorization: Some(admin_grant),
             ..aa_tx(3, vec![f.getter()])
         }),
         &signer_s,
