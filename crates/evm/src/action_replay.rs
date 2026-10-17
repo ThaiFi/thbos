@@ -1,5 +1,5 @@
 use std::collections::hash_map::Entry;
-use tempo_primitives::{TempoSignature, TempoTxEnvelope};
+use tempo_primitives::{TempoSignature, TempoTxEnvelope, account::decode_config_commitment};
 
 use crate::{TempoBlockExecutor, TempoTxResult};
 use alloy_evm::{
@@ -24,7 +24,7 @@ use tempo_precompiles::{
     storage::StorageAction,
     tip_fee_manager::amm::{Pool, compute_amount_out},
 };
-use tempo_revm::evm::TempoContext;
+use tempo_revm::{TempoTxEnv, evm::TempoContext};
 
 impl<'a, DB, I> TempoBlockExecutor<'a, &'a mut State<DB>, I>
 where
@@ -44,6 +44,7 @@ where
         if !supports_storage_action_replay(recovered.tx()) {
             return Err(StorageActionReplayError::UnsupportedAuthorization.into());
         }
+        self.ensure_root_keys_active(&tx_env)?;
 
         let StorageActionReplay {
             result,
@@ -89,6 +90,34 @@ where
 
         self.commit_transaction(result);
 
+        Ok(())
+    }
+
+    /// Rejects a replay whose sender or fee payer committed to a configuration after the replay
+    /// was recorded.
+    ///
+    /// The replay ran on the parent state, so a migration earlier in this block is invisible to
+    /// it, and replay skips the handler check that retires the root key from T14.
+    fn ensure_root_keys_active(&mut self, tx_env: &TempoTxEnv) -> Result<(), BlockExecutionError> {
+        if !self.inner.evm.ctx().cfg.spec.is_t14() {
+            return Ok(());
+        }
+        let fee_payer = if tx_env.has_fee_payer_signature() {
+            Some(tx_env.fee_payer().map_err(BlockExecutionError::other)?)
+        } else {
+            None
+        };
+        let db = self.inner.evm.db_mut();
+        for account in [Some(tx_env.caller), fee_payer].into_iter().flatten() {
+            let Some(info) = db.basic(account).map_err(BlockExecutionError::other)? else {
+                continue;
+            };
+            let commitment = decode_config_commitment(&info.extension, true)
+                .map_err(BlockExecutionError::other)?;
+            if !commitment.is_zero() {
+                return Err(StorageActionReplayError::RootKeyRetired.into());
+            }
+        }
         Ok(())
     }
 
@@ -343,6 +372,8 @@ pub struct ExpiringNonceReplay {
 pub enum StorageActionReplayError {
     #[error("authorization requires account-state execution")]
     UnsupportedAuthorization,
+    #[error("sender or fee payer root key is retired")]
+    RootKeyRetired,
     #[error("transaction execution failed")]
     TransactionExecutionFailed,
     #[error("storage action conflict")]
