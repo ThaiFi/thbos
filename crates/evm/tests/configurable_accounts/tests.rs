@@ -4240,6 +4240,11 @@ fn retired_root_is_not_an_implicit_admin_key() {
         let label = format!("(X, K), X committed {committed}");
         let call = is_admin_key_call(account, key.address());
         assert!(bool_query(&mut f, call, None, &label).0, "{label}");
+        // So does one whose own address is committed: only the root of an address is retired.
+        retire(&mut f, key.address());
+        let label = format!("(X, K), X committed {committed}, K committed");
+        let call = is_admin_key_call(account, key.address());
+        assert!(bool_query(&mut f, call, None, &label).0, "{label}");
     }
 }
 
