@@ -2528,6 +2528,15 @@ fn retired_root_rejects_delegated_roles() {
         matches!(error, EVMError::Transaction(ref error) if *error == expected),
         "{error:?}"
     );
+    // The override also names the key when another key signed the request.
+    let placeholder = keychain_tx(&f, &signer(7), 4, vec![f.getter()]);
+    let mut env = env_of(&placeholder, account, true);
+    env.tempo_tx_env.as_mut().unwrap().override_key_id = Some(key.address());
+    let error = f.evm.transact(env).unwrap_err();
+    assert!(
+        matches!(error, EVMError::Transaction(ref error) if *error == expected),
+        "{error:?}"
+    );
     // The treasury cannot register the retired key ID again: the grant is rejected as a reuse.
     let regrant = f.sign_primitive(TempoTransaction {
         key_authorization: Some(grant_by(&f.owner, key.address())),
