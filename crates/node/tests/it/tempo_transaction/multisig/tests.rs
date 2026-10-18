@@ -8,7 +8,8 @@ use alloy::{
     rpc::types::state::StateOverridesBuilder,
     sol_types::{SolError, SolEvent},
 };
-use alloy_eips::{BlockId, Decodable2718, eip7702::Authorization};
+use alloy_eips::{BlockId, BlockNumberOrTag, Decodable2718, eip7702::Authorization};
+use eyre::OptionExt;
 use futures::{FutureExt, StreamExt};
 use reth_e2e_test_utils::{node::Finality, wait::WAIT_TIMEOUT};
 use reth_ethereum::pool::{TransactionEvent, TransactionPool};
@@ -799,6 +800,25 @@ fn grant_signed(
     Ok(grant.into_signed(signature))
 }
 
+/// A legacy transaction with `nonce` to the no-op target, signed by `signer`.
+fn legacy_signed(
+    chain_id: u64,
+    nonce: u64,
+    signer: &PrivateKeySigner,
+) -> eyre::Result<TempoTxEnvelope> {
+    let tx = TxLegacy {
+        chain_id: Some(chain_id),
+        nonce,
+        gas_price: TEMPO_T1_BASE_FEE as u128,
+        gas_limit: 200_000,
+        to: noop().to,
+        value: U256::ZERO,
+        input: Bytes::new(),
+    };
+    let signature = signer.sign_hash_sync(&tx.signature_hash())?;
+    Ok(TempoTxEnvelope::Legacy(tx.into_signed(signature)))
+}
+
 /// The migration of `account` (nonce `account.nonce`), signed by its root key. It pays a higher
 /// tip than the default, so the builder runs it before the other transactions.
 fn migration(
@@ -849,6 +869,17 @@ async fn mine_migration(
     Ok(())
 }
 
+/// The hash of the latest block, the fork point of a later reorg.
+async fn latest_block_hash(env: &Localnet) -> eyre::Result<B256> {
+    Ok(env
+        .provider()
+        .get_block_by_number(BlockNumberOrTag::Latest)
+        .await?
+        .ok_or_eyre("latest block missing")?
+        .header
+        .hash)
+}
+
 /// What a pending transaction needs from the root key of an account that migrates.
 #[derive(Clone, Copy, Debug)]
 enum RootRole {
@@ -891,19 +922,7 @@ impl RootRole {
         // after it.
         let queued = account.nonce + 1;
         Ok(match self {
-            Self::LegacySender => {
-                let tx = TxLegacy {
-                    chain_id: Some(chain_id),
-                    nonce: queued,
-                    gas_price: TEMPO_T1_BASE_FEE as u128,
-                    gas_limit: 200_000,
-                    to: target,
-                    value: U256::ZERO,
-                    input: Bytes::new(),
-                };
-                let signature = root.sign_hash_sync(&tx.signature_hash())?;
-                TempoTxEnvelope::Legacy(tx.into_signed(signature))
-            }
+            Self::LegacySender => legacy_signed(chain_id, queued, root)?,
             Self::Eip1559Sender => {
                 let tx = TxEip1559 {
                     chain_id,
@@ -1104,13 +1123,7 @@ async fn retired_root_reorg_evicts_pending_transactions() -> eyre::Result<()> {
         root.sign_hash_sync(&tx.signature_hash())?,
     ));
     account.submit(&mut env, tx, signature, true).await?;
-    let fork_point = env
-        .provider()
-        .get_block_by_number(Default::default())
-        .await?
-        .ok_or_else(|| eyre!("latest block missing"))?
-        .header
-        .hash;
+    let fork_point = latest_block_hash(&env).await?;
 
     // All transactions wait for a nonce that nothing has mined: the root key's and the access
     // key's behind the migration, the others behind a nonce that their sender never sends. The
@@ -1140,17 +1153,7 @@ async fn retired_root_reorg_evicts_pending_transactions() -> eyre::Result<()> {
     )];
     sign_fee_payer(&mut bystander_tx, bystander.address(), &sponsor)?;
     let bystander_tx = root_signed(bystander_tx, &bystander)?;
-    let legacy_tx = TxLegacy {
-        chain_id: Some(chain_id),
-        nonce: 1,
-        gas_price: TEMPO_T1_BASE_FEE as u128,
-        gas_limit: 200_000,
-        to: noop().to,
-        value: U256::ZERO,
-        input: Bytes::new(),
-    };
-    let signature = sponsor.sign_hash_sync(&legacy_tx.signature_hash())?;
-    let legacy_tx = TempoTxEnvelope::Legacy(legacy_tx.into_signed(signature));
+    let legacy_tx = legacy_signed(chain_id, 1, &sponsor)?;
     let mut grantee_tx = create_basic_aa_tx(chain_id, 1, vec![noop()], GAS_LIMIT);
     grantee_tx.key_authorization = Some(grant_signed(chain_id, grantee.address(), &grantor)?);
     let grantee_tx = key_signed(grantee_tx, grantor.address(), &grantee)?;
@@ -1261,13 +1264,7 @@ async fn reorg_without_migration_evicts_native_transactions() -> eyre::Result<()
     for address in [account.address, parent.address()] {
         env.fund_account(address).await?;
     }
-    let fork_point = env
-        .provider()
-        .get_block_by_number(Default::default())
-        .await?
-        .ok_or_else(|| eyre!("latest block missing"))?
-        .header
-        .hash;
+    let fork_point = latest_block_hash(&env).await?;
     let migrate = migration(&env, &account, &root)?;
     pend(&env, &[&migrate]).await?;
     let migrated = env.setup.node.advance_block().await?;
