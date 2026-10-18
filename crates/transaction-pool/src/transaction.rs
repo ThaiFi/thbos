@@ -34,7 +34,7 @@ use tempo_precompiles::{
     tip403_registry::tip403_registry_slots,
 };
 use tempo_primitives::{
-    TempoTxEnvelope,
+    TempoSignature, TempoTxEnvelope,
     transaction::{InvalidValidAfter, InvalidValidBefore, calc_gas_balance_spending},
 };
 use tempo_revm::{TempoInvalidTransaction, TempoTxEnv};
@@ -276,14 +276,21 @@ impl TempoPooledTransaction {
         })
     }
 
-    /// Whether a changed commitment can stale a native signer in this transaction.
+    /// Whether a changed account commitment can stale this transaction's authority.
+    ///
+    /// A native multisig signer matches when its account is in `changed_commitments`, or on any
+    /// `reorg`. A primitive authority matches only when its address is in `changed_commitments`
+    /// (a commitment change retires the bare key, TIP-1112). Primitive authorities are the sender
+    /// of a non-AA or primitive-signed transaction, a primitive key authorization signer, a
+    /// separate fee payer and the key ID of a primitive access key. The account that an access key
+    /// signs for is not one: a nonzero commitment does not revoke its grants.
     pub(crate) fn needs_configurable_revalidation(
         &self,
         changed_commitments: &AddressSet,
         reorg: bool,
     ) -> bool {
         let Some(tx) = self.inner().as_aa() else {
-            return false;
+            return changed_commitments.contains(self.sender_ref());
         };
         let keychain = tx.signature().as_keychain();
         let transaction_signer = tx
@@ -295,10 +302,32 @@ impl TempoPooledTransaction {
             .key_authorization
             .as_ref()
             .and_then(|authorization| authorization.signature.as_multisig());
-        [transaction_signer, grant_signer]
+        if [transaction_signer, grant_signer]
             .into_iter()
             .flatten()
             .any(|signature| reorg || changed_commitments.contains(&signature.account()))
+        {
+            return true;
+        }
+        // A primitive authority changes only with a commitment, so a bare reorg stops here.
+        if changed_commitments.is_empty() {
+            return false;
+        }
+        let sender =
+            matches!(tx.signature(), TempoSignature::Primitive(_)).then(|| *self.sender_ref());
+        // Recovery fails only for a transaction that validation already rejects.
+        let grant_signer = self
+            .key_authorization_signer_subject()
+            .map(|subject| subject.key_id);
+        let fee_payer = tx
+            .tx()
+            .fee_payer_signature
+            .and_then(|_| self.fee_payer().ok());
+        let access_key = self.keychain_subject().map(|subject| subject.key_id);
+        [sender, grant_signer, fee_payer, access_key]
+            .into_iter()
+            .flatten()
+            .any(|authority| changed_commitments.contains(&authority))
     }
 
     /// Returns the unique identifier for this AA transaction.
@@ -1171,7 +1200,7 @@ mod tests {
     use tempo_precompiles::{PATH_USD_ADDRESS, nonce::NonceManager};
     use tempo_primitives::transaction::{
         KeyAuthorization, MultisigConfig, MultisigOwner, MultisigSignature, SignatureType,
-        TEMPO_EXPIRING_NONCE_KEY, TempoTransaction,
+        TEMPO_EXPIRING_NONCE_KEY, TempoSignedAuthorization, TempoTransaction,
         tempo_transaction::Call,
         tt_signature::{KeychainSignature, PrimitiveSignature, TempoSignature},
     };
@@ -1232,18 +1261,16 @@ mod tests {
         assert!(!delegated.needs_configurable_revalidation(&changed(parent), false));
         assert!(delegated.needs_configurable_revalidation(&none, true));
 
-        let primitive_keychain = pooled(
-            TxBuilder::aa(parent).build(),
-            TempoSignature::Keychain(KeychainSignature::new(
-                parent,
-                PrimitiveSignature::default(),
-            )),
-        );
+        // A primitive access key matches on its key ID only. Its account is untouched by the
+        // account's own commitment (TIP-1112, R17) and a reorg alone adds no retirement.
+        let key = PrivateKeySigner::from_bytes(&B256::with_last_byte(2)).unwrap();
+        let primitive_keychain = TxBuilder::aa(parent).build_keychain(parent, &key);
+        assert!(primitive_keychain.needs_configurable_revalidation(&changed(key.address()), false));
         assert!(!primitive_keychain.needs_configurable_revalidation(&changed(parent), false));
         assert!(!primitive_keychain.needs_configurable_revalidation(&none, true));
 
         let grant = KeyAuthorization::unrestricted(1, SignatureType::Multisig, recipient)
-            .into_signed(multisig);
+            .into_signed(multisig.clone());
         let inline = TxBuilder::aa(parent).key_authorization(grant).build();
         assert!(inline.needs_configurable_revalidation(&changed(signer), false));
         assert!(!inline.needs_configurable_revalidation(&changed(recipient), false));
@@ -1253,6 +1280,92 @@ mod tests {
                 .build()
                 .needs_configurable_revalidation(&none, true)
         );
+
+        // Primitive roles match on the changed set only, never on a reorg.
+        let legacy = TxBuilder::eip1559(recipient).build_eip1559();
+        assert!(legacy.needs_configurable_revalidation(&changed(legacy.sender()), false));
+        assert!(!legacy.needs_configurable_revalidation(&changed(recipient), false));
+        assert!(!legacy.needs_configurable_revalidation(&none, true));
+
+        let primitive_sender = TxBuilder::aa(signer).build();
+        assert!(primitive_sender.needs_configurable_revalidation(&changed(signer), false));
+        assert!(!primitive_sender.needs_configurable_revalidation(&changed(recipient), false));
+        assert!(!primitive_sender.needs_configurable_revalidation(&none, true));
+
+        let sponsor = PrivateKeySigner::from_bytes(&B256::with_last_byte(3)).unwrap();
+        let mut sponsored = TxBuilder::aa(parent)
+            .build()
+            .inner()
+            .as_aa()
+            .unwrap()
+            .tx()
+            .clone();
+        sponsored.fee_payer_signature = Some(
+            sponsor
+                .sign_hash_sync(&sponsored.fee_payer_signature_hash(parent))
+                .unwrap(),
+        );
+        let sponsored_by = |signature| {
+            TempoPooledTransaction::new(
+                TempoTxEnvelope::from(sponsored.clone().into_signed(signature)).with_signer(parent),
+            )
+        };
+        let delegated_sponsored = sponsored_by(TempoSignature::Keychain(KeychainSignature::new(
+            parent, multisig,
+        )));
+        assert!(
+            delegated_sponsored.needs_configurable_revalidation(&changed(sponsor.address()), false)
+        );
+        assert!(!delegated_sponsored.needs_configurable_revalidation(&changed(parent), false));
+        assert!(!delegated_sponsored.needs_configurable_revalidation(&none, false));
+        // A primitive sender with a separate fee payer matches on either, never on a reorg.
+        let primitive_sponsored = sponsored_by(TempoSignature::default());
+        assert!(
+            primitive_sponsored.needs_configurable_revalidation(&changed(sponsor.address()), false)
+        );
+        assert!(primitive_sponsored.needs_configurable_revalidation(&changed(parent), false));
+        assert!(!primitive_sponsored.needs_configurable_revalidation(&changed(recipient), false));
+        assert!(!primitive_sponsored.needs_configurable_revalidation(&none, true));
+
+        let primitive_grant =
+            KeyAuthorization::unrestricted(1, SignatureType::Secp256k1, recipient);
+        let grant_signature = key
+            .sign_hash_sync(&primitive_grant.signature_hash())
+            .unwrap();
+        let primitive_grant = TxBuilder::aa(parent)
+            .key_authorization(
+                primitive_grant.into_signed(PrimitiveSignature::Secp256k1(grant_signature)),
+            )
+            .build();
+        assert!(primitive_grant.needs_configurable_revalidation(&changed(key.address()), false));
+        assert!(!primitive_grant.needs_configurable_revalidation(&changed(recipient), false));
+        assert!(!primitive_grant.needs_configurable_revalidation(&none, true));
+
+        // The authority of an authorization list entry is skipped by the block, not retired
+        // (TIP-1112), so it is no role.
+        let authorization = alloy_eips::eip7702::Authorization {
+            chain_id: U256::from(1),
+            address: recipient,
+            nonce: 0,
+        };
+        let entry_signature = key.sign_hash_sync(&authorization.signature_hash()).unwrap();
+        let mut with_entry = TxBuilder::aa(parent)
+            .build()
+            .inner()
+            .as_aa()
+            .unwrap()
+            .tx()
+            .clone();
+        with_entry.tempo_authorization_list = vec![TempoSignedAuthorization::new_unchecked(
+            authorization,
+            PrimitiveSignature::Secp256k1(entry_signature).into(),
+        )];
+        let with_entry = TempoPooledTransaction::new(
+            TempoTxEnvelope::from(with_entry.into_signed(TempoSignature::default()))
+                .with_signer(parent),
+        );
+        assert!(!with_entry.needs_configurable_revalidation(&changed(key.address()), false));
+        assert!(with_entry.needs_configurable_revalidation(&changed(parent), false));
     }
 
     fn raw_pooled_transaction(
