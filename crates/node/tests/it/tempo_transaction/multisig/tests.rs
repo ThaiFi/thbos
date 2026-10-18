@@ -696,8 +696,8 @@ async fn retired_root_rpc_rejects_send_and_allows_calls() -> eyre::Result<()> {
     Ok(())
 }
 
-/// A root-signed transaction queued behind its account's migration stays out of the chain once the
-/// migration commits, and the root key cannot replace it (TIP-1112).
+/// A root-signed transaction queued behind its account's migration stays out of the chain and
+/// leaves the pool once the migration commits, and the root key cannot send it again (TIP-1112).
 #[tokio::test(flavor = "multi_thread")]
 async fn root_transaction_queued_behind_migration_is_not_included() -> eyre::Result<()> {
     let mut env = environment().await?;
@@ -747,12 +747,12 @@ async fn root_transaction_queued_behind_migration_is_not_included() -> eyre::Res
         account.nonce
     );
 
-    // A fee-bumped replacement signed by the root key is rejected.
-    let mut replacement = queued;
-    replacement.max_priority_fee_per_gas *= 2;
-    replacement.max_fee_per_gas *= 2;
-    let signature = TempoSignature::Primitive(root.sign(replacement.signature_hash())?);
-    let error = reject(&env, replacement, signature).await?;
+    // The evicted transaction, sent again by the root key at a higher fee, is rejected.
+    let mut resent = queued;
+    resent.max_priority_fee_per_gas *= 2;
+    resent.max_fee_per_gas *= 2;
+    let signature = TempoSignature::Primitive(root.sign(resent.signature_hash())?);
+    let error = reject(&env, resent, signature).await?;
     let retired = format!(
         "root key of {} is retired and cannot act as the transaction sender",
         account.address
