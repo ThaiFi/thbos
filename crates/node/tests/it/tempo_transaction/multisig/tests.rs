@@ -10,8 +10,8 @@ use alloy::{
 };
 use alloy_eips::{BlockId, Decodable2718, eip7702::Authorization};
 use futures::{FutureExt, StreamExt};
-use reth_e2e_test_utils::node::Finality;
-use reth_ethereum::pool::TransactionPool;
+use reth_e2e_test_utils::{node::Finality, wait::WAIT_TIMEOUT};
+use reth_ethereum::pool::{TransactionEvent, TransactionPool};
 use reth_node_builder::BuiltPayload;
 use serde_json::{from_value, json};
 use tempo_chainspec::spec::TEMPO_T1_BASE_FEE;
@@ -115,6 +115,12 @@ async fn native_rpc_registration_revert_retry_and_rotation() -> eyre::Result<()>
 
     let replacement = NativeAccount::new(0x21, 2);
     let (next, rotate) = account.rotate_to(&replacement);
+    // The current config signs a transaction that waits in the pool behind the rotation.
+    let mut stale = account.transaction(&env, vec![noop()]);
+    stale.nonce += 1;
+    let signature = account.sign(&stale)?;
+    let stale: TempoTxEnvelope = stale.into_signed(signature).into();
+    let stale = pend(&env, &[&stale]).await?[0];
     let tx = account.transaction(&env, vec![rotate]);
     let signature = account.sign(&tx)?;
     account.submit(&mut env, tx, signature, true).await?;
@@ -122,6 +128,9 @@ async fn native_rpc_registration_revert_retry_and_rotation() -> eyre::Result<()>
         commitment(&env, account.address).await?,
         next.commitment().unwrap()
     );
+    // The rotation changes the commitment, so the pool revalidates the transaction and evicts
+    // it (TIP-1112).
+    env.setup.node.wait_for_pool_removal([stale]).await?;
     let tx = account.transaction(&env, vec![noop()]);
     assert!(
         reject(&env, tx.clone(), account.sign(&tx)?)
@@ -1074,12 +1083,27 @@ async fn retired_root_reorg_evicts_pending_transactions() -> eyre::Result<()> {
     env.setup.node.set_finality(Finality::Keep);
     let chain_id = env.chain_id();
     let root = PrivateKeySigner::from_bytes(&B256::repeat_byte(0x30)).unwrap();
+    let key = PrivateKeySigner::from_bytes(&B256::repeat_byte(0x34)).unwrap();
     let bystander = PrivateKeySigner::from_bytes(&B256::repeat_byte(0x40)).unwrap();
     let sponsor = PrivateKeySigner::from_bytes(&B256::repeat_byte(0x41)).unwrap();
-    let account = NativeAccount::migrated(root.address(), 0x31, 3);
-    for address in [account.address, bystander.address(), sponsor.address()] {
+    let grantor = PrivateKeySigner::from_bytes(&B256::repeat_byte(0x42)).unwrap();
+    let grantee = PrivateKeySigner::from_bytes(&B256::repeat_byte(0x43)).unwrap();
+    let mut account = NativeAccount::migrated(root.address(), 0x31, 3);
+    for address in [
+        account.address,
+        bystander.address(),
+        sponsor.address(),
+        grantor.address(),
+    ] {
         env.fund_account(address).await?;
     }
+    // Before the migration the account grants `key`, whose grant outlives the commitment (R17).
+    let mut tx = account.transaction(&env, vec![noop()]);
+    tx.key_authorization = Some(grant_signed(chain_id, key.address(), &root)?);
+    let signature = TempoSignature::Primitive(PrimitiveSignature::Secp256k1(
+        root.sign_hash_sync(&tx.signature_hash())?,
+    ));
+    account.submit(&mut env, tx, signature, true).await?;
     let fork_point = env
         .provider()
         .get_block_by_number(Default::default())
@@ -1088,10 +1112,12 @@ async fn retired_root_reorg_evicts_pending_transactions() -> eyre::Result<()> {
         .header
         .hash;
 
-    // Both transactions wait for a nonce that nothing has mined: the root key's behind the
-    // migration, the bystander's behind a nonce that it never sends. The bystander's has a fee
-    // payer and carries an authorization entry of the account, which the migration leaves valid:
-    // a block skips the entry of a retired account (TIP-1112).
+    // All transactions wait for a nonce that nothing has mined: the root key's and the access
+    // key's behind the migration, the others behind a nonce that their sender never sends. The
+    // migration leaves the others valid. The bystander's has a fee payer and carries an
+    // authorization entry of the account, which a block skips for a retired account (TIP-1112).
+    // The sponsor sends a legacy one, and the grantor's carries the grant of the access key that
+    // signs it.
     let old_chain = env.setup.node.advance_block().await?;
     env.setup
         .node
@@ -1114,18 +1140,48 @@ async fn retired_root_reorg_evicts_pending_transactions() -> eyre::Result<()> {
     )];
     sign_fee_payer(&mut bystander_tx, bystander.address(), &sponsor)?;
     let bystander_tx = root_signed(bystander_tx, &bystander)?;
-    let hashes = pend(&env, &[&root_tx, &bystander_tx]).await?;
-    // The pool reports every removal of the bystander's transaction to this listener, also one
-    // that the revalidation adds back.
-    let mut bystander_events = env
-        .setup
-        .node
-        .inner
-        .pool
-        .transaction_event_listener(hashes[1])
-        .ok_or_else(|| eyre!("the bystander's transaction is not pooled"))?;
+    let legacy_tx = TxLegacy {
+        chain_id: Some(chain_id),
+        nonce: 1,
+        gas_price: TEMPO_T1_BASE_FEE as u128,
+        gas_limit: 200_000,
+        to: noop().to,
+        value: U256::ZERO,
+        input: Bytes::new(),
+    };
+    let signature = sponsor.sign_hash_sync(&legacy_tx.signature_hash())?;
+    let legacy_tx = TempoTxEnvelope::Legacy(legacy_tx.into_signed(signature));
+    let mut grantee_tx = create_basic_aa_tx(chain_id, 1, vec![noop()], GAS_LIMIT);
+    grantee_tx.key_authorization = Some(grant_signed(chain_id, grantee.address(), &grantor)?);
+    let grantee_tx = key_signed(grantee_tx, grantor.address(), &grantee)?;
+    let key_tx = key_signed(
+        create_basic_aa_tx(chain_id, account.nonce + 2, vec![noop()], GAS_LIMIT),
+        account.address,
+        &key,
+    )?;
+    let hashes = pend(
+        &env,
+        &[&root_tx, &bystander_tx, &legacy_tx, &grantee_tx, &key_tx],
+    )
+    .await?;
+    // The pool reports every removal of these transactions to their listeners, also one that the
+    // revalidation adds back.
+    let bystanders = [
+        (hashes[1], "the bystander's transaction"),
+        (hashes[2], "the sponsor's legacy transaction"),
+        (hashes[3], "the grantor's transaction"),
+        (hashes[4], "the access key's transaction"),
+    ];
+    let pool = &env.setup.node.inner.pool;
+    let listeners = bystanders
+        .iter()
+        .map(|(hash, what)| {
+            pool.transaction_event_listener(*hash)
+                .ok_or_else(|| eyre!("{what} is not pooled"))
+        })
+        .collect::<eyre::Result<Vec<_>>>()?;
 
-    // A reorg onto a block that commits nothing leaves both pooled.
+    // A reorg onto a block that commits nothing leaves all of them pooled.
     let node = &mut env.setup.node;
     let empty = node.advance_block_on(fork_point).await?;
     node.wait_for_pool_head(empty.block().hash()).await?;
@@ -1139,6 +1195,13 @@ async fn retired_root_reorg_evicts_pending_transactions() -> eyre::Result<()> {
     // A reorg onto a block that holds the migration retires the root key.
     let migrate = migration(&env, &account, &root)?;
     let migrate_hash = pend(&env, &[&migrate]).await?[0];
+    let mut root_events = env
+        .setup
+        .node
+        .inner
+        .pool
+        .transaction_event_listener(hashes[0])
+        .ok_or_else(|| eyre!("the root key's transaction is not pooled"))?;
     let node = &mut env.setup.node;
     let new_chain = node.advance_block_on(fork_point).await?;
     node.wait_for_pool_head(new_chain.block().hash()).await?;
@@ -1155,16 +1218,97 @@ async fn retired_root_reorg_evicts_pending_transactions() -> eyre::Result<()> {
     assert!(receipt.status(), "{receipt:?}");
     assert!(provider.get_transaction_receipt(hashes[0]).await?.is_none());
     env.setup.node.wait_for_pool_removal([hashes[0]]).await?;
-    while let Some(Some(event)) = bystander_events.next().now_or_never() {
+    // The pool reports the eviction and every other removal of its batch while it holds the lock
+    // of its listeners, which subscribing takes. So once the eviction is reported, a check that
+    // subscribes sees every removal of a bystander's transaction.
+    let evicted = tokio::time::timeout(WAIT_TIMEOUT, async {
+        while let Some(event) = root_events.next().await {
+            if event.is_final() {
+                return Some(event);
+            }
+        }
+        None
+    })
+    .await?;
+    assert_eq!(evicted, Some(TransactionEvent::Discarded));
+    let pool = &env.setup.node.inner.pool;
+    for ((hash, what), mut events) in bystanders.into_iter().zip(listeners) {
         assert!(
-            !event.is_final(),
-            "the bystander's transaction left the pool: {event:?}"
+            pool.transaction_event_listener(hash).is_some(),
+            "{what} left the pool"
         );
+        while let Some(Some(event)) = events.next().now_or_never() {
+            assert!(!event.is_final(), "{what} left the pool: {event:?}");
+        }
     }
-    assert!(
-        env.setup.node.inner.pool.contains(&hashes[1]),
-        "the bystander's transaction left the pool"
+    Ok(())
+}
+
+/// A reorg onto a chain without an account's migration evicts the pending transactions that its
+/// native config signs: as the sender, as the grant signer of its access key and as the access key
+/// of another account (TIP-1112). The new chain changes no commitment, so only the reorg marks
+/// them for revalidation.
+#[tokio::test(flavor = "multi_thread")]
+async fn reorg_without_migration_evicts_native_transactions() -> eyre::Result<()> {
+    let mut env = environment().await?;
+    // Keep genesis finalized, so the blocks below can be reorged.
+    env.setup.node.set_finality(Finality::Keep);
+    let chain_id = env.chain_id();
+    let root = PrivateKeySigner::from_bytes(&B256::repeat_byte(0x30)).unwrap();
+    let key = PrivateKeySigner::from_bytes(&B256::repeat_byte(0x34)).unwrap();
+    let parent = PrivateKeySigner::from_bytes(&B256::repeat_byte(0x40)).unwrap();
+    let mut account = NativeAccount::migrated(root.address(), 0x31, 3);
+    for address in [account.address, parent.address()] {
+        env.fund_account(address).await?;
+    }
+    let fork_point = env
+        .provider()
+        .get_block_by_number(Default::default())
+        .await?
+        .ok_or_else(|| eyre!("latest block missing"))?
+        .header
+        .hash;
+    let migrate = migration(&env, &account, &root)?;
+    pend(&env, &[&migrate]).await?;
+    let migrated = env.setup.node.advance_block().await?;
+    env.setup
+        .node
+        .wait_for_pool_head(migrated.block().hash())
+        .await?;
+    assert_eq!(
+        commitment(&env, account.address).await?,
+        account.config.commitment().unwrap()
     );
+    account.nonce += 1;
+
+    // Each transaction waits for a nonce that nothing sends, so no block includes it.
+    let mut own_tx = account.transaction(&env, vec![noop()]);
+    own_tx.nonce += 1;
+    let signature = account.sign(&own_tx)?;
+    let own_tx: TempoTxEnvelope = own_tx.into_signed(signature).into();
+    let grant = KeyAuthorization::unrestricted(chain_id, SignatureType::Secp256k1, key.address())
+        .with_account(account.address);
+    let grant_signature = account.quorum(grant.signature_hash(), false)?;
+    let mut key_tx = account.transaction(&env, vec![noop()]);
+    key_tx.nonce += 2;
+    key_tx.key_authorization = Some(grant.into_signed(grant_signature));
+    let key_tx = key_signed(key_tx, account.address, &key)?;
+    let delegation =
+        KeyAuthorization::unrestricted(chain_id, SignatureType::Multisig, account.address);
+    let signature =
+        PrimitiveSignature::Secp256k1(parent.sign_hash_sync(&delegation.signature_hash())?);
+    let mut delegate_tx = create_basic_aa_tx(chain_id, 1, vec![noop()], GAS_LIMIT);
+    delegate_tx.key_authorization = Some(delegation.into_signed(signature));
+    let signature = account.as_delegate(&delegate_tx, parent.address(), false)?;
+    let delegate_tx: TempoTxEnvelope = delegate_tx.into_signed(signature).into();
+    let hashes = pend(&env, &[&own_tx, &key_tx, &delegate_tx]).await?;
+
+    // A reorg onto a block that does not hold the migration clears the commitment.
+    let node = &mut env.setup.node;
+    let new_chain = node.advance_block_on(fork_point).await?;
+    node.wait_for_pool_head(new_chain.block().hash()).await?;
+    assert_eq!(commitment(&env, account.address).await?, B256::ZERO);
+    env.setup.node.wait_for_pool_removal(hashes).await?;
     Ok(())
 }
 
