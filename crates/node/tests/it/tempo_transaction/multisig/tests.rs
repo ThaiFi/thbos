@@ -9,6 +9,7 @@ use alloy::{
     sol_types::{SolError, SolEvent},
 };
 use alloy_eips::{BlockId, Decodable2718, eip7702::Authorization};
+use futures::{FutureExt, StreamExt};
 use reth_e2e_test_utils::node::Finality;
 use reth_ethereum::pool::TransactionPool;
 use reth_node_builder::BuiltPayload;
@@ -1064,6 +1065,8 @@ async fn retired_root_leaves_unrelated_pending_transactions_valid() -> eyre::Res
 /// A migration that arrives with a reorg evicts the pending transactions of its account's root
 /// key, as one that arrives with a canonical commit does, and a reorg that commits nothing evicts
 /// nothing (TIP-1112). The reorg's changes are those of the new chain since the fork point.
+/// Neither reorg removes, not even to revalidate it, a pending transaction that the migration
+/// leaves valid.
 #[tokio::test(flavor = "multi_thread")]
 async fn retired_root_reorg_evicts_pending_transactions() -> eyre::Result<()> {
     let mut env = environment().await?;
@@ -1072,9 +1075,11 @@ async fn retired_root_reorg_evicts_pending_transactions() -> eyre::Result<()> {
     let chain_id = env.chain_id();
     let root = PrivateKeySigner::from_bytes(&B256::repeat_byte(0x30)).unwrap();
     let bystander = PrivateKeySigner::from_bytes(&B256::repeat_byte(0x40)).unwrap();
+    let sponsor = PrivateKeySigner::from_bytes(&B256::repeat_byte(0x41)).unwrap();
     let account = NativeAccount::migrated(root.address(), 0x31, 3);
-    env.fund_account(account.address).await?;
-    env.fund_account(bystander.address()).await?;
+    for address in [account.address, bystander.address(), sponsor.address()] {
+        env.fund_account(address).await?;
+    }
     let fork_point = env
         .provider()
         .get_block_by_number(Default::default())
@@ -1084,7 +1089,9 @@ async fn retired_root_reorg_evicts_pending_transactions() -> eyre::Result<()> {
         .hash;
 
     // Both transactions wait for a nonce that nothing has mined: the root key's behind the
-    // migration, the bystander's behind a nonce that it never sends.
+    // migration, the bystander's behind a nonce that it never sends. The bystander's has a fee
+    // payer and carries an authorization entry of the account, which the migration leaves valid:
+    // a block skips the entry of a retired account (TIP-1112).
     let old_chain = env.setup.node.advance_block().await?;
     env.setup
         .node
@@ -1094,11 +1101,29 @@ async fn retired_root_reorg_evicts_pending_transactions() -> eyre::Result<()> {
         create_basic_aa_tx(chain_id, account.nonce + 1, vec![noop()], GAS_LIMIT),
         &root,
     )?;
-    let bystander_tx = root_signed(
-        create_basic_aa_tx(chain_id, 1, vec![noop()], GAS_LIMIT),
-        &bystander,
-    )?;
+    let delegation = Authorization {
+        chain_id: U256::from(chain_id),
+        address: Address::repeat_byte(0x7d),
+        nonce: account.nonce + 1,
+    };
+    let signature = root.sign_hash_sync(&delegation.signature_hash())?;
+    let mut bystander_tx = create_basic_aa_tx(chain_id, 1, vec![noop()], GAS_LIMIT);
+    bystander_tx.tempo_authorization_list = vec![TempoSignedAuthorization::new_unchecked(
+        delegation,
+        signature.into(),
+    )];
+    sign_fee_payer(&mut bystander_tx, bystander.address(), &sponsor)?;
+    let bystander_tx = root_signed(bystander_tx, &bystander)?;
     let hashes = pend(&env, &[&root_tx, &bystander_tx]).await?;
+    // The pool reports every removal of the bystander's transaction to this listener, also one
+    // that the revalidation adds back.
+    let mut bystander_events = env
+        .setup
+        .node
+        .inner
+        .pool
+        .transaction_event_listener(hashes[1])
+        .ok_or_else(|| eyre!("the bystander's transaction is not pooled"))?;
 
     // A reorg onto a block that commits nothing leaves both pooled.
     let node = &mut env.setup.node;
@@ -1130,6 +1155,12 @@ async fn retired_root_reorg_evicts_pending_transactions() -> eyre::Result<()> {
     assert!(receipt.status(), "{receipt:?}");
     assert!(provider.get_transaction_receipt(hashes[0]).await?.is_none());
     env.setup.node.wait_for_pool_removal([hashes[0]]).await?;
+    while let Some(Some(event)) = bystander_events.next().now_or_never() {
+        assert!(
+            !event.is_final(),
+            "the bystander's transaction left the pool: {event:?}"
+        );
+    }
     assert!(
         env.setup.node.inner.pool.contains(&hashes[1]),
         "the bystander's transaction left the pool"
