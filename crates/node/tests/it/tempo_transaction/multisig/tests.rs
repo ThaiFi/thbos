@@ -1204,7 +1204,7 @@ async fn retired_root_reorg_evicts_pending_transactions() -> eyre::Result<()> {
         .inner
         .pool
         .transaction_event_listener(hashes[0])
-        .ok_or_else(|| eyre!("the root key's transaction is not pooled"))?;
+        .ok_or_eyre("the root key's transaction is not pooled")?;
     let node = &mut env.setup.node;
     let new_chain = node.advance_block_on(fork_point).await?;
     node.wait_for_pool_head(new_chain.block().hash()).await?;
