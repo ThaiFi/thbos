@@ -587,15 +587,20 @@ pub enum AccountSignature {
 impl AccountSignature {
     /// Decodes a direct approval, rejecting recursive keychain envelopes.
     pub(crate) fn from_bytes(data: &[u8]) -> Result<Self, &'static str> {
-        if data.len() != SECP256K1_SIGNATURE_LENGTH
-            && matches!(
-                data.first(),
-                Some(&SIGNATURE_TYPE_KEYCHAIN | &SIGNATURE_TYPE_KEYCHAIN_V2)
-            )
-        {
-            return Err("keychain signatures are not account signatures");
+        if data.len() != SECP256K1_SIGNATURE_LENGTH {
+            match data.first() {
+                Some(&SIGNATURE_TYPE_KEYCHAIN | &SIGNATURE_TYPE_KEYCHAIN_V2) => {
+                    return Err("keychain signatures are not account signatures");
+                }
+                Some(&SIGNATURE_TYPE_MULTISIG) if data.len() > 1 => {
+                    return decode_exact::<MultisigSignature>(&data[1..])
+                        .map(Self::Multisig)
+                        .map_err(|_| "Invalid Multisig signature RLP");
+                }
+                _ => {}
+            }
         }
-        Self::try_from(TempoSignature::from_bytes(data)?)
+        PrimitiveSignature::from_bytes(data).map(Self::Primitive)
     }
 
     /// Writes the direct approval without allocating an intermediate buffer.
@@ -675,6 +680,15 @@ impl From<MultisigSignature> for AccountSignature {
     }
 }
 
+impl From<AccountSignature> for TempoSignature {
+    fn from(signature: AccountSignature) -> Self {
+        match signature {
+            AccountSignature::Primitive(signature) => Self::Primitive(signature),
+            AccountSignature::Multisig(signature) => Self::Multisig(signature),
+        }
+    }
+}
+
 impl TryFrom<TempoSignature> for AccountSignature {
     type Error = &'static str;
 
@@ -750,9 +764,7 @@ impl TempoSignature {
         }
 
         if data.len() > 1 && data[0] == SIGNATURE_TYPE_MULTISIG {
-            return decode_exact::<MultisigSignature>(&data[1..])
-                .map(Self::Multisig)
-                .map_err(|_| "Invalid Multisig signature RLP");
+            return AccountSignature::from_bytes(data).map(Self::from);
         }
 
         // Check if this is a Keychain signature before delegating to
