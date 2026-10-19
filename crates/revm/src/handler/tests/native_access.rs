@@ -1,5 +1,5 @@
 use super::*;
-use crate::error::RootKeyRole;
+use crate::{error::RootKeyRole, native_multisig::account_access_gas};
 use alloy_eips::eip2930::AccessList;
 use alloy_evm::FromRecoveredTx;
 use alloy_signer::SignerSync;
@@ -431,12 +431,7 @@ fn native_delegate_access_is_intrinsic_once(case: GrantCase) {
         let mut test = fixture.evm(case, warmth, 1_000_000);
         let base = validate_aa_initial_tx_gas(&test.evm).unwrap();
         let gas_params = tempo_gas_params(TempoHardfork::T14);
-        let access = gas_params.warm_storage_read_cost()
-            + if matches!(warmth, Warmth::Cold) {
-                gas_params.cold_account_additional_cost()
-            } else {
-                0
-            };
+        let access = account_access_gas(&gas_params, matches!(warmth, Warmth::Cold));
         let roles = authorizations(&test.evm.ctx.tx);
         let mut registered = Vec::new();
         let mut expected = access;

@@ -143,6 +143,16 @@ pub fn validate_state<J: JournalTr>(
     ))
 }
 
+/// Gas for loading one account: a warm read, plus the cold surcharge when it was not yet accessed.
+pub fn account_access_gas(gas: &GasParams, is_cold: bool) -> u64 {
+    gas.warm_storage_read_cost()
+        + if is_cold {
+            gas.cold_account_additional_cost()
+        } else {
+            0
+        }
+}
+
 /// Applies an authorization list through revm's [`apply_auth_list`] and returns the number of
 /// refunded accounts.
 ///
@@ -448,16 +458,6 @@ fn grant_delegate(tx: &TempoTxEnv) -> Option<Address> {
         .as_ref()
         .filter(|auth| auth.key_type == SignatureType::Multisig)
         .map(|auth| auth.key_id)
-}
-
-/// Gas for loading one account: a warm read, plus the cold surcharge when it was not yet accessed.
-pub fn account_access_gas(gas: &GasParams, is_cold: bool) -> u64 {
-    gas.warm_storage_read_cost()
-        + if is_cold {
-            gas.cold_account_additional_cost()
-        } else {
-            0
-        }
 }
 
 /// The inline grant's code check runs with intrinsic-only metering. Charge its account load
