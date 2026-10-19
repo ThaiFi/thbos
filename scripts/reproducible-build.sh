@@ -63,6 +63,9 @@ build_args=(
   --build-arg "BINARY=$BINARY"
   --build-arg "FEATURES=$FEATURES"
 )
+if [[ -n "${CARGO_BUILD_JOBS:-}" ]]; then
+  build_args+=(--build-arg "CARGO_BUILD_JOBS=$CARGO_BUILD_JOBS")
+fi
 if [[ -n "$DEBIAN_SNAPSHOT" ]]; then
   build_args+=( --build-arg "DEBIAN_SNAPSHOT=$DEBIAN_SNAPSHOT" )
 fi

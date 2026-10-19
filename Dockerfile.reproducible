@@ -36,6 +36,7 @@ ARG VERSION
 ARG TARGETARCH
 ARG BINARY=tempo
 ARG FEATURES=asm-keccak,jemalloc,otlp
+ARG CARGO_BUILD_JOBS
 # Pinned snapshot of the Debian package archive. Bumping this is the *only*
 # legitimate reason for a Debian-side byte change between two builds of the
 # same source tree. Without it, an `apt-get install libjemalloc-dev` between
@@ -113,7 +114,7 @@ RUN mkdir -p /out && \
       cp "target/$target/reproducible/$binary" "/out/$binary"; \
     done
 
-FROM docker-builder AS devnet-builder
+FROM build-base AS devnet-builder
 RUN case "$TARGETARCH" in \
       amd64) target=x86_64-unknown-linux-gnu; multiarch=x86_64-linux-gnu ;; \
       arm64) target=aarch64-unknown-linux-gnu; multiarch=aarch64-linux-gnu ;; \
@@ -121,7 +122,13 @@ RUN case "$TARGETARCH" in \
     JEMALLOC_OVERRIDE=/usr/lib/$multiarch/libjemalloc.a \
       cargo build --locked --profile reproducible --target "$target" \
         --bin tempo --features asm-keccak,jemalloc,otlp,localnet,custom-pcrs && \
-    cp target/$target/reproducible/tempo /out/tempo-devnet
+    mkdir -p /out && cp target/$target/reproducible/tempo /out/tempo-devnet
+
+FROM scratch AS docker-production-artifacts
+COPY --from=docker-builder /out/ /
+
+FROM scratch AS docker-devnet-artifacts
+COPY --from=devnet-builder /out/tempo-devnet /tempo-devnet
 
 FROM scratch AS docker-artifacts
 COPY --from=docker-builder /out/ /

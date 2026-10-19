@@ -4,6 +4,7 @@ set -euo pipefail
 : "${IMAGE_DIR:?IMAGE_DIR is required}"
 : "${GITHUB_RUN_ID:?GITHUB_RUN_ID is required}"
 : "${GITHUB_RUN_ATTEMPT:?GITHUB_RUN_ATTEMPT is required}"
+artifact_attempt="${ARTIFACT_RUN_ATTEMPT:-$GITHUB_RUN_ATTEMPT}"
 cd "$IMAGE_DIR"
 sha256sum --check verified.sha256
 metadata='{}'
@@ -18,7 +19,7 @@ for image in tempo tempo-devnet tempo-localnet tempo-sidecar tempo-xtask; do
   for repository in "${repositories[@]}"; do
     sources=()
     for arch in amd64 arm64; do
-      docker load --input "docker-candidate-$arch-$GITHUB_RUN_ATTEMPT/$image.tar"
+      docker load --input "docker-candidate-$arch-$artifact_attempt/$image.tar"
       source="$repository:verified-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-$arch"
       docker tag "$image:candidate-$arch" "$source"
       digest="$(docker push --quiet "$source" | tail -n 1)"

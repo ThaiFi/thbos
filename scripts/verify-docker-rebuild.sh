@@ -3,13 +3,15 @@
 set -euo pipefail
 : "${IMAGE_DIR:?IMAGE_DIR is required}"
 : "${GITHUB_RUN_ATTEMPT:?GITHUB_RUN_ATTEMPT is required}"
+artifact_attempt="${ARTIFACT_RUN_ATTEMPT:-$GITHUB_RUN_ATTEMPT}"
 cd "$IMAGE_DIR"
 rm -f verified.sha256
 container=""
 trap '[[ -z "$container" ]] || docker rm -f "$container" >/dev/null' EXIT
 for arch in amd64 arm64; do
-  candidate="docker-candidate-$arch-$GITHUB_RUN_ATTEMPT"
-  clean="docker-clean-$arch-$GITHUB_RUN_ATTEMPT"
+  candidate="docker-candidate-$arch-$artifact_attempt"
+  clean="docker-clean-$arch-$artifact_attempt"
+  devnet="docker-clean-devnet-$arch-$artifact_attempt"
   extracted="$(mktemp -d)"
   for image in tempo tempo-devnet tempo-localnet tempo-sidecar tempo-xtask; do
     docker load --input "$candidate/$image.tar"
@@ -25,7 +27,11 @@ for arch in amd64 arm64; do
     docker rm -f "$container" >/dev/null
     container=""
   done
-  (cd "$extracted" && sha256sum --check "$IMAGE_DIR/$clean/clean.sha256")
+  cat "$clean/clean.sha256" "$devnet/clean.sha256" > "$extracted/expected.sha256"
+  # Missing, duplicate, or unexpected entries must never weaken the gate.
+  diff <(printf '%s\n' tempo tempo-devnet tempo-localnet tempo-sidecar tempo-xtask) \
+    <(awk '{print $2}' "$extracted/expected.sha256" | LC_ALL=C sort)
+  (cd "$extracted" && sha256sum --check expected.sha256)
   rm -rf "$extracted"
 done
 # Bind promotion to these exact archives, including their runtime files/labels.

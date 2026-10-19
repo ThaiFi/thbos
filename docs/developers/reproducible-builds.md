@@ -29,6 +29,43 @@ To exercise the Docker gate without publishing, dispatch `docker.yml` with
 `verify_only=true`. The release workflow's `dry_run=true` builds and checks its
 archives without creating a release or uploading to R2.
 
+## Prepare before tagging
+
+Docker production and devnet rebuilds run on separate fresh runners for each
+architecture. Devnet compilation does not wait for the production executables.
+Set repository variables `REPRO_RUNNER_AMD64` and `REPRO_RUNNER_ARM64` to your
+configured GitHub-hosted larger-runner labels to accelerate independent builds.
+They default to the standard GitHub-hosted runners; do not use Depot labels or
+shared compiler/build caches. `REPRO_BUILD_JOBS` controls Cargo concurrency on
+independent runners (defaults: 4 on x86, 2 on ARM to reduce peak memory). Increase
+it to suit the larger runner's memory and CPU capacity.
+
+Before tagging, dispatch Docker verification on the branch at the exact release
+commit with `verify_only=true`. Dispatch Release on the same branch/commit with
+`tag=vX.Y.Z`, `source_sha=<full commit SHA>`, `dry_run=true`, and `profile=maxperf`.
+Compilation and verification need no GPG key. Signing runs only at publication
+time in the existing tag-protected `release` environment; its deployment policy
+is unchanged. `source_sha` is accepted only for dry runs, so publication still
+resolves the actual release tag.
+
+When that commit is tagged, both workflows automatically look for a successful
+preparation among the latest 20 successful runs for that commit. They download
+the original artifacts and compare the packaged executable bytes again before
+publication, without compiling again. Release preparation must also match the
+version and macOS profile. The source run must execute the same workflow from
+the exact source commit in this repository. A preparation dispatched from a
+different workflow commit cannot be reused, even if it checked out the desired
+source. Docker archives expire after two days; prepare close to release time.
+If no preparation qualifies, the normal build and independent rebuild run.
+Docker image labels remain those of the prepared image; publication adds the
+release tags to those exact verified images.
+
+For an explicit run, dispatch either workflow with `prepared_run_id=<run ID>`;
+select the release tag/ref and use the matching macOS profile for Release.
+An explicit run with the wrong commit, workflow, repository, status, version,
+profile, or missing artifacts fails instead of silently rebuilding. Dry-run and
+verification-only modes can exercise artifact reuse without publishing.
+
 These checks separate Depot builds/caches from verification, but both are
 orchestrated by GitHub Actions. They do not protect against a compromise of the
 GitHub workflow itself. The periodic Argo verifiers are no longer required for
