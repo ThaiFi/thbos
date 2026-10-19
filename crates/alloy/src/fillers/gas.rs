@@ -14,6 +14,10 @@ use tempo_primitives::transaction::{FEE_PAYER_SIGNATURE_MARKER, SignedKeyAuthori
 
 use crate::{TempoNetwork, provider::TempoProviderExt, rpc::TempoTransactionRequest};
 
+/// Gas that a fee payer signature adds from T14: one cold account access, equal to the cost the
+/// protocol charges for reading the fee payer's account.
+const FEE_PAYER_ACCESS_GAS: u64 = 2_600;
+
 /// Gas estimation for Tempo transactions.
 ///
 /// When an access-key request carries a persisted one-time authorization, this
@@ -73,12 +77,23 @@ impl TxFiller<TempoNetwork> for TempoGasFiller {
         if let Some(resolved) = &key_authorization {
             estimate_request.key_authorization = resolved.clone();
         }
-        let gas = <GasFiller as TxFiller<TempoNetwork>>::prepare(
+        let mut gas = <GasFiller as TxFiller<TempoNetwork>>::prepare(
             &self.inner,
             provider,
             &estimate_request,
         )
         .await?;
+        // The marker is stripped for the estimate because a node before T14 rejects it. From T14
+        // the fee payer signature costs one cold account access that the estimate cannot see. The
+        // fork is not known here, so the access is added at every fork: a node before T14 does not
+        // charge it and the unused gas is refunded.
+        if request.fee_payer_signature == Some(FEE_PAYER_SIGNATURE_MARKER)
+            && request.gas_limit().is_none()
+        {
+            let (GasFillable::Legacy { gas_limit, .. } | GasFillable::Eip1559 { gas_limit, .. }) =
+                &mut gas;
+            *gas_limit = gas_limit.saturating_add(FEE_PAYER_ACCESS_GAS);
+        }
         Ok(TempoGasFillable {
             gas,
             key_authorization,
