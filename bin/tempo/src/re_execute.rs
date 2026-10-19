@@ -12,14 +12,12 @@ use tempo_metabinary::{process::run_child, routing::first_block_at};
 use tempo_node::node::TempoNode;
 use tokio::process::Command;
 
-/// Marks a frozen re-execute child, which must not delegate again. Holds the era name.
+/// Marks a frozen re-execute child, which must not delegate again.
 const ERA_ENV: &str = "TEMPO_RE_EXECUTE_ERA";
 
 /// Runs the frozen part of a `re-execute` range in era binaries.
 ///
-/// Returns `Continue(None)` to run the command unchanged, `Continue(Some(argv))` to run the
-/// remaining live range in-process with `argv`, or `Break` when nothing remains or a shutdown
-/// signal arrived.
+/// Returns the argv for the remaining live range, `None` to run unchanged, or `Break` if done.
 pub(crate) fn delegate(
     matches: &ArgMatches,
 ) -> eyre::Result<ControlFlow<(), Option<Vec<OsString>>>> {
@@ -95,7 +93,7 @@ pub(crate) fn delegate(
     }
 }
 
-/// Replaces `--from` and `--to` in `args`, keeping every other argument in order.
+/// Replaces `--from` and `--to` in `args`, keeping the rest in order.
 fn range_args(args: &[OsString], from: u64, to: Option<u64>) -> Vec<OsString> {
     let mut kept = Vec::with_capacity(args.len() + 2);
     let mut args = args.iter();
@@ -121,56 +119,21 @@ mod tests {
 
     #[test]
     fn range_args_replace_bounds() {
-        let args = [
-            "re-execute",
-            "--from",
-            "5",
-            "--chain",
-            "mainnet",
-            "--to=90",
-            "--num-tasks",
-            "4",
-        ]
-        .map(OsString::from);
-        assert_eq!(
-            range_args(&args, 10, Some(20)),
-            [
-                "re-execute",
-                "--chain",
-                "mainnet",
-                "--num-tasks",
-                "4",
-                "--from=10",
-                "--to=20"
-            ]
-            .map(OsString::from)
-        );
-        assert_eq!(
-            range_args(&args[..1], 10, None),
-            ["re-execute", "--from=10"].map(OsString::from)
-        );
-    }
-
-    #[tokio::test]
-    async fn first_block_at_finds_era_ends() {
-        // Blocks 0..=4 with timestamps 10, 20, 30, 40, 50.
-        let timestamp = async |number: u64| -> eyre::Result<u64> { Ok((number + 1) * 10) };
-        assert_eq!(first_block_at(0, 5, 5, timestamp).await.unwrap(), 0);
-        assert_eq!(first_block_at(0, 5, 10, timestamp).await.unwrap(), 0);
-        assert_eq!(first_block_at(0, 5, 25, timestamp).await.unwrap(), 2);
-        assert_eq!(first_block_at(0, 5, 30, timestamp).await.unwrap(), 2);
-        assert_eq!(first_block_at(0, 5, 51, timestamp).await.unwrap(), 5);
-
-        let missing = async |number: u64| -> eyre::Result<u64> {
-            eyre::ensure!(number < 3, "missing canonical header");
-            Ok(number)
+        let args = |line: &str| {
+            line.split_whitespace()
+                .map(OsString::from)
+                .collect::<Vec<_>>()
         };
-        assert_eq!(
-            first_block_at(0, 5, 4, missing)
-                .await
-                .unwrap_err()
-                .to_string(),
-            "missing canonical header"
-        );
+        let operator = args("re-execute --from 5 --chain mainnet --to=90 --num-tasks 4");
+        for (args_in, to, expected) in [
+            (
+                &operator[..],
+                Some(20),
+                "re-execute --chain mainnet --num-tasks 4 --from=10 --to=20",
+            ),
+            (&operator[..1], None, "re-execute --from=10"),
+        ] {
+            assert_eq!(range_args(args_in, 10, to), args(expected));
+        }
     }
 }

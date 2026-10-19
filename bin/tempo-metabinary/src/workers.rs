@@ -1,8 +1,4 @@
-//! Lazily started read-only RPC workers, one per frozen era.
-//!
-//! Each worker is the era's binary running `rpc-only` over the node's datadir on a private
-//! loopback port. Workers start on first use, are shared by concurrent callers, stop after
-//! being idle, and are reaped on shutdown.
+//! Lazily started, shared, idle-reaped `rpc-only` workers, one per frozen era.
 
 use crate::{
     catalog::FrozenEra,
@@ -88,9 +84,7 @@ pub struct HistoricalWorkers {
 }
 
 impl HistoricalWorkers {
-    /// Creates dormant workers for `eras` and starts the idle reaper.
-    ///
-    /// Must be called within a Tokio runtime. Nothing is spawned until a worker is first used.
+    /// Creates dormant workers for `eras` and starts the idle reaper. Requires a Tokio runtime.
     pub fn new(context: WorkerContext, eras: Vec<FrozenEra>) -> eyre::Result<Arc<Self>> {
         let runtime = Handle::try_current().wrap_err("historical workers need a Tokio runtime")?;
         ensure!(
@@ -116,10 +110,7 @@ impl HistoricalWorkers {
         Ok(this)
     }
 
-    /// Calls `method` on era `era`'s worker and returns its raw result.
-    ///
-    /// An unavailable worker is a `-32000` error, and a method the worker lacks is `-32004`.
-    /// Worker call errors pass through verbatim.
+    /// Calls `method` on `era`'s worker. `-32000` if unavailable, `-32004` if it lacks `method`.
     pub async fn request(
         self: &Arc<Self>,
         era: usize,
@@ -134,8 +125,7 @@ impl HistoricalWorkers {
             .map_err(|err| self.call_error(era, method, err))
     }
 
-    /// Opens a `debug_subscribe` subscription on era `era`'s worker over a dedicated WebSocket
-    /// connection. Errors map like [`Self::request`].
+    /// Opens a `debug_subscribe` subscription on `era`'s worker over a dedicated WebSocket.
     pub async fn subscribe(
         self: &Arc<Self>,
         era: usize,
@@ -161,10 +151,7 @@ impl HistoricalWorkers {
         })
     }
 
-    /// Stops every worker and waits for background stops.
-    ///
-    /// Later requests fail. Can be retried if cancelled; children stay owned by their states
-    /// until they are reaped.
+    /// Stops every worker so later requests fail. Retriable, as children stay owned until reaped.
     pub async fn shutdown(&self) -> eyre::Result<()> {
         self.shutdown.cancel();
         let mut states = Vec::with_capacity(self.eras.len());
@@ -192,11 +179,7 @@ impl HistoricalWorkers {
         stopped.and(cleaned)
     }
 
-    /// Returns the ready worker of era `era`, starting it if needed.
-    ///
-    /// Concurrent callers share one child. If a caller is dropped mid-handshake, the child stays
-    /// owned by the era's state and the next call resumes the same handshake. A failed start is
-    /// cached for [`FAILURE_COOLDOWN`].
+    /// Returns `era`'s ready worker, starting it or resuming an abandoned handshake if needed.
     async fn get(self: &Arc<Self>, era: usize) -> eyre::Result<Arc<HistoricalWorker>> {
         let slot = self.eras.get(era).ok_or_eyre("unknown historical era")?;
         let mut state = slot.state.lock().await;
@@ -390,16 +373,13 @@ impl HistoricalWorkers {
     }
 }
 
-/// A ready worker. Callers hold it for the duration of a call, which keeps the worker from being
-/// reaped as idle.
+/// A ready worker. Holding it keeps the worker from being reaped as idle.
 pub struct HistoricalWorker {
     client: HttpClient,
     port: u16,
 }
 
-/// A worker `debug_subscribe` subscription yielding raw notification results.
-///
-/// Counts as a use of the worker while open. Dropping it unsubscribes and closes the connection.
+/// Raw `debug_subscribe` notification results. Holds the worker and unsubscribes on drop.
 pub struct WorkerSubscription {
     subscription: Subscription<Box<RawValue>>,
     _client: WsClient,
@@ -432,7 +412,7 @@ struct Era {
 enum State {
     Dormant,
     Running(Box<Process>),
-    /// Start failed; requests fail with `message` until `retry_at`.
+    /// Start failed, so requests fail with `message` until `retry_at`.
     Failed {
         message: String,
         retry_at: Instant,

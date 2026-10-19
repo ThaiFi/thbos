@@ -1,5 +1,4 @@
-//! Lifecycle tests against a fixture worker: this test binary re-executed by a shell script that
-//! records each start and creates the worker's RocksDB secondary, like Reth does.
+//! Lifecycle tests against this test binary re-executed as a worker by a recording shell script.
 
 use super::*;
 use crate::handshake::{EXECUTION_INFO_METHOD, EXECUTION_INFO_PROTOCOL_VERSION, ExecutionInfo};
@@ -185,15 +184,9 @@ impl Fixture {
         Ok(serde_json::from_str(raw.get()).unwrap())
     }
 
-    /// Asserts that `pid` was reaped and its secondary removed, waiting for background stops.
+    /// Waits until `pid` is reaped and its secondary removed.
     async fn assert_stopped(&self, pid: u32) {
-        tokio::time::timeout(WAIT, async {
-            while !is_reaped(pid) || self.secondary(pid).exists() {
-                tokio::time::sleep(Duration::from_millis(20)).await;
-            }
-        })
-        .await
-        .unwrap_or_else(|_| panic!("worker {pid} was not stopped"));
+        wait_until(|| is_reaped(pid) && !self.secondary(pid).exists()).await;
     }
 
     async fn ready_handles(&self) -> Option<usize> {
@@ -214,6 +207,16 @@ fn is_reaped(pid: u32) -> bool {
     rc == -1 && io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
 }
 
+async fn wait_until(mut done: impl FnMut() -> bool) {
+    tokio::time::timeout(WAIT, async {
+        while !done() {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("condition not reached");
+}
+
 /// Moves paused time forward far enough for the idle reaper to stop an unused worker.
 async fn idle_out() {
     tokio::time::pause();
@@ -225,103 +228,102 @@ async fn idle_out() {
 }
 
 #[tokio::test]
-async fn starts_lazily_and_coalesces_concurrent_callers() {
+async fn serves_requests_until_shutdown() {
     let fixture = Fixture::new("ok");
     tokio::time::sleep(Duration::from_millis(100)).await;
-    assert!(fixture.starts().is_empty());
+    assert!(fixture.starts().is_empty(), "workers start lazily");
 
-    let calls = (0..4).map(|i| fixture.request("echo", json!([i])));
-    for (i, result) in futures::future::join_all(calls)
-        .await
-        .into_iter()
-        .enumerate()
-    {
-        assert_eq!(result.unwrap(), json!([i]));
-    }
-    assert_eq!(fixture.starts().len(), 1);
-    fixture.workers.shutdown().await.unwrap();
-}
-
-#[tokio::test]
-async fn forwards_params_and_maps_errors() {
-    let fixture = Fixture::new("ok");
+    // Concurrent callers share one worker; params are forwarded in their shape.
     let named = json!({"blockNumber": "0x1", "request": {"to": null}});
-    assert_eq!(fixture.request("echo", named.clone()).await.unwrap(), named);
-    assert_eq!(
-        fixture.request("echo", Value::Null).await.unwrap(),
-        Value::Null
-    );
-
-    let err = fixture.request("eth_missing", json!([])).await.unwrap_err();
-    assert_eq!(err.code(), UNSUPPORTED_CODE);
-    assert_eq!(
-        err.message(),
-        "eth_missing is unavailable in historical era pre-T12"
-    );
-
-    let err = fixture.request("revert", json!([])).await.unwrap_err();
-    assert_eq!((err.code(), err.message()), (-32000, "execution reverted"));
-    fixture.workers.shutdown().await.unwrap();
-}
-
-#[tokio::test]
-async fn held_handles_prevent_idle_reaping() {
-    let fixture = Fixture::new("ok");
-    let worker = tokio::time::timeout(WAIT, fixture.workers.get(0))
-        .await
-        .unwrap()
-        .unwrap();
+    let params = [json!([0]), json!([1]), named, Value::Null];
+    let calls = params
+        .iter()
+        .map(|params| fixture.request("echo", params.clone()));
+    let results = futures::future::join_all(calls).await;
+    for (result, params) in results.into_iter().zip(&params) {
+        assert_eq!(&result.unwrap(), params);
+    }
     let pid = fixture.starts()[0];
+    assert_eq!(fixture.starts().len(), 1);
 
-    idle_out().await;
-    assert_eq!(fixture.ready_handles().await, Some(2));
-
-    drop(worker);
-    idle_out().await;
-    fixture.assert_stopped(pid).await;
-    assert!(fixture.is_dormant().await);
-
-    fixture.request("echo", json!([])).await.unwrap();
-    let starts = fixture.starts();
-    assert_eq!(starts.len(), 2);
-    assert_ne!(starts[1], pid);
-    fixture.workers.shutdown().await.unwrap();
-}
-
-#[tokio::test]
-async fn cancelled_calls_release_the_worker() {
-    let fixture = Fixture::new("ok");
-    fixture.request("echo", json!([])).await.unwrap();
-    let stalled = tokio::time::timeout(
-        Duration::from_millis(200),
-        fixture.workers.request(0, "stall", RpcParams(json!([]))),
-    )
-    .await;
-    assert!(stalled.is_err(), "stall must not answer");
-    assert_eq!(fixture.ready_handles().await, Some(1));
-
-    idle_out().await;
-    fixture.assert_stopped(fixture.starts()[0]).await;
-    fixture.workers.shutdown().await.unwrap();
-}
-
-#[tokio::test]
-async fn shutdown_reaps_workers_and_rejects_requests() {
-    let fixture = Fixture::new("ok");
-    fixture.request("echo", json!([])).await.unwrap();
-    let pid = fixture.starts()[0];
+    for (method, code, message) in [
+        (
+            "eth_missing",
+            UNSUPPORTED_CODE,
+            "eth_missing is unavailable in historical era pre-T12",
+        ),
+        ("revert", -32000, "execution reverted"),
+    ] {
+        let err = fixture.request(method, json!([])).await.unwrap_err();
+        assert_eq!((err.code(), err.message()), (code, message));
+    }
 
     tokio::time::timeout(WAIT, fixture.workers.shutdown())
         .await
         .unwrap()
         .unwrap();
-    assert!(is_reaped(pid));
-    assert!(!fixture.secondary(pid).exists());
+    assert!(is_reaped(pid) && !fixture.secondary(pid).exists());
+    assert!(fixture.is_dormant().await);
+    let err = fixture.request("echo", json!([])).await.unwrap_err();
+    assert_eq!(
+        (err.code(), err.message()),
+        (
+            CALL_EXECUTION_FAILED_CODE,
+            "historical workers are shutting down"
+        )
+    );
+}
+
+#[tokio::test]
+async fn idle_workers_are_reaped_unless_in_use() {
+    let fixture = Fixture::new("ok");
+
+    // A held handle.
+    let worker = tokio::time::timeout(WAIT, fixture.workers.get(0))
+        .await
+        .unwrap()
+        .unwrap();
+    idle_out().await;
+    assert_eq!(fixture.ready_handles().await, Some(2));
+    drop(worker);
+    idle_out().await;
+    fixture.assert_stopped(fixture.starts()[0]).await;
     assert!(fixture.is_dormant().await);
 
-    let err = fixture.request("echo", json!([])).await.unwrap_err();
-    assert_eq!(err.code(), CALL_EXECUTION_FAILED_CODE);
-    assert_eq!(err.message(), "historical workers are shutting down");
+    // A cancelled call releases the worker, which restarted on demand.
+    let stalled = tokio::time::timeout(
+        Duration::from_millis(500),
+        fixture.workers.request(0, "stall", RpcParams(json!([]))),
+    );
+    assert!(stalled.await.is_err(), "stall must not answer");
+    assert_eq!(fixture.starts().len(), 2);
+    assert_eq!(fixture.ready_handles().await, Some(1));
+    idle_out().await;
+    fixture.assert_stopped(fixture.starts()[1]).await;
+
+    // An open subscription relays notifications in order and keeps its worker.
+    let subscription = fixture
+        .workers
+        .subscribe(0, RpcParams(json!(["traceChain", "0x0", "0x3"])));
+    let mut subscription = tokio::time::timeout(WAIT, subscription)
+        .await
+        .unwrap()
+        .unwrap();
+    for block in 1..=3u64 {
+        let item = tokio::time::timeout(WAIT, subscription.next())
+            .await
+            .unwrap()
+            .unwrap();
+        let expected = json!({"block": format!("{block:#x}"), "traces": []});
+        assert_eq!(serde_json::from_str::<Value>(item.get()).unwrap(), expected);
+    }
+    idle_out().await;
+    assert_eq!(fixture.ready_handles().await, Some(2));
+    drop(subscription);
+    wait_until(|| fixture.dir.path().join("unsubscribed").exists()).await;
+    idle_out().await;
+    fixture.assert_stopped(fixture.starts()[2]).await;
+    fixture.workers.shutdown().await.unwrap();
 }
 
 #[tokio::test]
@@ -341,19 +343,16 @@ async fn failed_startups_are_reaped_and_cooled_down() {
     ] {
         let fixture = Fixture::with_timeout(mode, Duration::from_secs(2));
         let err = fixture.request("echo", json!([])).await.unwrap_err();
+        let message = err.message();
         assert_eq!(err.code(), CALL_EXECUTION_FAILED_CODE, "{mode}");
         assert!(
-            err.message()
-                .starts_with("historical era pre-T12 unavailable: ")
-                && err.message().ends_with(expected),
-            "{mode}: {}",
-            err.message()
+            message.starts_with("historical era pre-T12 unavailable: ")
+                && message.ends_with(expected),
+            "{mode}: {message}"
         );
-        let pid = fixture.starts()[0];
-        fixture.assert_stopped(pid).await;
-
+        fixture.assert_stopped(fixture.starts()[0]).await;
         let again = fixture.request("echo", json!([])).await.unwrap_err();
-        assert_eq!(again.message(), err.message(), "{mode}");
+        assert_eq!(again.message(), message, "{mode}");
         assert_eq!(
             fixture.starts().len(),
             1,
@@ -364,41 +363,31 @@ async fn failed_startups_are_reaped_and_cooled_down() {
 }
 
 #[tokio::test]
-async fn aborted_startup_resumes_the_same_worker() {
+async fn interrupted_startups_resume_or_reap_the_worker() {
+    // A caller dropped mid-handshake leaves the child to the next caller.
     let fixture = Fixture::new("slow");
     let aborted = tokio::time::timeout(Duration::from_millis(300), fixture.workers.get(0)).await;
     assert!(aborted.is_err());
-
     fixture.request("echo", json!([])).await.unwrap();
     assert_eq!(fixture.starts().len(), 1);
     fixture.workers.shutdown().await.unwrap();
-}
 
-#[tokio::test]
-async fn shutdown_during_startup_reaps_the_worker() {
+    // Shutdown during the handshake fails the caller and reaps the child.
     let fixture = Fixture::new("slow");
     let workers = fixture.workers.clone();
     let startup = tokio::spawn(async move { workers.get(0).await.map(drop) });
-    tokio::time::timeout(WAIT, async {
-        while fixture.starts().is_empty() {
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-    })
-    .await
-    .unwrap();
-
+    wait_until(|| !fixture.starts().is_empty()).await;
     tokio::time::timeout(WAIT, fixture.workers.shutdown())
         .await
         .unwrap()
         .unwrap();
-    let err = startup.await.unwrap().unwrap_err();
+    let err = format!("{:#}", startup.await.unwrap().unwrap_err());
     assert!(
-        format!("{err:#}").ends_with("historical workers are shutting down"),
-        "{err:#}"
+        err.ends_with("historical workers are shutting down"),
+        "{err}"
     );
     let pid = fixture.starts()[0];
-    assert!(is_reaped(pid));
-    assert!(!fixture.secondary(pid).exists());
+    assert!(is_reaped(pid) && !fixture.secondary(pid).exists());
 }
 
 #[tokio::test]
@@ -406,7 +395,6 @@ async fn crashed_workers_recover_after_the_cooldown() {
     let fixture = Fixture::new("ok");
     fixture.request("echo", json!([])).await.unwrap();
     let pid = fixture.starts()[0];
-
     let err = fixture.request("crash", json!([])).await.unwrap_err();
     assert_eq!(err.code(), CALL_EXECUTION_FAILED_CODE);
     assert!(
@@ -417,17 +405,12 @@ async fn crashed_workers_recover_after_the_cooldown() {
     // The connection can close just before the exited child becomes waitable.
     tokio::time::sleep(Duration::from_millis(100)).await;
 
-    let failed = fixture.request("echo", json!([])).await.unwrap_err();
-    assert!(
-        failed
-            .message()
-            .starts_with("historical era pre-T12 unavailable: historical era pre-T12 exited with"),
-        "{}",
-        failed.message()
-    );
+    let exited = "historical era pre-T12 unavailable: historical era pre-T12 exited with";
+    for _ in 0..2 {
+        let err = fixture.request("echo", json!([])).await.unwrap_err();
+        assert!(err.message().starts_with(exited), "{}", err.message());
+    }
     fixture.assert_stopped(pid).await;
-    let cooling = fixture.request("echo", json!([])).await.unwrap_err();
-    assert_eq!(cooling.message(), failed.message());
     assert_eq!(fixture.starts().len(), 1);
 
     tokio::time::pause();
@@ -435,44 +418,5 @@ async fn crashed_workers_recover_after_the_cooldown() {
     tokio::time::resume();
     fixture.request("echo", json!([])).await.unwrap();
     assert_eq!(fixture.starts().len(), 2);
-    fixture.workers.shutdown().await.unwrap();
-}
-
-#[tokio::test]
-async fn subscriptions_relay_notifications_and_hold_the_worker() {
-    let fixture = Fixture::new("ok");
-    let mut subscription = tokio::time::timeout(
-        WAIT,
-        fixture
-            .workers
-            .subscribe(0, RpcParams(json!(["traceChain", "0x0", "0x3"]))),
-    )
-    .await
-    .unwrap()
-    .unwrap();
-    for block in 1..=3u64 {
-        let item = tokio::time::timeout(WAIT, subscription.next())
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(
-            serde_json::from_str::<Value>(item.get()).unwrap(),
-            json!({"block": format!("{block:#x}"), "traces": []})
-        );
-    }
-    let pid = fixture.starts()[0];
-    idle_out().await;
-    assert_eq!(fixture.ready_handles().await, Some(2));
-
-    drop(subscription);
-    tokio::time::timeout(WAIT, async {
-        while !fixture.dir.path().join("unsubscribed").exists() {
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-    })
-    .await
-    .unwrap();
-    idle_out().await;
-    fixture.assert_stopped(pid).await;
     fixture.workers.shutdown().await.unwrap();
 }

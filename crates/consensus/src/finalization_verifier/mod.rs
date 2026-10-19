@@ -62,8 +62,7 @@ impl FinalizationVerifier {
         }
     }
 
-    /// Returns the epoch boundary whose DKG outcome authenticates certificates at `height`: the
-    /// last block of the previous epoch, or genesis during the first epoch.
+    /// Returns the boundary whose DKG outcome authenticates certificates at `height`.
     pub(crate) fn boundary_height(&self, height: Height) -> eyre::Result<Height> {
         let epoch = self
             .epoch_strategy
@@ -185,10 +184,9 @@ pub(crate) fn boundary_for_epoch(
         .ok_or_else(|| eyre!("epoch strategy did not provide a boundary for epoch `{previous}`"))
 }
 
-/// Verifies `certificate` against the DKG outcome in `boundary`, the header at
-/// [`boundary_for_epoch`] of the certificate's epoch, and returns the epoch's scheme.
+/// Verifies `certificate` against the DKG outcome of its epoch's `boundary` header.
 ///
-/// The executed chain authenticates the boundary, so this needs no boundary certificate.
+/// The executed chain authenticates the boundary, so no boundary certificate is needed.
 pub(crate) fn verify_boundary(
     rng: &mut impl CryptoRng,
     certificate: &Finalization<Scheme<PublicKey, MinSig>, Digest>,

@@ -1,10 +1,4 @@
 //! Release metadata describing the frozen eras of each built-in chain.
-//!
-//! ```json
-//! {"chains":[{"chain_id":"0x1079","eras":[
-//!   {"until":"T12","binary":"eras/tempo-genesis-t11",
-//!    "checkpoint":{"number":43957544,"hash":"0x6c85…e452"}}]}]}
-//! ```
 
 use alloy_eips::BlockNumHash;
 use alloy_primitives::U64;
@@ -27,9 +21,7 @@ pub struct Catalog {
 }
 
 impl Catalog {
-    /// Reads, validates, and resolves the catalog at `path`.
-    ///
-    /// Relative era binaries are resolved against the catalog's canonical parent directory.
+    /// Reads and validates the catalog at `path`, resolving binaries against its parent dir.
     pub fn load(path: &Path) -> eyre::Result<Self> {
         let json = std::fs::read_to_string(path)
             .wrap_err_with(|| format!("failed to read era catalog {}", path.display()))?;
@@ -46,8 +38,7 @@ impl Catalog {
         Ok(catalog)
     }
 
-    /// Checks that every chain has a valid schedule, that checkpoints strictly increase, and that
-    /// chain IDs are unique by value.
+    /// Checks every schedule, that checkpoints increase, and that chain IDs are unique by value.
     pub fn validate(&self) -> eyre::Result<()> {
         let mut chain_ids = HashSet::new();
         for chain in &self.chains {
@@ -106,10 +97,7 @@ pub struct ChainEras {
 }
 
 impl ChainEras {
-    /// Returns the first timestamp outside each era, in era order.
-    ///
-    /// Block `b` belongs to era `i` when `boundaries[i-1] <= b.timestamp < boundaries[i]`; era
-    /// index `boundaries.len()` is the live era.
+    /// Returns each era's end timestamp. Era index `boundaries.len()` is the live era.
     pub fn boundaries(&self) -> eyre::Result<Vec<u64>> {
         let chain_id = self.chain_id.to::<u64>();
         let mut boundaries: Vec<u64> = Vec::with_capacity(self.eras.len());
@@ -135,7 +123,7 @@ impl ChainEras {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FrozenEra {
-    /// First hardfork this era does not execute; its activation timestamp ends the era.
+    /// First hardfork this era does not execute. Its activation timestamp ends the era.
     pub until: TempoHardfork,
     /// Executable serving the era. Relative paths resolve against the catalog's directory.
     pub binary: PathBuf,
@@ -152,99 +140,74 @@ impl fmt::Display for FrozenEra {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloy_primitives::b256;
+    use serde_json::{Value, json};
     use tempo_hardfork::constants::mainnet::{MAINNET_T1_TIMESTAMP, MAINNET_T12_TIMESTAMP};
 
-    fn era(until: &str, number: u64) -> serde_json::Value {
-        serde_json::json!({
-            "until": until,
-            "binary": "eras/worker",
-            "checkpoint": {"number": number, "hash": B256_ONE},
-        })
+    fn era(until: &str, number: u64) -> Value {
+        json!({"until": until, "binary": "eras/worker", "checkpoint": {"number": number, "hash": alloy_primitives::B256::ZERO}})
     }
 
-    const B256_ONE: alloy_primitives::B256 =
-        b256!("0x0000000000000000000000000000000000000000000000000000000000000001");
-
-    fn parse(chains: serde_json::Value) -> eyre::Result<Catalog> {
-        serde_json::json!({ "chains": chains }).to_string().parse()
+    fn mainnet(eras: Vec<Value>) -> Value {
+        json!([{"chain_id": "0x1079", "eras": eras}])
     }
 
-    fn error(chains: serde_json::Value) -> String {
-        format!("{:#}", parse(chains).unwrap_err())
+    fn parse(chains: Value) -> eyre::Result<Catalog> {
+        json!({ "chains": chains }).to_string().parse()
     }
 
     #[test]
-    fn boundaries_follow_fork_activations() {
-        let catalog = parse(serde_json::json!([
-            {"chain_id": "0x1079", "eras": [era("T1", 1), era("T12", 2)]}
-        ]))
-        .unwrap();
+    fn validates_schedules() {
+        let catalog = parse(mainnet(vec![era("T1", 1), era("T12", 2)])).unwrap();
         let chain = catalog.for_chain(4217).unwrap();
         assert_eq!(
             chain.boundaries().unwrap(),
-            vec![MAINNET_T1_TIMESTAMP, MAINNET_T12_TIMESTAMP]
+            [MAINNET_T1_TIMESTAMP, MAINNET_T12_TIMESTAMP]
         );
         assert_eq!(chain.eras[1].to_string(), "pre-T12");
         assert!(catalog.for_chain(42431).is_none());
-    }
 
-    #[test]
-    fn rejects_invalid_schedules() {
         let mut no_binary = era("T12", 1);
         no_binary["binary"] = "".into();
-        assert_eq!(
-            error(serde_json::json!([{"chain_id": "0x1079", "eras": [no_binary]}])),
-            "era pre-T12 requires an executable"
-        );
-        assert_eq!(
-            error(serde_json::json!([{"chain_id": "0x1079", "eras": [era("T14", 1)]}])),
-            "T14 has no activation on chain 4217"
-        );
-        assert_eq!(
-            error(serde_json::json!([{"chain_id": "0x1", "eras": [era("T12", 1)]}])),
-            "T12 has no activation on chain 1"
-        );
-        assert_eq!(
-            error(serde_json::json!([{"chain_id": "0x1079", "eras": [era("T0", 1)]}])),
-            "era pre-T0 must activate after its predecessor"
-        );
-        assert_eq!(
-            error(serde_json::json!([
-                {"chain_id": "0x1079", "eras": [era("T12", 1), era("T12", 2)]}
-            ])),
-            "era pre-T12 must activate after its predecessor"
-        );
-        assert_eq!(
-            error(serde_json::json!([
-                {"chain_id": "0x1079", "eras": [era("T1", 2), era("T12", 2)]}
-            ])),
-            "era checkpoints must strictly increase"
-        );
-        assert_eq!(
-            error(serde_json::json!([
-                {"chain_id": "0x1079", "eras": [era("T12", 1)]},
-                {"chain_id": "0x01079", "eras": []}
-            ])),
-            "duplicate chain ID in era catalog"
-        );
-    }
-
-    #[test]
-    fn rejects_malformed_entries() {
-        let mut missing = era("T12", 1);
-        missing.as_object_mut().unwrap().remove("checkpoint");
-        assert!(
-            error(serde_json::json!([{"chain_id": "0x1079", "eras": [missing]}]))
-                .contains("missing field `checkpoint`")
-        );
-
+        let mut no_checkpoint = era("T12", 1);
+        no_checkpoint.as_object_mut().unwrap().remove("checkpoint");
         let mut unknown = era("T12", 1);
         unknown["extra"] = true.into();
-        assert!(
-            error(serde_json::json!([{"chain_id": "0x1079", "eras": [unknown]}]))
-                .contains("unknown field `extra`")
-        );
+        let duplicate = json!([
+            {"chain_id": "0x1079", "eras": [era("T12", 1)]},
+            {"chain_id": "0x01079", "eras": []}
+        ]);
+        for (chains, expected) in [
+            (
+                mainnet(vec![no_binary]),
+                "era pre-T12 requires an executable",
+            ),
+            (
+                mainnet(vec![era("T14", 1)]),
+                "T14 has no activation on chain 4217",
+            ),
+            (
+                json!([{"chain_id": "0x1", "eras": [era("T12", 1)]}]),
+                "T12 has no activation on chain 1",
+            ),
+            (
+                mainnet(vec![era("T0", 1)]),
+                "era pre-T0 must activate after its predecessor",
+            ),
+            (
+                mainnet(vec![era("T12", 1), era("T12", 2)]),
+                "era pre-T12 must activate after its predecessor",
+            ),
+            (
+                mainnet(vec![era("T1", 2), era("T12", 2)]),
+                "era checkpoints must strictly increase",
+            ),
+            (duplicate, "duplicate chain ID in era catalog"),
+            (mainnet(vec![no_checkpoint]), "missing field `checkpoint`"),
+            (mainnet(vec![unknown]), "unknown field `extra`"),
+        ] {
+            let err = format!("{:#}", parse(chains).unwrap_err());
+            assert!(err.starts_with(expected), "{err}");
+        }
     }
 
     #[test]
@@ -253,25 +216,18 @@ mod tests {
         let path = dir.path().join("tempo-eras.json");
         let mut absolute = era("T12", 1);
         absolute["binary"] = "/opt/worker".into();
-        std::fs::write(
-            &path,
-            serde_json::json!({"chains": [
-                {"chain_id": "0x1079", "eras": [era("T1", 1)]},
-                {"chain_id": "0xa5bf", "eras": [absolute]},
-            ]})
-            .to_string(),
-        )
-        .unwrap();
+        let chains = json!([
+            {"chain_id": "0x1079", "eras": [era("T1", 1)]},
+            {"chain_id": "0xa5bf", "eras": [absolute]},
+        ]);
+        std::fs::write(&path, json!({ "chains": chains }).to_string()).unwrap();
 
         let catalog = Catalog::load(&path).unwrap();
-        let parent = dir.path().canonicalize().unwrap();
+        let binary = |chain| catalog.for_chain(chain).unwrap().eras[0].binary.clone();
         assert_eq!(
-            catalog.for_chain(4217).unwrap().eras[0].binary,
-            parent.join("eras/worker")
+            binary(4217),
+            dir.path().canonicalize().unwrap().join("eras/worker")
         );
-        assert_eq!(
-            catalog.for_chain(42431).unwrap().eras[0].binary,
-            PathBuf::from("/opt/worker")
-        );
+        assert_eq!(binary(42431), PathBuf::from("/opt/worker"));
     }
 }

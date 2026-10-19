@@ -4876,37 +4876,27 @@ fn test_fee_fallback_records_affordability_instead_of_exact_balances() -> eyre::
     Ok(())
 }
 
-/// Execution entry points re-check the spec, so forcing `cfg.spec` below the floor after env
-/// construction cannot bypass it.
+/// Forcing `cfg.spec` below the floor after env construction cannot bypass the check.
 #[test]
 fn execution_rejects_specs_below_the_floor() {
-    let expected = format!(
-        "pre-{} execution requires a historical binary",
-        TempoHardfork::MINIMUM_SUPPORTED
-    );
-    let caller = Address::repeat_byte(0x01);
-    let contract = Address::repeat_byte(0x42);
+    let floor = TempoHardfork::MINIMUM_SUPPORTED;
+    let expected = format!("pre-{floor} execution requires a historical binary");
+    let (caller, contract) = (Address::repeat_byte(1), Address::repeat_byte(0x42));
     for spec in TempoHardfork::VARIANTS {
         let mut plain = create_evm();
         plain.ctx.cfg.spec = *spec;
         let mut inspected = create_evm_with_inspector(CountInspector::new());
         inspected.ctx.cfg.spec = *spec;
-
-        let results = [
+        for result in [
             plain.transact(TempoTxEnv::default()).map(|r| r.result),
             inspected
                 .inspect_tx(TempoTxEnv::default())
                 .map(|r| r.result),
             plain.system_call_one_with_caller(caller, contract, Bytes::new()),
             inspected.inspect_one_system_call_with_caller(caller, contract, Bytes::new()),
-        ];
-        for result in results {
+        ] {
             let rejected = matches!(&result, Err(EVMError::Custom(msg)) if *msg == expected);
-            assert_eq!(
-                rejected,
-                *spec < TempoHardfork::MINIMUM_SUPPORTED,
-                "{spec}: {result:?}"
-            );
+            assert_eq!(rejected, *spec < floor, "{spec}: {result:?}");
         }
     }
 }

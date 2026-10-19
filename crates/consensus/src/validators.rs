@@ -37,9 +37,7 @@ use tracing::{Level, debug, instrument, warn};
 
 /// Minimal execution-node interface needed to read validator config state.
 ///
-/// Production code uses [`TempoFullNode`]. This trait exists so unit tests can
-/// use a mock that only provides a historical state provider and a chain spec,
-/// while still exercising the same validator config reader used in production.
+/// Production code uses [`TempoFullNode`], unit tests mock the state provider and chain spec.
 pub(crate) trait ExecutionNode {
     fn header(&self, block_hash: B256) -> eyre::Result<TempoHeader>;
 

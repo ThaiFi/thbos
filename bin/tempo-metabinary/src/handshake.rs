@@ -1,7 +1,4 @@
-//! Discovery protocol between the live node and its private era workers.
-//!
-//! The handshake detects port collisions and misconfigured workers. Local processes are trusted,
-//! so it is not an authentication mechanism, and it does not establish execution compatibility.
+//! Discovery protocol for private era workers. It detects port collisions, it is not auth.
 
 use alloy_primitives::{B256, U64};
 use eyre::{bail, ensure};
@@ -18,10 +15,7 @@ use tokio::time::Instant;
 /// Worker discovery method served by `tempo rpc-only`.
 pub const EXECUTION_INFO_METHOD: &str = "tempo_executionInfo";
 
-/// Version of the private worker protocol.
-///
-/// Version 1 serves HTTP and WebSocket on the same port, including `debug_subscribe`
-/// `traceChain` subscriptions.
+/// Worker protocol version. v1 serves HTTP and WS (incl. `traceChain`) on one port.
 pub const EXECUTION_INFO_PROTOCOL_VERSION: u32 = 1;
 
 /// Upper bound on a single discovery request.
@@ -47,8 +41,7 @@ pub struct ExecutionInfo {
 }
 
 impl ExecutionInfo {
-    /// Checks that the worker speaks this protocol, serves `identity` read-only, and is the
-    /// process `pid` that the caller spawned.
+    /// Checks the protocol, that `identity` is served read-only, and that the worker is `pid`.
     pub fn validate(&self, identity: &WorkerIdentity, pid: u32) -> eyre::Result<()> {
         ensure!(
             self.protocol_version == EXECUTION_INFO_PROTOCOL_VERSION,
@@ -82,9 +75,7 @@ pub struct WorkerIdentity {
 
 /// Polls `client` until the worker answers [`EXECUTION_INFO_METHOD`] or `deadline` passes.
 ///
-/// `check_alive` runs before every attempt and should fail once the worker has exited. The first
-/// response is validated against `identity` and `pid` and returned without retrying. Fails
-/// immediately if the worker doesn't implement the method.
+/// `check_alive` runs before each attempt. The first response is validated, never retried.
 pub async fn wait_for_worker(
     client: &HttpClient,
     identity: &WorkerIdentity,
@@ -124,24 +115,20 @@ pub async fn wait_for_worker(
 mod tests {
     use super::*;
 
-    fn info() -> (ExecutionInfo, WorkerIdentity) {
+    #[test]
+    fn validates_every_field_of_the_camel_case_response() {
         let identity = WorkerIdentity {
             chain_id: U64::from(4217),
             genesis_hash: B256::repeat_byte(1),
         };
-        let info = ExecutionInfo {
-            protocol_version: EXECUTION_INFO_PROTOCOL_VERSION,
-            chain_id: identity.chain_id,
-            genesis_hash: identity.genesis_hash,
-            read_only: true,
-            process_id: 7,
-        };
-        (info, identity)
-    }
-
-    #[test]
-    fn validate_checks_every_field() {
-        let (valid, identity) = info();
+        let valid: ExecutionInfo = serde_json::from_value(serde_json::json!({
+            "protocolVersion": 1,
+            "chainId": "0x1079",
+            "genesisHash": B256::repeat_byte(1),
+            "readOnly": true,
+            "processId": 7,
+        }))
+        .unwrap();
         valid.validate(&identity, 7).unwrap();
 
         type Case = (fn(&mut ExecutionInfo), &'static str);
@@ -163,20 +150,5 @@ mod tests {
                 expected
             );
         }
-    }
-
-    #[test]
-    fn serializes_camel_case() {
-        let (info, _) = info();
-        assert_eq!(
-            serde_json::to_value(&info).unwrap(),
-            serde_json::json!({
-                "protocolVersion": 1,
-                "chainId": "0x1079",
-                "genesisHash": B256::repeat_byte(1),
-                "readOnly": true,
-                "processId": 7,
-            })
-        );
     }
 }

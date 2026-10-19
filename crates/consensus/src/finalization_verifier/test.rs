@@ -23,6 +23,18 @@ fn tracks_boundary_identity() {
             },
             FixedEpocher::new(EPOCH_LENGTH),
         );
+        let length = EPOCH_LENGTH.get();
+        for (height, boundary) in [
+            (0, 0),
+            (length - 1, 0),
+            (length, length - 1),
+            (2 * length + 5, 2 * length - 1),
+        ] {
+            assert_eq!(
+                verifier.boundary_height(Height::new(height)).unwrap(),
+                Height::new(boundary)
+            );
+        }
 
         let boundary = make_block(EPOCH_LENGTH.get() - 1, Some(&next.outcome));
         let finalization = make_finalization(&boundary, Epoch::zero(), &current.schemes);
@@ -108,32 +120,5 @@ fn rejects_block_body_that_does_not_match_header() {
             verifier.decode_and_verify(&mut context, &certified),
             Err(Error::BlockBodyMismatch(_))
         ));
-    });
-}
-
-#[test]
-fn boundary_height_is_the_last_block_of_the_previous_epoch() {
-    deterministic::Runner::default().start(|mut context| async move {
-        let fixture = dkg_fixture(&mut context, Epoch::zero());
-        let verifier = FinalizationVerifier::new(
-            NetworkIdentity {
-                from_epoch: 0,
-                identity: *fixture.outcome.network_identity(),
-            },
-            FixedEpocher::new(EPOCH_LENGTH),
-        );
-        let length = EPOCH_LENGTH.get();
-        for (height, boundary) in [
-            (0, 0),
-            (length - 1, 0),
-            (length, length - 1),
-            (2 * length + 5, 2 * length - 1),
-        ] {
-            assert_eq!(
-                verifier.boundary_height(Height::new(height)).unwrap(),
-                Height::new(boundary),
-                "{height}"
-            );
-        }
     });
 }

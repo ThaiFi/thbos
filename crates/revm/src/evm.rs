@@ -251,10 +251,7 @@ impl<DB: Database, I> TempoEvm<DB, I> {
         self.non_creditable_slots.clone()
     }
 
-    /// Fails when the configured spec predates [`TempoHardfork::MINIMUM_SUPPORTED`], whose rules
-    /// this release no longer executes.
-    ///
-    /// Checked at execution time, so changing `cfg.spec` after env construction cannot bypass it.
+    /// Fails if `cfg.spec` predates [`TempoHardfork::MINIMUM_SUPPORTED`], at execution time.
     pub(crate) fn ensure_supported_spec(
         &self,
     ) -> Result<(), EVMError<DB::Error, TempoInvalidTransaction>> {

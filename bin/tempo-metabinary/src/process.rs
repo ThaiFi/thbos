@@ -12,9 +12,7 @@ use tracing::warn;
 /// Time children get to exit after SIGTERM before they are killed.
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(10);
 
-/// Spawns `cmd` with stdin closed and stdout/stderr inherited.
-///
-/// The child is killed if its handle is dropped before it is reaped.
+/// Spawns `cmd` with stdin closed, stdout/stderr inherited, and `kill_on_drop` set.
 pub fn spawn_child(cmd: &mut Command) -> io::Result<Child> {
     cmd.stdin(Stdio::null())
         .stdout(Stdio::inherit())
@@ -23,11 +21,7 @@ pub fn spawn_child(cmd: &mut Command) -> io::Result<Child> {
         .spawn()
 }
 
-/// Runs a finite child to completion unless a shutdown signal (Ctrl-C, or SIGTERM on unix)
-/// arrives first.
-///
-/// Returns `Break` after a signal, once the child has been stopped and reaped, and `Continue`
-/// when the child exits successfully. A non-zero exit is an error.
+/// Runs a child to completion. `Break` if a shutdown signal stopped it, error on non-zero exit.
 pub async fn run_child(name: &str, mut cmd: Command) -> eyre::Result<ControlFlow<()>> {
     let mut child = spawn_child(&mut cmd).wrap_err_with(|| format!("failed to spawn {name}"))?;
     tokio::select! {
@@ -45,12 +39,10 @@ pub async fn run_child(name: &str, mut cmd: Command) -> eyre::Result<ControlFlow
     }
 }
 
-/// Sends SIGTERM to every child, then reaps them all concurrently, killing those still alive
-/// after a shared grace period.
+/// SIGTERMs every child, then reaps them concurrently, killing those alive after the grace.
 ///
-/// Children that already exited are fine. If signaling fails, the child is killed instead and the
-/// first error is returned after every child has been reaped. Callers keep ownership of the
-/// children, so dropping this future still kills them through `kill_on_drop`.
+/// Returns the first error once all are reaped. Callers keep ownership, so dropping this future
+/// still kills them through `kill_on_drop`.
 pub async fn shutdown_children<'a>(
     children: impl IntoIterator<Item = (&'a str, &'a mut Child)>,
 ) -> eyre::Result<()> {
@@ -82,7 +74,7 @@ pub async fn shutdown_children<'a>(
     first_error.map_or(Ok(()), Err)
 }
 
-/// Asks `child` to exit. A child that already exited is not an error.
+/// Asks `child` to exit. One that already exited is fine.
 #[cfg(unix)]
 fn terminate(child: &mut Child) -> io::Result<()> {
     // `None` once the child has been reaped.
@@ -135,21 +127,23 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn spawn_failure_is_reported() {
-        let err = run_child("missing", Command::new("/nonexistent/tempo-era"))
-            .await
-            .unwrap_err();
-        assert_eq!(err.to_string(), "failed to spawn missing");
-    }
-
-    #[tokio::test]
-    async fn run_child_reports_exit_status() {
+    async fn run_child_reports_failures() {
         assert_eq!(
             run_child("ok", sh("exit 0")).await.unwrap(),
             ControlFlow::Continue(())
         );
-        let err = run_child("writer", sh("exit 3")).await.unwrap_err();
-        assert_eq!(err.to_string(), "writer exited with exit status: 3");
+        for (cmd, expected) in [
+            (
+                Command::new("/nonexistent/tempo-era"),
+                "failed to spawn era",
+            ),
+            (sh("exit 3"), "era exited with exit status: 3"),
+        ] {
+            assert_eq!(
+                run_child("era", cmd).await.unwrap_err().to_string(),
+                expected
+            );
+        }
     }
 
     #[tokio::test]
@@ -162,18 +156,15 @@ mod tests {
         // Let the shell install its trap before signaling.
         tokio::time::sleep(Duration::from_millis(200)).await;
 
-        tokio::time::timeout(
-            SHUTDOWN_GRACE + Duration::from_secs(5),
-            shutdown_children([
-                ("exited", &mut exited),
-                ("running", &mut running),
-                ("stubborn", &mut stubborn),
-            ]),
-        )
-        .await
-        .unwrap()
-        .unwrap();
-
+        let children = [
+            ("exited", &mut exited),
+            ("running", &mut running),
+            ("stubborn", &mut stubborn),
+        ];
+        tokio::time::timeout(SHUTDOWN_GRACE * 2, shutdown_children(children))
+            .await
+            .unwrap()
+            .unwrap();
         for pid in pids {
             assert!(is_reaped(pid), "{pid} still exists");
         }

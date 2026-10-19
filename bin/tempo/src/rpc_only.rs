@@ -1,7 +1,4 @@
-//! `tempo rpc-only`: a private read-only RPC server over existing storage.
-//!
-//! Runs without consensus, networking, or a transaction pool. The live node starts frozen era
-//! binaries in this mode to execute historical requests; see `tempo_metabinary::workers`.
+//! `tempo rpc-only`: the private read-only RPC server frozen era workers run.
 
 use alloy_primitives::{U64, U256};
 use clap::Parser;
@@ -124,7 +121,8 @@ impl RpcOnly {
             provider_factory, ..
         } = self
             .env
-            .init::<TempoNode>(AccessRights::RO, runtime.clone())?;
+            // The live node keeps writing, so storage can look transiently inconsistent.
+            .init::<TempoNode>(AccessRights::RoInconsistent, runtime.clone())?;
         // Each read catches up with the live node's RocksDB and static-file writes.
         let provider_factory = provider_factory.with_read_only_sync(false);
         ensure!(
@@ -230,24 +228,20 @@ mod tests {
             ClientError,
             client::{ClientT as _, SubscriptionClientT as _},
         },
-        http_client::HttpClientBuilder,
+        http_client::{HttpClient, HttpClientBuilder},
         rpc_params,
         ws_client::WsClientBuilder,
     };
     use serde_json::{Value, json};
     use std::{path::Path, time::Duration};
-    use tempo_chainspec::spec::DEV;
+    use tempo_chainspec::{hardfork::TempoHardfork, spec::DEV};
     use tempo_metabinary::handshake::WorkerIdentity;
 
     const WAIT: Duration = Duration::from_secs(30);
 
-    fn rpc_only(datadir: &Path, extra: &[&str]) -> RpcOnly {
-        rpc_only_on("dev", datadir, extra)
-    }
-
-    fn rpc_only_on(chain: &str, datadir: &Path, extra: &[&str]) -> RpcOnly {
+    fn rpc_only(chain: &str, datadir: &Path, extra: &[&str]) -> RpcOnly {
         let datadir = datadir.to_str().unwrap();
-        let mut args = vec![
+        let args = [
             "rpc-only",
             "--chain",
             chain,
@@ -256,21 +250,22 @@ mod tests {
             "--port",
             "0",
         ];
-        args.extend(extra);
-        RpcOnly::try_parse_from(args).unwrap()
+        RpcOnly::try_parse_from(args.iter().chain(extra)).unwrap()
     }
 
-    /// Creates a database holding only genesis.
-    fn init_datadir(chain: &str, datadir: &Path) {
-        let env = rpc_only_on(chain, datadir, &[]).env;
+    /// Creates a database holding only genesis and serves it.
+    async fn serve(chain: &str, datadir: &Path, extra: &[&str]) -> (RpcServerHandle, HttpClient) {
+        let env = rpc_only(chain, datadir, &[]).env;
         drop(
             env.init::<TempoNode>(AccessRights::RW, Runtime::test())
                 .unwrap(),
         );
-    }
-
-    fn init_dev_datadir(datadir: &Path) {
-        init_datadir("dev", datadir);
+        let start = rpc_only(chain, datadir, extra).start(Runtime::test());
+        let handle = tokio::time::timeout(WAIT, start).await.unwrap().unwrap();
+        let client = HttpClientBuilder::default()
+            .build(handle.http_url().unwrap())
+            .unwrap();
+        (handle, client)
     }
 
     fn call_error(err: ClientError) -> (i32, String) {
@@ -284,32 +279,23 @@ mod tests {
     async fn requires_existing_storage_without_creating_it() {
         let dir = tempfile::tempdir().unwrap();
         let datadir = dir.path().join("missing");
-        let err = rpc_only(&datadir, &[])
-            .start(Runtime::test())
-            .await
-            .unwrap_err();
-        assert_eq!(
-            err.to_string(),
-            "rpc-only requires an existing chain database"
-        );
-        assert!(!datadir.exists());
-
-        std::fs::create_dir_all(datadir.join("db")).unwrap();
-        let err = rpc_only(&datadir, &[])
-            .start(Runtime::test())
-            .await
-            .unwrap_err();
-        assert_eq!(err.to_string(), "rpc-only requires existing static files");
-
-        std::fs::create_dir_all(datadir.join("static_files")).unwrap();
-        let err = rpc_only(&datadir, &[])
-            .start(Runtime::test())
-            .await
-            .unwrap_err();
-        assert_eq!(
-            err.to_string(),
-            "rpc-only requires existing RocksDB storage; initialize it with the node first"
-        );
+        for (create, expected) in [
+            (None, "rpc-only requires an existing chain database"),
+            (Some("db"), "rpc-only requires existing static files"),
+            (
+                Some("static_files"),
+                "rpc-only requires existing RocksDB storage; initialize it with the node first",
+            ),
+        ] {
+            if let Some(create) = create {
+                std::fs::create_dir_all(datadir.join(create)).unwrap();
+            }
+            let err = rpc_only("dev", &datadir, &[])
+                .start(Runtime::test())
+                .await
+                .unwrap_err();
+            assert_eq!(err.to_string(), expected);
+        }
         let mut entries: Vec<_> = std::fs::read_dir(&datadir)
             .unwrap()
             .map(|entry| entry.unwrap().file_name())
@@ -319,29 +305,24 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn serves_read_only_rpc_over_existing_storage() {
+    async fn serves_read_only_rpc_with_the_inherited_config() {
         let dir = tempfile::tempdir().unwrap();
-        init_dev_datadir(dir.path());
-        let handle = tokio::time::timeout(WAIT, rpc_only(dir.path(), &[]).start(Runtime::test()))
-            .await
-            .unwrap()
-            .unwrap();
-        let url = handle.http_url().unwrap();
-        let client = HttpClientBuilder::default().build(&url).unwrap();
+        let config = dir.path().join("rpc.json");
+        let eth_config = EthConfig::default().rpc_gas_cap(1_000_000);
+        std::fs::write(&config, serde_json::to_vec(&eth_config).unwrap()).unwrap();
+        let datadir = dir.path().join("db");
+        let (handle, client) =
+            serve("dev", &datadir, &["--rpc-config", config.to_str().unwrap()]).await;
 
         let info: ExecutionInfo = client
             .request(EXECUTION_INFO_METHOD, rpc_params![])
             .await
             .unwrap();
-        info.validate(
-            &WorkerIdentity {
-                chain_id: U64::from(DEV.chain_id()),
-                genesis_hash: DEV.genesis_hash(),
-            },
-            std::process::id(),
-        )
-        .unwrap();
-
+        let identity = WorkerIdentity {
+            chain_id: U64::from(DEV.chain_id()),
+            genesis_hash: DEV.genesis_hash(),
+        };
+        info.validate(&identity, std::process::id()).unwrap();
         let number: String = client
             .request("eth_blockNumber", rpc_params![])
             .await
@@ -349,19 +330,25 @@ mod tests {
         assert_eq!(number, "0x0");
         let call = json!({"to": "0x0000000000000000000000000000000000000001"});
         let output: String = client
-            .request("eth_call", rpc_params![call.clone(), "0x0"])
+            .request("eth_call", rpc_params![&call, "0x0"])
             .await
             .unwrap();
         assert_eq!(output, "0x");
+        let tracer = json!({"tracer": "callTracer"});
         let trace: Value = client
-            .request(
-                "debug_traceCall",
-                rpc_params![call, "0x0", json!({"tracer": "callTracer"})],
-            )
+            .request("debug_traceCall", rpc_params![&call, "0x0", tracer])
             .await
             .unwrap();
         assert_eq!(trace["type"], "CALL");
 
+        // The inherited gas cap rejects calls whose calldata alone exceeds it.
+        let heavy = json!({"to": call["to"], "input": format!("0x{}", "ff".repeat(100_000))});
+        let err = client
+            .request::<String, _>("eth_call", rpc_params![heavy, "0x0"])
+            .await
+            .unwrap_err();
+        let (_, message) = call_error(err);
+        assert!(message.contains("gas"), "{message}");
         let err = client
             .request::<Value, _>("eth_sendRawTransaction", rpc_params!["0x00"])
             .await
@@ -373,74 +360,34 @@ mod tests {
             .build(handle.ws_url().unwrap())
             .await
             .unwrap();
+        let params = rpc_params!["traceChain", "0x0", "0x0"];
         let err = ws
-            .subscribe::<Value, _>(
-                "debug_subscribe",
-                rpc_params!["traceChain", "0x0", "0x0"],
-                "debug_unsubscribe",
-            )
+            .subscribe::<Value, _>("debug_subscribe", params, "debug_unsubscribe")
             .await
             .unwrap_err();
-        assert_eq!(
-            call_error(err),
-            (
-                -32602,
-                "end block (#0) needs to come after start block (#0)".to_owned()
-            )
+        let expected = (
+            -32602,
+            "end block (#0) needs to come after start block (#0)".to_owned(),
         );
+        assert_eq!(call_error(err), expected);
 
         drop(handle);
         let stopped = tokio::time::timeout(WAIT, async {
-            loop {
-                let client = HttpClientBuilder::default().build(&url).unwrap();
-                if client
-                    .request::<String, _>("eth_blockNumber", rpc_params![])
-                    .await
-                    .is_err()
-                {
-                    break;
-                }
+            while client
+                .request::<String, _>("eth_blockNumber", rpc_params![])
+                .await
+                .is_ok()
+            {
                 tokio::time::sleep(Duration::from_millis(20)).await;
             }
-        })
-        .await;
+        });
         assert!(
-            stopped.is_ok(),
+            stopped.await.is_ok(),
             "server kept serving after its handle dropped"
         );
     }
 
-    #[tokio::test(flavor = "multi_thread")]
-    async fn inherits_the_serialized_rpc_config() {
-        let dir = tempfile::tempdir().unwrap();
-        init_dev_datadir(dir.path());
-        let config = dir.path().join("rpc.json");
-        std::fs::write(
-            &config,
-            serde_json::to_vec(&EthConfig::default().rpc_gas_cap(21_000)).unwrap(),
-        )
-        .unwrap();
-        let handle = rpc_only(dir.path(), &["--rpc-config", config.to_str().unwrap()])
-            .start(Runtime::test())
-            .await
-            .unwrap();
-        let client = HttpClientBuilder::default()
-            .build(handle.http_url().unwrap())
-            .unwrap();
-        let call = json!({
-            "to": "0x0000000000000000000000000000000000000001",
-            "input": format!("0x{}", "ff".repeat(64)),
-        });
-        let err = client
-            .request::<String, _>("eth_call", rpc_params![call, "0x0"])
-            .await
-            .unwrap_err();
-        let (_, message) = call_error(err);
-        assert!(message.contains("gas"), "{message}");
-    }
-
-    /// Block overrides patch the block env but keep the base block's fork, which era routing
-    /// relies on.
+    /// Block overrides keep the base block's fork, which era routing relies on.
     #[tokio::test(flavor = "multi_thread")]
     async fn block_overrides_keep_the_base_fork() {
         let dir = tempfile::tempdir().unwrap();
@@ -452,50 +399,26 @@ mod tests {
         let mut outcomes = Vec::new();
         for (name, t3_time) in [("pre_t3", 10_000), ("t3", 0)] {
             let mut genesis = DEV.genesis().clone();
-            for fork in tempo_chainspec::hardfork::TempoHardfork::VARIANTS {
-                if let Some(key) = fork.genesis_key()
-                    && fork.is_t3()
-                {
-                    genesis
-                        .config
-                        .extra_fields
-                        .insert(key.to_owned(), json!(t3_time));
-                }
+            for fork in TempoHardfork::VARIANTS.iter().filter(|fork| fork.is_t3()) {
+                let key = fork.genesis_key().unwrap().to_owned();
+                genesis.config.extra_fields.insert(key, json!(t3_time));
             }
             let chain = dir.path().join(format!("{name}.json"));
             std::fs::write(&chain, serde_json::to_vec(&genesis).unwrap()).unwrap();
-            let chain = chain.to_str().unwrap();
-            let datadir = dir.path().join(name);
-            init_datadir(chain, &datadir);
-            let handle = rpc_only_on(chain, &datadir, &[])
-                .start(Runtime::test())
-                .await
-                .unwrap();
-            let client = HttpClientBuilder::default()
-                .build(handle.http_url().unwrap())
-                .unwrap();
+            let (_handle, client) =
+                serve(chain.to_str().unwrap(), &dir.path().join(name), &[]).await;
+            let mut outcome = Vec::new();
             for overrides in [Value::Null, json!({"time": "0x4e20"})] {
-                let outcome = client
-                    .request::<Value, _>(
-                        "eth_call",
-                        rpc_params![call.clone(), "0x0", Value::Null, overrides],
-                    )
-                    .await
-                    .map_err(|err| call_error(err).1);
-                outcomes.push((name, outcome));
+                let params = rpc_params![call.clone(), "0x0", Value::Null, overrides];
+                let result = client.request::<Value, _>("eth_call", params).await;
+                outcome.push(result.map_err(|err| call_error(err).1));
             }
+            assert_eq!(outcome[0], outcome[1], "{name}");
+            outcomes.push(outcome.remove(0));
         }
-        let [
-            (_, pre),
-            (_, pre_with_override),
-            (_, t3),
-            (_, t3_with_override),
-        ] = outcomes.as_slice()
-        else {
-            panic!("{outcomes:?}")
-        };
-        assert_eq!(pre, pre_with_override);
-        assert_eq!(t3, t3_with_override);
-        assert_ne!(pre, t3, "the precompile must be fork-dependent");
+        assert_ne!(
+            outcomes[0], outcomes[1],
+            "the precompile must be fork-dependent"
+        );
     }
 }

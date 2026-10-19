@@ -18,8 +18,7 @@ use tempo_metabinary::routing::{Backend, BlockMetadata, RpcParams, UNKNOWN_BLOCK
 /// Forwarded calls answer with this closure's raw JSON.
 pub type ForwardFn = dyn Fn(usize, &str, &Value) -> RpcResult<String> + Send + Sync;
 
-/// A chain of `head + 1` blocks where block `n` has timestamp `timestamp(n)` and hash
-/// [`hash`]`(n)`.
+/// A chain of blocks `0..=head` where block `n` has `timestamp(n)` and [`hash`]`(n)`.
 pub struct FakeBackend {
     pub head: u64,
     pub timestamp: fn(u64) -> u64,
@@ -31,10 +30,9 @@ pub struct FakeBackend {
     pub subscribed: Mutex<Vec<(usize, Value)>>,
     /// Notifications each frozen era's subscription yields, keyed by era.
     pub notifications: HashMap<usize, Vec<Value>>,
-    /// Ends upstream streams after their notifications instead of keeping them open like native.
+    /// Ends upstream streams after their notifications, unlike native.
     pub end_streams: bool,
     pub open_streams: Arc<AtomicUsize>,
-    pub merged: Mutex<Vec<Vec<Value>>>,
 }
 
 impl Default for FakeBackend {
@@ -52,7 +50,6 @@ impl Default for FakeBackend {
             notifications: HashMap::new(),
             end_streams: false,
             open_streams: Arc::default(),
-            merged: Mutex::default(),
         }
     }
 }
@@ -188,7 +185,6 @@ impl Backend for FakeBackend {
             .iter()
             .map(|part| serde_json::from_str(part.get()).unwrap())
             .collect();
-        self.merged.lock().unwrap().push(parts.clone());
         Ok(raw(json!({ "merged": parts })))
     }
 }

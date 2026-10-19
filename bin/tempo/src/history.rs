@@ -1,8 +1,4 @@
-//! Startup handoff that syncs frozen eras with their writer binaries.
-//!
-//! Before the live node opens storage for writing, each frozen era whose checkpoint the durable
-//! head hasn't reached is synced by its binary, run as a bounded `node --history-sync` with the
-//! operator's arguments. The live binary never executes those blocks.
+//! Startup handoff that syncs frozen eras with their writer binaries before the node opens storage.
 
 use crate::{TempoCli, eras};
 use eyre::{OptionExt as _, WrapErr as _, ensure};
@@ -21,11 +17,9 @@ use tempo_metabinary::{catalog::FrozenEra, process::run_child};
 use tempo_node::node::TempoNode;
 use tokio::process::Command;
 
-/// Syncs every frozen era the durable head hasn't reached.
+/// Syncs every frozen era the durable head hasn't reached, for `tempo node` with a schedule.
 ///
-/// Applies only to `tempo node` with a release schedule. Returns `Break` after a shutdown
-/// signal, else whether consensus must bootstrap a certified floor because finality has not
-/// passed the last frozen checkpoint.
+/// Returns `Break` on shutdown, else whether finality is still within the frozen eras.
 pub(crate) fn prepare(cli: &TempoCli) -> eyre::Result<ControlFlow<(), bool>> {
     let Commands::Node(node) = &cli.command else {
         return Ok(ControlFlow::Continue(false));
@@ -101,9 +95,7 @@ struct Storage {
 }
 
 impl Storage {
-    /// Returns the durable `(best, finalized)` block numbers, or `None` for a fresh datadir.
-    ///
-    /// Fails if the database belongs to another chain or diverges from a reached checkpoint.
+    /// Returns durable `(best, finalized)`, `None` if fresh, failing on mismatched checkpoints.
     fn durable_progress(
         &self,
         eras: &[FrozenEra],
@@ -134,7 +126,7 @@ impl Storage {
     }
 }
 
-/// Returns the operator's arguments without follow mode, which writers must not use.
+/// Returns the operator's arguments without follow mode.
 fn frozen_args(args: impl IntoIterator<Item = OsString>) -> Vec<OsString> {
     let mut args = args.into_iter().peekable();
     let mut kept = Vec::new();

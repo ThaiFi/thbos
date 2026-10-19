@@ -752,25 +752,22 @@ mod tests {
         let mut header = execution_header(execution.height);
         header.inner.timestamp = MODERATO_T11_TIMESTAMP - 1;
 
-        let (spec, chain_id, number, count) = crate::validators::read_validator_config_with_state(
+        let read = crate::validators::read_validator_config_with_state(
             &execution,
             Box::new(execution.provider.clone().into_evm_state_provider()),
             &header,
             |config: &ValidatorConfigV2| {
+                let ctx = StorageCtx;
                 Ok((
-                    StorageCtx.spec(),
-                    StorageCtx.chain_id(),
-                    StorageCtx.block_number(),
+                    ctx.spec(),
+                    ctx.chain_id(),
+                    ctx.block_number(),
                     config.validator_count()?,
                 ))
             },
-        )
-        .unwrap();
-
-        assert_eq!(spec, TempoHardfork::T10);
-        assert_eq!(chain_id, MODERATO.chain_id());
-        assert_eq!(number, execution.height);
-        assert_eq!(count, 2);
+        );
+        let expected = (TempoHardfork::T10, MODERATO.chain_id(), execution.height, 2);
+        assert_eq!(read.unwrap(), expected);
     }
 
     #[test]

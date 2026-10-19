@@ -311,8 +311,7 @@ impl ConfigureEvm for TempoEvmConfig {
     }
 }
 
-/// Returns the hardfork active at `timestamp`, or [`TempoEvmError::UnsupportedHardfork`] when it
-/// predates [`TempoHardfork::MINIMUM_SUPPORTED`].
+/// Returns the hardfork at `timestamp`, failing if it predates the supported floor.
 fn supported_hardfork_at(
     chain_spec: &TempoChainSpec,
     timestamp: u64,
@@ -341,19 +340,21 @@ mod tests {
     #[test]
     fn evm_env_rejects_forks_below_the_floor() {
         let evm_config = TempoEvmConfig::new(test_chainspec());
-        let chain_id = evm_config.chain_spec().chain_id();
-        for fork in TempoHardfork::VARIANTS {
-            let Some(timestamp) = fork.activation_timestamp(chain_id) else {
-                continue;
-            };
-            let spec = evm_config.chain_spec().tempo_hardfork_at(timestamp);
-            let header = TempoHeader {
-                inner: alloy_consensus::Header {
-                    timestamp,
-                    ..Default::default()
-                },
+        let chain_spec = evm_config.chain_spec();
+        let parent = TempoHeader {
+            inner: alloy_consensus::Header {
+                base_fee_per_gas: Some(1),
                 ..Default::default()
-            };
+            },
+            ..Default::default()
+        };
+        for timestamp in TempoHardfork::VARIANTS
+            .iter()
+            .filter_map(|fork| fork.activation_timestamp(chain_spec.chain_id()))
+        {
+            let spec = chain_spec.tempo_hardfork_at(timestamp);
+            let mut header = parent.clone();
+            header.inner.timestamp = timestamp;
             let attributes = TempoNextBlockEnvAttributes {
                 inner: NextBlockEnvAttributes {
                     timestamp,
@@ -370,26 +371,20 @@ mod tests {
                 timestamp_millis_part: 0,
                 consensus_context: None,
             };
-            let parent = TempoHeader {
-                inner: alloy_consensus::Header {
-                    base_fee_per_gas: Some(1),
-                    ..Default::default()
-                },
-                ..Default::default()
-            };
             for result in [
                 evm_config.evm_env(&header).map(|env| env.cfg_env.spec),
                 evm_config
                     .next_evm_env(&parent, &attributes)
                     .map(|env| env.cfg_env.spec),
             ] {
-                if spec >= TempoHardfork::MINIMUM_SUPPORTED {
-                    assert_eq!(result.unwrap(), spec);
-                } else {
-                    assert!(
-                        matches!(result, Err(TempoEvmError::UnsupportedHardfork(f)) if f == spec),
-                        "{spec}: {result:?}"
-                    );
+                match result {
+                    Ok(actual) => {
+                        assert!(actual == spec && spec >= TempoHardfork::MINIMUM_SUPPORTED)
+                    }
+                    Err(err) => assert!(
+                        matches!(err, TempoEvmError::UnsupportedHardfork(f) if f == spec)
+                            && spec < TempoHardfork::MINIMUM_SUPPORTED
+                    ),
                 }
             }
         }

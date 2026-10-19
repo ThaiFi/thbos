@@ -1,9 +1,4 @@
-//! Classifies RPC methods and selects the era that executes each request.
-//!
-//! Every request is routed by its rule era: the era whose binary owns the hardfork rules it
-//! executes under. Block-env overrides never change the hardfork, so only methods that generate a
-//! new block (simulations and `mev_simBundle`) read override times. Canonical ranges are split at
-//! era boundaries; speculative chains that would span eras are rejected.
+//! Routes each RPC request to its rule era: the era whose binary owns the rules it executes under.
 
 use alloy_primitives::B256;
 use futures::{future::BoxFuture, stream::BoxStream};
@@ -17,8 +12,7 @@ use jsonrpsee::{
 use serde_json::{Map, Value, json, value::RawValue};
 use std::{collections::BTreeSet, future::Future, sync::Arc};
 
-/// Error code for requests the router cannot serve: speculative multi-era simulations, methods
-/// a worker lacks, and methods without a routing policy.
+/// Error code for multi-era simulations, methods a worker lacks, and unrouted methods.
 pub const UNSUPPORTED_CODE: i32 = -32004;
 
 /// Error code backends return for blocks they cannot resolve.
@@ -168,19 +162,16 @@ const NATIVE_METHODS: &[&str] = &[
 
 /// Node-specific operations the router needs. Implemented by the chain adapter.
 pub trait Backend: Send + Sync {
-    /// Resolves a block selector: a tag, hex number, hash, or EIP-1898 object.
-    ///
-    /// Fails with [`UNKNOWN_BLOCK_CODE`] for blocks the node doesn't have.
+    /// Resolves a tag, number, hash, or EIP-1898 selector, or fails with [`UNKNOWN_BLOCK_CODE`].
     fn block<'a>(&'a self, selector: &'a Value) -> BoxFuture<'a, RpcResult<BlockMetadata>>;
 
-    /// Returns the timestamp of the block containing transaction `hash`, or `None` for pooled or
-    /// unknown transactions, which run in the live era.
+    /// Returns the timestamp of the block containing `hash`, `None` for pooled or unknown txs.
     fn transaction_timestamp<'a>(
         &'a self,
         hash: &'a Value,
     ) -> BoxFuture<'a, RpcResult<Option<u64>>>;
 
-    /// Forwards a call to frozen era `era`. Live segments run through the native callback.
+    /// Forwards a call to frozen era `era`.
     fn forward<'a>(
         &'a self,
         era: usize,
@@ -188,8 +179,7 @@ pub trait Backend: Send + Sync {
         params: RpcParams,
     ) -> BoxFuture<'a, RpcResult<Box<RawValue>>>;
 
-    /// Opens a `debug_subscribe` subscription on frozen era `era`, yielding the raw `result` of
-    /// each notification. Live relay segments subscribe in-process.
+    /// Opens a `debug_subscribe` subscription on frozen era `era`, yielding raw results.
     fn subscribe<'a>(
         &'a self,
         era: usize,
@@ -200,8 +190,6 @@ pub trait Backend: Send + Sync {
     fn raw_block_timestamp(&self, params: &RpcParams) -> RpcResult<u64>;
 
     /// Merges consecutive `reth_getBlockExecutionOutcome` results, oldest first.
-    ///
-    /// Only the adapter knows the receipt type, so the merge is typed there.
     fn merge_execution_outcomes(&self, parts: Vec<Box<RawValue>>) -> RpcResult<Box<RawValue>>;
 }
 
@@ -217,11 +205,7 @@ pub struct BlockMetadata {
 }
 
 impl BlockMetadata {
-    /// Returns a selector that pins `selector` to this block.
-    ///
-    /// Explicit hashes, a 66-character hex string or any object with `blockHash` (which keeps
-    /// EIP-1898 `requireCanonical`), are kept verbatim. Otherwise the selector becomes the hex
-    /// block number if `number_only`, else `{"blockHash": hash}`.
+    /// Pins `selector` to this block, keeping explicit hashes (and `requireCanonical`) verbatim.
     pub fn pin(&self, selector: &Value, number_only: bool) -> Value {
         if is_explicit_hash(selector) {
             selector.clone()
@@ -294,18 +278,14 @@ impl ToRpcParams for RpcParams {
 pub enum Route {
     /// One era executes the whole request.
     Era(usize, RpcParams),
-    /// A canonical range split at era boundaries.
-    ///
-    /// Segments are non-empty, contiguous, in ascending block order, and each lies in a single
-    /// era. They run sequentially and their results are merged.
+    /// A canonical range split into non-empty, ascending, single-era segments run in order.
     Split {
         /// Era and params of each segment.
         segments: Vec<(usize, RpcParams)>,
         /// How segment results combine.
         merge: Merge,
     },
-    /// A `traceChain` subscription over several eras, or over a frozen era. One upstream
-    /// subscription per segment is chained into the client's stream.
+    /// A historical `traceChain` subscription, chaining one upstream subscription per segment.
     Relay {
         /// Segments in block order.
         segments: Vec<RelaySegment>,
@@ -347,11 +327,7 @@ pub struct Router {
 }
 
 impl Router {
-    /// Creates a router for eras ending at `boundaries` (see
-    /// [`ChainEras::boundaries`](crate::catalog::ChainEras::boundaries)).
-    ///
-    /// `max_trace_filter_blocks` is the node's `trace_filter` range limit, checked over the whole
-    /// range before splitting.
+    /// Creates a router for eras ending at `boundaries`, with the node's `trace_filter` limit.
     pub fn new(
         boundaries: Vec<u64>,
         max_trace_filter_blocks: u64,
@@ -379,9 +355,7 @@ impl Router {
         &*self.backend
     }
 
-    /// Routes `method` with `params`.
-    ///
-    /// Live routes may carry rewritten params; callers run live requests with the original ones.
+    /// Routes `method`. Callers run live routes with the original params.
     pub async fn route(&self, method: &str, mut params: RpcParams) -> RpcResult<Route> {
         let live = self.live_index();
         let policy = policy(method);
@@ -703,8 +677,7 @@ impl Router {
         Ok(Route::Relay { segments })
     }
 
-    /// Splits the canonical range `[first, last]` at era boundaries into non-empty
-    /// `(era, start, end)` segments in ascending order.
+    /// Splits `[first, last]` into non-empty, ascending `(era, start, end)` segments.
     async fn split(
         &self,
         first: BlockMetadata,
@@ -745,11 +718,7 @@ impl Router {
     }
 }
 
-/// Returns the first block in `low..high` whose timestamp is at least `boundary`, or `high` if
-/// there is none.
-///
-/// Canonical timestamps strictly increase, so this is a binary search costing
-/// `O(log(high - low))` calls to `timestamp_of`.
+/// Binary-searches the first block in `low..high` with timestamp `>= boundary`, else `high`.
 pub async fn first_block_at<E, F, Fut>(
     mut low: u64,
     mut high: u64,
@@ -771,9 +740,7 @@ where
     Ok(low)
 }
 
-/// Returns whether `method` must be routed rather than served natively.
-///
-/// `debug_subscribe` is routed only for `traceChain`, so it is not an execution method.
+/// Whether `method` must be routed. `debug_subscribe` is only routed for `traceChain`.
 pub fn is_execution_method(method: &str) -> bool {
     !matches!(policy(method), Policy::Native | Policy::TraceChain)
 }
@@ -830,7 +797,7 @@ enum Policy {
     TraceChain,
     /// Served natively with untouched params.
     Native,
-    /// Executes without a reviewed policy; rejected.
+    /// Executes without a reviewed policy, so it is rejected.
     Execution,
 }
 

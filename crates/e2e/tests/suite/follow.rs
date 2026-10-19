@@ -208,8 +208,7 @@ impl FollowerBuilder {
         }
     }
 
-    /// Runs the historical consensus bootstrap before the follow engine starts, as after a
-    /// frozen-era sync handoff.
+    /// Runs the historical consensus bootstrap before the follow engine starts.
     fn historical_bootstrap(self) -> Self {
         Self {
             historical_bootstrap: true,
@@ -761,8 +760,7 @@ fn follower_starts_from_validator_archives() {
     });
 }
 
-/// A follower anchored by the historical bootstrap starts its marshal from a sparse certificate
-/// archive, and after a restart recovers from its cached tail without an upstream.
+/// A historically bootstrapped follower starts from a sparse archive and restarts offline.
 #[test_traced]
 fn historical_bootstrap_anchors_followers_and_recovers_offline() {
     let _ = tempo_eyre::install();

@@ -1,6 +1,4 @@
 //! Tempo adapter for executing frozen eras with their historical binaries.
-//!
-//! See `tempo_metabinary` for the routing rules and worker lifecycle.
 
 use alloy_consensus::BlockHeader;
 use alloy_primitives::{B256, Bytes};
@@ -63,10 +61,7 @@ pub(crate) fn release_catalog() -> eyre::Result<Catalog> {
     }
 }
 
-/// Returns the frozen eras of `chain`, or `None` when it runs natively.
-///
-/// Only the built-in mainnet and Moderato specifications have frozen eras; custom genesis files,
-/// fork schedules, and dev chains always execute in-process.
+/// Returns the frozen eras of `chain`, or `None` for custom and dev chains, which run natively.
 pub(crate) fn release_schedule(chain: &TempoChainSpec) -> eyre::Result<Option<ChainEras>> {
     if !supports_release_catalog(chain) {
         return Ok(None);
@@ -77,10 +72,7 @@ pub(crate) fn release_schedule(chain: &TempoChainSpec) -> eyre::Result<Option<Ch
         .cloned())
 }
 
-/// Whether `chain` is exactly a built-in chain whose fork schedule the catalog describes.
-///
-/// A custom genesis can keep the built-in genesis hash while changing fork times, so the
-/// configuration and hardforks are compared too.
+/// Whether `chain` is exactly a built-in chain, including fork times the genesis hash omits.
 fn supports_release_catalog(chain: &TempoChainSpec) -> bool {
     [&**PRESTO, &**MODERATO].into_iter().any(|built_in| {
         chain.chain_id() == built_in.chain_id()
@@ -96,14 +88,13 @@ pub(crate) struct EraRuntime {
     workers: Arc<HistoricalWorkers>,
     boundaries: Vec<u64>,
     max_trace_filter_blocks: u64,
-    /// Files workers read; they live as long as the runtime.
+    /// Files workers read, kept as long as the runtime.
     _genesis: tempfile::NamedTempFile,
     _rpc_config: tempfile::NamedTempFile,
 }
 
 impl EraRuntime {
-    /// Prepares dormant workers for `schedule` that inherit the node's chain, storage paths, and
-    /// RPC configuration. Must be called within a Tokio runtime.
+    /// Prepares dormant workers inheriting the node's chain, storage, and RPC configuration.
     pub(crate) fn new(
         schedule: ChainEras,
         chain: &TempoChainSpec,
@@ -166,7 +157,7 @@ impl EraRuntime {
         Ok(())
     }
 
-    /// Stops the workers. Failures are logged.
+    /// Stops the workers, logging failures.
     pub(crate) async fn shutdown(&self) {
         if let Err(err) = self.workers.shutdown().await {
             warn!(%err, "failed to stop historical workers");
@@ -302,7 +293,7 @@ fn raw_block_timestamp(params: &RpcParams) -> RpcResult<u64> {
         .map_err(|err| invalid_params(format!("invalid raw block: {err}")))
 }
 
-/// Decodes only the header of an RLP block, leaving the body to the selected era's codec.
+/// Decodes only the header of an RLP block, leaving the body to the selected era.
 fn raw_block_header(raw: &[u8]) -> eyre::Result<TempoHeader> {
     let mut buf = raw;
     let list = RlpHeader::decode(&mut buf)?;
@@ -312,7 +303,7 @@ fn raw_block_header(raw: &[u8]) -> eyre::Result<TempoHeader> {
     Ok(TempoHeader::decode(&mut buf)?)
 }
 
-/// Merges consecutive outcomes into the outcome of one execution over their combined range.
+/// Merges consecutive outcomes into one over their combined range.
 fn merge_execution_outcomes(parts: &[Box<RawValue>]) -> eyre::Result<Box<RawValue>> {
     let mut merged: Option<ExecutionOutcome<TempoReceipt>> = None;
     for part in parts {
@@ -420,129 +411,104 @@ mod tests {
         let first = ExecutionOutcome::new(split.take_bundle(), vec![vec![receipt(1)]], 1, vec![]);
         execute(&mut split, 2);
         let second = ExecutionOutcome::new(split.take_bundle(), vec![vec![receipt(2)]], 2, vec![]);
-
         let mut whole = State::builder().with_bundle_update().build();
         execute(&mut whole, 1);
         execute(&mut whole, 2);
-        let expected = ExecutionOutcome::new(
-            whole.take_bundle(),
-            vec![vec![receipt(1)], vec![receipt(2)]],
-            1,
-            vec![],
-        );
+        let receipts = vec![vec![receipt(1)], vec![receipt(2)]];
+        let expected = ExecutionOutcome::new(whole.take_bundle(), receipts, 1, vec![]);
 
         let merged = merge_execution_outcomes(&[raw(&first), raw(&second)]).unwrap();
         let merged: ExecutionOutcome<TempoReceipt> = serde_json::from_str(merged.get()).unwrap();
         assert_eq!(merged, expected);
 
-        let err = merge_execution_outcomes(&[raw(&second), raw(&first)]).unwrap_err();
-        assert_eq!(
-            err.to_string(),
-            "outcome starting at block 1 does not follow block 2"
-        );
-        let err =
-            merge_execution_outcomes(&[raw(&first), raw(&json!({"bundle": {}}))]).unwrap_err();
-        assert!(err.to_string().contains("missing field"), "{err}");
         let mut unknown = serde_json::to_value(&second).unwrap();
         unknown["extra"] = json!(1);
-        let err = merge_execution_outcomes(&[raw(&first), raw(&unknown)]).unwrap_err();
-        assert_eq!(
-            err.to_string(),
-            "execution outcome encoding differs from this release"
-        );
+        for (parts, expected) in [
+            (
+                [raw(&second), raw(&first)],
+                "outcome starting at block 1 does not follow block 2",
+            ),
+            ([raw(&first), raw(&json!({"bundle": {}}))], "missing field"),
+            (
+                [raw(&first), raw(&unknown)],
+                "execution outcome encoding differs from this release",
+            ),
+        ] {
+            let err = merge_execution_outcomes(&parts).unwrap_err().to_string();
+            assert!(err.starts_with(expected), "{err}");
+        }
     }
 
     #[test]
-    fn built_in_catalog_matches_the_built_in_chains() {
-        let catalog: Catalog = BUILT_IN_CATALOG.parse().unwrap();
-        for schedule in &catalog.chains {
-            let chain = [&**PRESTO, &**MODERATO]
-                .into_iter()
-                .find(|chain| schedule.chain_id.to::<u64>() == chain.chain_id())
-                .expect("catalog chains are built in");
-            let [era] = schedule.eras.as_slice() else {
-                panic!("{} must have one frozen era", schedule.chain_id);
-            };
-            assert_eq!(era.binary, PathBuf::from("eras/tempo-genesis-t11"));
-            assert!(era.until >= TempoHardfork::MINIMUM_SUPPORTED);
-            assert_eq!(
-                schedule.boundaries().unwrap(),
-                [era.until.activation_timestamp(chain.chain_id()).unwrap()]
-            );
-        }
+    fn release_catalog_covers_only_unmodified_built_in_chains() {
         let exe_dir = std::env::current_exe()
             .unwrap()
             .parent()
             .unwrap()
             .to_path_buf();
-        for era in release_catalog()
-            .unwrap()
-            .chains
-            .iter()
-            .flat_map(|c| &c.eras)
-        {
-            assert!(era.binary.starts_with(&exe_dir));
+        for schedule in release_catalog().unwrap().chains {
+            let [era] = schedule.eras.as_slice() else {
+                panic!("{} must have one frozen era", schedule.chain_id);
+            };
+            assert_eq!(era.binary, exe_dir.join("eras/tempo-genesis-t11"));
+            assert!(era.until >= TempoHardfork::MINIMUM_SUPPORTED);
+            let activation = era.until.activation_timestamp(schedule.chain_id.to());
+            assert_eq!(schedule.boundaries().unwrap(), [activation.unwrap()]);
         }
-    }
 
-    #[test]
-    fn only_unmodified_built_in_chains_use_the_catalog() {
-        assert!(supports_release_catalog(&PRESTO));
-        assert!(supports_release_catalog(&MODERATO));
-        assert!(!supports_release_catalog(&DEV));
-
-        let mut genesis = PRESTO.genesis().clone();
-        genesis
+        // Custom fork times keep the built-in genesis hash.
+        let mut custom_forks = PRESTO.genesis().clone();
+        custom_forks
             .config
             .extra_fields
             .insert("t12Time".to_owned(), json!(1));
-        let custom_forks = TempoChainSpec::from_genesis(genesis);
+        let custom_forks = TempoChainSpec::from_genesis(custom_forks);
         assert_eq!(custom_forks.genesis_hash(), PRESTO.genesis_hash());
-        assert!(!supports_release_catalog(&custom_forks));
-
-        let mut genesis = MODERATO.genesis().clone();
-        genesis.timestamp += 1;
-        assert!(!supports_release_catalog(&TempoChainSpec::from_genesis(
-            genesis
-        )));
+        let mut custom_genesis = MODERATO.genesis().clone();
+        custom_genesis.timestamp += 1;
+        for (chain, supported) in [
+            (&**PRESTO, true),
+            (&**MODERATO, true),
+            (&**DEV, false),
+            (&custom_forks, false),
+            (&TempoChainSpec::from_genesis(custom_genesis), false),
+        ] {
+            assert_eq!(supports_release_catalog(chain), supported);
+        }
     }
 
     #[test]
     fn raw_blocks_decode_only_their_header() {
-        let block = Block {
-            header: TempoHeader {
-                inner: alloy_consensus::Header {
-                    timestamp: 77,
-                    ..Default::default()
-                },
+        let header = TempoHeader {
+            inner: alloy_consensus::Header {
+                timestamp: 77,
                 ..Default::default()
             },
-            body: BlockBody::default(),
+            ..Default::default()
         };
-        let encoded = alloy_rlp::encode(&block);
-        let params = |raw: &[u8]| RpcParams(json!([Bytes::copy_from_slice(raw)]));
-        assert_eq!(raw_block_timestamp(&params(&encoded)), Ok(77));
-        assert_eq!(
-            raw_block_timestamp(&RpcParams(
-                json!({"rlpBlock": Bytes::from(encoded.clone())})
-            )),
-            Ok(77)
-        );
-
+        let encoded = alloy_rlp::encode(Block {
+            header: header.clone(),
+            body: BlockBody::default(),
+        });
         // Bodies are left to the era's codec.
-        let header_len = alloy_rlp::encode(&block.header).len();
         let mut corrupted = encoded.clone();
-        let list_header = encoded.len()
+        let body = encoded.len()
             - alloy_rlp::Header::decode(&mut &encoded[..])
                 .unwrap()
-                .payload_length;
-        for byte in &mut corrupted[list_header + header_len..] {
-            *byte = 0xff;
-        }
-        assert_eq!(raw_block_timestamp(&params(&corrupted)), Ok(77));
-
-        let mut trailing = encoded;
+                .payload_length
+            + alloy_rlp::encode(&header).len();
+        corrupted[body..].fill(0xff);
+        let mut trailing = encoded.clone();
         trailing.push(0);
+
+        let params = |raw: &[u8]| RpcParams(json!([Bytes::copy_from_slice(raw)]));
+        for raw in [
+            params(&encoded),
+            params(&corrupted),
+            RpcParams(json!({"rlpBlock": Bytes::from(encoded)})),
+        ] {
+            assert_eq!(raw_block_timestamp(&raw), Ok(77));
+        }
         for (raw, expected) in [
             (
                 params(&trailing),

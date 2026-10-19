@@ -1,9 +1,4 @@
-//! Replaces execution callbacks of the native RPC transports in place.
-//!
-//! The public transports keep their registries, auth, CORS, compression, batching,
-//! subscriptions, and limits. Only callbacks of execution methods (and `debug_subscribe` /
-//! `debug_unsubscribe`, for historical `traceChain` relays) are wrapped; every other callback is
-//! kept as the identical `Arc`.
+//! Replaces execution callbacks of the native RPC transports in place, keeping their limits.
 
 use crate::routing::{
     Merge, RelaySegment, Route, Router, RpcParams, internal, invalid_params, is_execution_method,
@@ -43,10 +38,7 @@ pub enum RpcApi {
     Engine,
 }
 
-/// Wraps the execution callbacks of `methods` with era routing.
-///
-/// The set of method names is unchanged, and non-execution callbacks stay pointer-equal. Live
-/// requests reach the original callback with their original params.
+/// Wraps execution callbacks with era routing. Other callbacks stay the identical `Arc`.
 pub fn decorate(
     methods: Methods,
     router: Arc<Router>,
@@ -100,8 +92,7 @@ struct Decorator {
     api: RpcApi,
     /// The original `debug_subscribe` and `debug_unsubscribe` callbacks.
     natives: Methods,
-    /// Active relays by connection and subscription. Each relay holds a subscription permit, so
-    /// the map is bounded by the transport's subscription limits.
+    /// Active relays, bounded by the subscription permit each one holds.
     relays: Mutex<HashMap<(ConnectionId, SubscriptionId<'static>), CancellationToken>>,
 }
 

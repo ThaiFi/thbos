@@ -250,9 +250,7 @@ tempo_hardfork!(
 );
 
 impl TempoHardfork {
-    /// Oldest hardfork this release executes; raise it when removing a hardfork's rules.
-    ///
-    /// Blocks activated under older forks are executed by their frozen era binary.
+    /// Oldest hardfork this release executes. Raise it when removing a hardfork's rules.
     pub const MINIMUM_SUPPORTED: Self = Self::Genesis;
 
     /// Returns the ordered fallback fee tokens activated by this hardfork.
@@ -381,10 +379,7 @@ impl TempoHardfork {
         None
     }
 
-    /// Returns this hardfork's activation timestamp on the given built-in chain.
-    ///
-    /// Returns `None` if the chain ID is not a known Tempo chain or the fork is not scheduled on
-    /// it.
+    /// Returns the fork's activation timestamp on a built-in chain, or `None` if unscheduled.
     pub const fn activation_timestamp(&self, chain_id: u64) -> Option<u64> {
         match chain_id {
             constants::mainnet::MAINNET_CHAIN_ID => self.mainnet_activation_timestamp(),
@@ -524,40 +519,29 @@ impl From<SpecId> for TempoHardfork {
 
 #[cfg(test)]
 mod schedule_tests {
-    use super::*;
+    use super::{TempoHardfork::*, *};
     use crate::constants::{mainnet::*, moderato::*};
 
     #[test]
-    fn activation_timestamp_dispatches_by_chain() {
-        assert_eq!(
-            TempoHardfork::T12.activation_timestamp(MAINNET_CHAIN_ID),
-            Some(MAINNET_T12_TIMESTAMP)
-        );
-        assert_eq!(
-            TempoHardfork::T11.activation_timestamp(MODERATO_CHAIN_ID),
-            Some(MODERATO_T11_TIMESTAMP)
-        );
-        assert_eq!(TempoHardfork::Genesis.activation_timestamp(1), None);
-        assert_eq!(
-            TempoHardfork::T14.activation_timestamp(MAINNET_CHAIN_ID),
-            None
-        );
-    }
-
-    #[test]
-    fn from_chain_and_timestamp_uses_activation_schedule() {
-        assert_eq!(TempoHardfork::from_chain_and_timestamp(1, 0), None);
-        assert_eq!(
-            TempoHardfork::from_chain_and_timestamp(MAINNET_CHAIN_ID, MAINNET_T12_TIMESTAMP - 1),
-            Some(TempoHardfork::T11)
-        );
-        assert_eq!(
-            TempoHardfork::from_chain_and_timestamp(MAINNET_CHAIN_ID, MAINNET_T12_TIMESTAMP),
-            Some(TempoHardfork::T12)
-        );
-        assert_eq!(
-            TempoHardfork::from_chain_and_timestamp(MODERATO_CHAIN_ID, 0),
-            Some(TempoHardfork::Genesis)
-        );
+    fn activation_schedule_by_chain() {
+        for (fork, chain, activation) in [
+            (T12, MAINNET_CHAIN_ID, Some(MAINNET_T12_TIMESTAMP)),
+            (T11, MODERATO_CHAIN_ID, Some(MODERATO_T11_TIMESTAMP)),
+            (T14, MAINNET_CHAIN_ID, None),
+            (Genesis, 1, None),
+        ] {
+            assert_eq!(fork.activation_timestamp(chain), activation, "{fork}");
+        }
+        for (chain, timestamp, fork) in [
+            (1, 0, None),
+            (MAINNET_CHAIN_ID, MAINNET_T12_TIMESTAMP - 1, Some(T11)),
+            (MAINNET_CHAIN_ID, MAINNET_T12_TIMESTAMP, Some(T12)),
+            (MODERATO_CHAIN_ID, 0, Some(Genesis)),
+        ] {
+            assert_eq!(
+                TempoHardfork::from_chain_and_timestamp(chain, timestamp),
+                fork
+            );
+        }
     }
 }

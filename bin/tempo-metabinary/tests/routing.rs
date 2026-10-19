@@ -1,15 +1,11 @@
-//! Routing policy tests against a fake chain where block `n` has timestamp `n` and eras end at
-//! timestamps 100 and 200, so the live era is 2.
+//! Routing tests on a fake chain where block `n` has timestamp `n` and eras end at 100 and 200.
 
 mod common;
 
 use common::{FakeBackend, hash, hex};
-use jsonrpsee::core::RpcResult;
 use serde_json::{Value, json};
 use std::sync::Arc;
-use tempo_metabinary::routing::{
-    Merge, RelaySegment, Route, Router, RpcParams, first_block_at, is_execution_method,
-};
+use tempo_metabinary::routing::{Merge, RelaySegment, Route, Router, RpcParams, first_block_at};
 
 const LIVE: usize = 2;
 const TX: Value = Value::Null;
@@ -19,16 +15,24 @@ fn router_with(boundaries: Vec<u64>, backend: FakeBackend) -> (Router, Arc<FakeB
     (Router::new(boundaries, 100, backend.clone()), backend)
 }
 
-fn default_router() -> (Router, Arc<FakeBackend>) {
+fn router() -> (Router, Arc<FakeBackend>) {
     router_with(vec![100, 200], FakeBackend::default())
 }
 
-async fn route(method: &str, params: Value) -> RpcResult<Route> {
-    default_router().0.route(method, RpcParams(params)).await
+async fn route(router: &Router, method: &str, params: Value) -> Route {
+    router.route(method, RpcParams(params)).await.unwrap()
 }
 
 fn era(era: usize, params: Value) -> Route {
     Route::Era(era, RpcParams(params))
+}
+
+fn split(segments: Vec<(usize, Value)>, merge: Merge) -> Route {
+    let segments = segments
+        .into_iter()
+        .map(|(era, params)| (era, RpcParams(params)))
+        .collect();
+    Route::Split { segments, merge }
 }
 
 fn named(pairs: &[(&str, Value)]) -> Value {
@@ -44,9 +48,18 @@ fn pinned(number: u64) -> Value {
     json!({ "blockHash": hash(number) })
 }
 
+/// `eth_simulateV1` payload whose generated blocks set `times`, plus one implicit block.
+fn calls(times: &[u64]) -> Value {
+    let calls = times
+        .iter()
+        .map(|time| json!({"blockOverrides": {"time": hex(*time)}}));
+    json!({"blockStateCalls": calls.chain([json!({})]).collect::<Vec<_>>()})
+}
+
 #[tokio::test]
 async fn block_methods_route_by_their_selector() {
-    // (method, selector index, names, number_only)
+    const BLOCK_ID: &[&str] = &["block_id", "blockId"];
+    const RAW: &[&str] = &["block", "block_id", "blockId"];
     let cases: &[(&str, usize, &[&str], bool)] = &[
         ("eth_call", 1, &["block_number", "blockNumber"], false),
         (
@@ -61,27 +74,17 @@ async fn block_methods_route_by_their_selector() {
             &["block_number", "blockNumber"],
             false,
         ),
-        ("debug_traceCall", 1, &["block_id", "blockId"], false),
-        ("trace_call", 2, &["block_id", "blockId"], false),
-        ("trace_rawTransaction", 2, &["block_id", "blockId"], false),
-        ("trace_callMany", 1, &["block_id", "blockId"], false),
+        ("debug_traceCall", 1, BLOCK_ID, false),
+        ("trace_call", 2, BLOCK_ID, false),
+        ("trace_rawTransaction", 2, BLOCK_ID, false),
+        ("trace_callMany", 1, BLOCK_ID, false),
         ("debug_traceBlockByNumber", 0, &["block"], true),
         ("debug_traceBlockByHash", 0, &["block"], false),
         ("eth_getBlockAccessListByBlockHash", 0, &["hash"], false),
         ("eth_getBlockAccessListByBlockNumber", 0, &["number"], true),
-        ("eth_getBlockAccessList", 0, &["block_id", "blockId"], false),
-        (
-            "eth_getBlockAccessListRaw",
-            0,
-            &["block", "block_id", "blockId"],
-            false,
-        ),
-        (
-            "debug_getRawBlockAccessList",
-            0,
-            &["block", "block_id", "blockId"],
-            false,
-        ),
+        ("eth_getBlockAccessList", 0, BLOCK_ID, false),
+        ("eth_getBlockAccessListRaw", 0, RAW, false),
+        ("debug_getRawBlockAccessList", 0, RAW, false),
         ("debug_executionWitnessByBlockHash", 0, &["hash"], false),
         (
             "debug_intermediateRoots",
@@ -90,37 +93,36 @@ async fn block_methods_route_by_their_selector() {
             false,
         ),
         ("debug_executionWitness", 0, &["block"], false),
-        ("debug_accountAt", 0, &["block_id", "blockId"], false),
-        ("debug_accountInfoAt", 0, &["block_id", "blockId"], false),
-        ("trace_block", 0, &["block_id", "blockId"], false),
-        (
-            "trace_replayBlockTransactions",
-            0,
-            &["block_id", "blockId"],
-            false,
-        ),
-        ("trace_blockOpcodeGas", 0, &["block_id", "blockId"], false),
+        ("debug_accountAt", 0, BLOCK_ID, false),
+        ("debug_accountInfoAt", 0, BLOCK_ID, false),
+        ("trace_block", 0, BLOCK_ID, false),
+        ("trace_replayBlockTransactions", 0, BLOCK_ID, false),
+        ("trace_blockOpcodeGas", 0, BLOCK_ID, false),
     ];
+    let (router, _) = router();
     for (method, index, names, number_only) in cases {
-        let expected = if *number_only { hex(150) } else { pinned(150) };
-
-        let mut positional = vec![TX; *index];
-        positional.push(hex(150));
-        let mut pinned_positional = vec![TX; *index];
-        pinned_positional.push(expected.clone());
+        let pin = |number| {
+            if *number_only {
+                hex(number)
+            } else {
+                pinned(number)
+            }
+        };
+        let positional = |selector| json!([vec![TX; *index], vec![selector]].concat());
         assert_eq!(
-            route(method, json!(positional)).await.unwrap(),
-            era(1, json!(pinned_positional)),
+            route(&router, method, positional(hex(150))).await,
+            era(1, positional(pin(150))),
             "{method}"
         );
-
         for name in *names {
-            let pin = if *number_only { hex(50) } else { pinned(50) };
             assert_eq!(
-                route(method, named(&[("other", json!(1)), (name, hex(50))]))
-                    .await
-                    .unwrap(),
-                era(0, named(&[("other", json!(1)), (name, pin)])),
+                route(
+                    &router,
+                    method,
+                    named(&[("other", json!(1)), (name, hex(50))])
+                )
+                .await,
+                era(0, named(&[("other", json!(1)), (name, pin(50))])),
                 "{method} {name}"
             );
         }
@@ -128,180 +130,301 @@ async fn block_methods_route_by_their_selector() {
 }
 
 #[tokio::test]
-async fn selectors_pin_hashes_verbatim_and_default_by_method() {
-    let hash_selector = json!(hash(50));
-    assert_eq!(
-        route("eth_call", json!([TX, hash_selector])).await.unwrap(),
-        era(0, json!([TX, hash_selector]))
-    );
+async fn requests_route_to_their_rule_era() {
+    let (live_time, old_time) = (json!({"time": "0x3e8"}), json!({"time": "0x32"}));
     let canonical = json!({"blockHash": hash(50), "requireCanonical": true});
-    assert_eq!(
-        route("eth_call", json!([TX, canonical])).await.unwrap(),
-        era(0, json!([TX, canonical]))
-    );
-    assert_eq!(
-        route("eth_call", json!([TX, {"blockNumber": "0x32"}]))
-            .await
-            .unwrap(),
-        era(0, json!([TX, pinned(50)]))
-    );
-    assert_eq!(
-        route("debug_traceBlockByNumber", json!(["earliest"]))
-            .await
-            .unwrap(),
-        era(0, json!(["0x0"]))
-    );
-
-    // Missing selectors: `latest`, except `pending` for gas estimation.
-    assert_eq!(
-        route("eth_call", json!([TX])).await.unwrap(),
-        era(LIVE, json!([TX, pinned(1000)]))
-    );
-    let (router, backend) = default_router();
-    assert_eq!(
-        router
-            .route("eth_estimateGas", RpcParams(json!([TX])))
-            .await
-            .unwrap(),
-        era(LIVE, json!([TX]))
-    );
-    assert_eq!(
-        router
-            .route(
-                "eth_call",
-                RpcParams(json!({"request": TX, "blockNumber": "pending"}))
-            )
-            .await
-            .unwrap(),
-        era(LIVE, json!({"request": TX, "blockNumber": "pending"}))
-    );
-    assert_eq!(backend.resolutions(), 0);
-}
-
-#[tokio::test]
-async fn params_must_be_arrays_or_objects() {
-    let err = route("eth_call", json!("0x1")).await.unwrap_err();
-    assert_eq!(
-        (err.code(), err.message()),
-        (-32602, "params must be an array or an object")
-    );
-}
-
-#[tokio::test]
-async fn block_overrides_never_change_the_era() {
-    let live_time = json!({"time": "0x3e8"});
-    for (method, params) in [
-        ("eth_call", json!([TX, "0x32", null, live_time])),
+    let bundle = json!({"bundle": []});
+    let segment = json!(["traceChain", "0xa", "0x14", null]);
+    for (method, params, expected) in [
+        // Explicit hashes are kept verbatim, other selectors pinned, missing ones default.
+        (
+            "eth_call",
+            json!([TX, hash(50)]),
+            era(0, json!([TX, hash(50)])),
+        ),
+        (
+            "eth_call",
+            json!([TX, canonical]),
+            era(0, json!([TX, canonical])),
+        ),
+        (
+            "eth_call",
+            json!([TX, {"blockNumber": "0x32"}]),
+            era(0, json!([TX, pinned(50)])),
+        ),
+        (
+            "eth_call",
+            json!([TX]),
+            era(LIVE, json!([TX, pinned(1000)])),
+        ),
+        (
+            "debug_traceBlockByNumber",
+            json!(["earliest"]),
+            era(0, json!(["0x0"])),
+        ),
+        // Block overrides never change the base block's era.
+        (
+            "eth_call",
+            json!([TX, "0x32", null, live_time]),
+            era(0, json!([TX, pinned(50), null, live_time])),
+        ),
         (
             "debug_traceCall",
             json!([TX, "0x32", {"blockOverrides": live_time}]),
+            era(0, json!([TX, pinned(50), {"blockOverrides": live_time}])),
         ),
         (
             "trace_call",
             json!([TX, ["trace"], "0x32", null, live_time]),
+            era(0, json!([TX, ["trace"], pinned(50), null, live_time])),
+        ),
+        (
+            "eth_call",
+            json!([TX, "latest", null, old_time]),
+            era(LIVE, json!([TX, pinned(1000), null, old_time])),
         ),
         (
             "eth_callMany",
-            json!([[{"transactions": [], "blockOverride": live_time}], {"blockNumber": "0x32"}]),
+            json!([[{"blockOverride": live_time}], {"blockNumber": "0x32"}]),
+            era(
+                0,
+                json!([[{"blockOverride": live_time}], {"blockNumber": pinned(50)}]),
+            ),
         ),
         (
             "eth_callBundle",
-            json!([{"txs": [], "stateBlockNumber": "0x32", "timestamp": 1000}]),
-        ),
-    ] {
-        assert!(
-            matches!(route(method, params).await.unwrap(), Route::Era(0, _)),
-            "{method}"
-        );
-    }
-
-    let historical_time = json!({"time": "0x32"});
-    for (method, params) in [
-        ("eth_call", json!([TX, "latest", null, historical_time])),
-        (
-            "eth_callMany",
-            json!([[{"transactions": [], "blockOverride": historical_time}], {"blockNumber": "latest"}]),
+            json!([{"stateBlockNumber": "latest", "timestamp": 50}]),
+            era(
+                LIVE,
+                json!([{"stateBlockNumber": hex(1000), "timestamp": 50}]),
+            ),
         ),
         (
-            "eth_callBundle",
-            json!([{"txs": [], "stateBlockNumber": "latest", "timestamp": 50}]),
-        ),
-    ] {
-        assert!(
-            matches!(route(method, params).await.unwrap(), Route::Era(LIVE, _)),
-            "{method}"
-        );
-    }
-}
-
-#[tokio::test]
-async fn base_block_methods_pin_their_base() {
-    assert_eq!(
-        route(
-            "eth_callBundle",
-            json!([{"txs": [], "stateBlockNumber": "latest"}])
-        )
-        .await
-        .unwrap(),
-        era(LIVE, json!([{"txs": [], "stateBlockNumber": hex(1000)}]))
-    );
-    assert_eq!(
-        route(
             "debug_traceCallMany",
-            json!({"bundles": [], "stateContext": {"blockNumber": "0x96", "transactionIndex": 1}})
-        )
-        .await
-        .unwrap(),
-        era(
-            1,
-            json!({"bundles": [], "stateContext": {"blockNumber": pinned(150), "transactionIndex": 1}})
-        )
-    );
-    for params in [
-        json!([[]]),
-        json!([[], {"blockNumber": "pending"}]),
-        json!([[], {"transactionIndex": 1}]),
+            json!({"bundles": [], "stateContext": {"blockNumber": "0x96", "transactionIndex": 1}}),
+            era(
+                1,
+                json!({"bundles": [], "stateContext": {"blockNumber": pinned(150), "transactionIndex": 1}}),
+            ),
+        ),
+        (
+            "eth_feeHistory",
+            json!(["0x4", "0x96", [25]]),
+            era(1, json!(["0x4", "0x96", [25]])),
+        ),
+        (
+            "eth_feeHistory",
+            json!({"blockCount": 4, "newestBlock": "pending"}),
+            era(LIVE, json!({"blockCount": 4, "newestBlock": hex(1000)})),
+        ),
+        // Generated blocks follow their explicit times, else (and never before) the base era.
+        (
+            "eth_simulateV1",
+            json!([calls(&[]), "0x32"]),
+            era(0, json!([calls(&[]), pinned(50)])),
+        ),
+        (
+            "eth_simulateV1",
+            json!([calls(&[900, 950]), "0x32"]),
+            era(LIVE, json!([calls(&[900, 950]), pinned(50)])),
+        ),
+        (
+            "eth_simulateV1",
+            json!([calls(&[50]), "0x96"]),
+            era(1, json!([calls(&[50]), pinned(150)])),
+        ),
+        (
+            "tempo_simulateV1",
+            json!({"payload": calls(&[]), "block": "0x96"}),
+            era(1, json!({"payload": calls(&[]), "block": pinned(150)})),
+        ),
+        (
+            "mev_simBundle",
+            json!([bundle, {"parentBlock": "0x32"}]),
+            era(0, json!([bundle, {"parentBlock": pinned(50)}])),
+        ),
+        (
+            "mev_simBundle",
+            json!([bundle, {"parentBlock": "0x32", "timestamp": 150}]),
+            era(
+                1,
+                json!([bundle, {"parentBlock": pinned(50), "timestamp": 150}]),
+            ),
+        ),
+        (
+            "mev_simBundle",
+            json!({"bundle": bundle}),
+            era(
+                LIVE,
+                json!({"bundle": bundle, "sim_overrides": {"parentBlock": pinned(1000)}}),
+            ),
+        ),
+        (
+            "reth_getBlockExecutionOutcome",
+            json!(["0x32", "0x2"]),
+            era(0, json!([pinned(50), "0x2"])),
+        ),
+        (
+            "trace_filter",
+            json!([{"fromBlock": "0x1", "toBlock": "0x2", "after": 1}]),
+            era(
+                0,
+                json!([{"fromBlock": "0x1", "toBlock": "0x2", "after": 1}]),
+            ),
+        ),
+        ("debug_traceBlock", json!(["0x96"]), era(1, json!(["0x96"]))),
+        (
+            "debug_subscribe",
+            segment.clone(),
+            Route::Relay {
+                segments: vec![RelaySegment {
+                    era: 0,
+                    params: RpcParams(segment),
+                    last_block: 20,
+                    is_last: true,
+                }],
+            },
+        ),
     ] {
         assert_eq!(
-            route("eth_callMany", params.clone()).await.unwrap(),
-            era(LIVE, params)
+            route(&router().0, method, params).await,
+            expected,
+            "{method}"
         );
     }
 }
 
 #[tokio::test]
-async fn fee_history_routes_by_its_newest_block() {
-    assert_eq!(
-        route("eth_feeHistory", json!(["0x4", "0x96", [25]]))
-            .await
-            .unwrap(),
-        era(1, json!(["0x4", "0x96", [25]]))
-    );
-    assert_eq!(
-        route(
+async fn live_requests_keep_their_params() {
+    let bundle = json!({"bundle": []});
+    for (method, params, resolves) in [
+        ("eth_estimateGas", json!([TX]), false),
+        (
+            "eth_call",
+            json!({"request": TX, "blockNumber": "pending"}),
+            false,
+        ),
+        ("eth_feeHistory", json!(["0x0", "0x32"]), false),
+        ("eth_feeHistory", json!(["bogus", "0x32"]), false),
+        (
             "eth_feeHistory",
-            json!({"blockCount": 4, "newestBlock": "pending"})
-        )
-        .await
-        .unwrap(),
-        era(LIVE, json!({"blockCount": 4, "newestBlock": hex(1000)}))
-    );
-    let (router, backend) = default_router();
-    for params in [
-        json!(["0x0", "0x32"]),
-        json!(["bogus", "0x32"]),
-        json!(["0x4", {"blockHash": hash(50)}]),
-        json!(["0x4"]),
+            json!(["0x4", {"blockHash": hash(50)}]),
+            false,
+        ),
+        ("eth_feeHistory", json!(["0x4"]), false),
+        ("eth_callMany", json!([[]]), false),
+        (
+            "eth_callMany",
+            json!([[], {"blockNumber": "pending"}]),
+            false,
+        ),
+        ("eth_callMany", json!([[], {"transactionIndex": 1}]), false),
+        (
+            "tempo_simulateV1",
+            json!({"payload": calls(&[]), "block": "pending"}),
+            false,
+        ),
+        ("tempo_simulateV1", json!({"payload": calls(&[])}), false),
+        (
+            "mev_simBundle",
+            json!([bundle, {"parentBlock": "pending"}]),
+            false,
+        ),
+        (
+            "reth_getBlockExecutionOutcome",
+            json!(["pending", 3]),
+            false,
+        ),
+        ("reth_getBlockExecutionOutcome", json!(["0x0"]), true),
+        (
+            "debug_subscribe",
+            json!(["traceChain", "0x3e0", "0x3e8"]),
+            true,
+        ),
+        (
+            "debug_subscribe",
+            json!(["traceChain", "0x6e", "0x5a"]),
+            true,
+        ),
+        (
+            "debug_subscribe",
+            json!(["traceChain", "0x5a", "0x5a"]),
+            true,
+        ),
+        ("debug_subscribe", json!(["newHeads"]), false),
     ] {
+        let (router, backend) = router();
         assert_eq!(
-            router
-                .route("eth_feeHistory", RpcParams(params.clone()))
-                .await
-                .unwrap(),
-            era(LIVE, params)
+            route(&router, method, params.clone()).await,
+            era(LIVE, params),
+            "{method}"
         );
+        assert_eq!(backend.resolutions() > 0, resolves, "{method}");
     }
-    assert_eq!(backend.resolutions(), 0);
+}
+
+#[tokio::test]
+async fn invalid_requests_fail_with_exact_errors() {
+    let (router, _) = router();
+    for (method, params, code, message) in [
+        (
+            "eth_call",
+            json!("0x1"),
+            -32602,
+            "params must be an array or an object",
+        ),
+        (
+            "debug_traceTransaction",
+            json!([]),
+            -32602,
+            "missing transaction hash",
+        ),
+        (
+            "eth_simulateV1",
+            json!([calls(&[50, 150]), "0x32"]),
+            -32004,
+            "simulated blocks span multiple eras",
+        ),
+        (
+            "reth_getBlockExecutionOutcome",
+            json!(["0x1", 0]),
+            -32602,
+            "block count must be between 1 and 128",
+        ),
+        (
+            "reth_getBlockExecutionOutcome",
+            json!(["0x1", "0x81"]),
+            -32602,
+            "block count must be between 1 and 128",
+        ),
+        (
+            "trace_filter",
+            json!([{"fromBlock": "0x6e", "toBlock": "0x5a"}]),
+            -32602,
+            "invalid parameters: fromBlock cannot be greater than toBlock",
+        ),
+        (
+            "trace_filter",
+            json!([{"fromBlock": "0x0", "toBlock": "0x65"}]),
+            -32602,
+            "Block range too large; currently limited to 100 blocks",
+        ),
+        (
+            "testing_buildBlockV1",
+            json!([]),
+            -32004,
+            "testing_buildBlockV1 has no era routing policy",
+        ),
+        (
+            "foo_bar",
+            json!([]),
+            -32004,
+            "foo_bar has no era routing policy",
+        ),
+    ] {
+        let err = router.route(method, RpcParams(params)).await.unwrap_err();
+        assert_eq!((err.code(), err.message()), (code, message), "{method}");
+    }
 }
 
 #[tokio::test]
@@ -322,486 +445,198 @@ async fn transactions_route_by_their_block() {
         "ots_getTransactionError",
         "ots_traceTransaction",
     ] {
-        assert!(matches!(
-            router
-                .route(method, RpcParams(json!([historical])))
-                .await
-                .unwrap(),
-            Route::Era(1, _)
-        ));
+        let mut cases = vec![(json!([historical]), 1), (json!([hash(1)]), LIVE)];
         for name in ["tx_hash", "txHash", "hash", "transaction"] {
-            assert!(matches!(
-                router
-                    .route(method, RpcParams(named(&[(name, json!(historical))])))
-                    .await
-                    .unwrap(),
-                Route::Era(1, _)
-            ));
+            cases.push((named(&[(name, json!(historical))]), 1));
         }
-        // Pooled or unknown transactions run live.
-        assert!(matches!(
-            router
-                .route(method, RpcParams(json!([hash(1)])))
-                .await
-                .unwrap(),
-            Route::Era(LIVE, _)
-        ));
-        let err = router
-            .route(method, RpcParams(json!([])))
-            .await
-            .unwrap_err();
-        assert_eq!(err.code(), -32602);
+        for (params, expected) in cases {
+            assert_eq!(
+                route(&router, method, params.clone()).await,
+                era(expected, params)
+            );
+        }
     }
 }
 
 #[tokio::test]
-async fn simulations_route_by_generated_block_times() {
-    let calls = |times: &[u64]| {
-        json!({"blockStateCalls": times
-            .iter()
-            .map(|time| json!({"blockOverrides": {"time": hex(*time)}}))
-            .chain([json!({})])
-            .collect::<Vec<_>>()})
-    };
-    // No explicit times: the base era.
-    assert_eq!(
-        route("eth_simulateV1", json!([calls(&[]), "0x32"]))
-            .await
-            .unwrap(),
-        era(0, json!([calls(&[]), pinned(50)]))
-    );
-    // Historical base with live times.
-    assert!(matches!(
-        route("eth_simulateV1", json!([calls(&[900, 950]), "0x32"]))
-            .await
-            .unwrap(),
-        Route::Era(LIVE, _)
-    ));
-    // Times older than the base use the base era.
-    assert!(matches!(
-        route("eth_simulateV1", json!([calls(&[50]), "0x96"]))
-            .await
-            .unwrap(),
-        Route::Era(1, _)
-    ));
-    let err = route("eth_simulateV1", json!([calls(&[50, 150]), "0x32"]))
-        .await
-        .unwrap_err();
-    assert_eq!(
-        (err.code(), err.message()),
-        (-32004, "simulated blocks span multiple eras")
-    );
-    for base in [json!("pending"), Value::Null] {
-        let params = json!({"payload": calls(&[]), "block": base});
-        assert_eq!(
-            route("tempo_simulateV1", params.clone()).await.unwrap(),
-            era(LIVE, params)
-        );
-    }
-    assert_eq!(
-        route(
-            "tempo_simulateV1",
-            json!({"payload": calls(&[]), "block": "0x96"})
-        )
-        .await
-        .unwrap(),
-        era(1, json!({"payload": calls(&[]), "block": pinned(150)}))
-    );
-}
-
-#[tokio::test]
-async fn sim_bundles_route_by_override_time_then_parent() {
-    let bundle = json!({"bundle": []});
-    assert_eq!(
-        route("mev_simBundle", json!([bundle, {"parentBlock": "0x32"}]))
-            .await
-            .unwrap(),
-        era(0, json!([bundle, {"parentBlock": pinned(50)}]))
+async fn canonical_ranges_split_at_boundaries() {
+    let (router, backend) = router();
+    let outcome = Merge::ExecutionOutcome;
+    let expected = split(
+        vec![
+            (0, json!({"blockId": "0x5f", "count": "0x5"})),
+            (1, json!({"blockId": "0x64", "count": "0x5"})),
+        ],
+        outcome,
     );
     assert_eq!(
         route(
-            "mev_simBundle",
-            json!([bundle, {"parentBlock": "0x32", "timestamp": 150}])
-        )
-        .await
-        .unwrap(),
-        era(
-            1,
-            json!([bundle, {"parentBlock": pinned(50), "timestamp": 150}])
-        )
-    );
-    assert_eq!(
-        route("mev_simBundle", json!({"bundle": bundle}))
-            .await
-            .unwrap(),
-        era(
-            LIVE,
-            json!({"bundle": bundle, "sim_overrides": {"parentBlock": pinned(1000)}})
-        )
-    );
-    let pending = json!([bundle, {"parentBlock": "pending"}]);
-    assert_eq!(
-        route("mev_simBundle", pending.clone()).await.unwrap(),
-        era(LIVE, pending)
-    );
-}
-
-#[tokio::test]
-async fn execution_outcomes_split_at_boundaries() {
-    assert_eq!(
-        route("reth_getBlockExecutionOutcome", json!(["0x32", "0x2"]))
-            .await
-            .unwrap(),
-        era(0, json!([pinned(50), "0x2"]))
-    );
-    assert_eq!(
-        route(
+            &router,
             "reth_getBlockExecutionOutcome",
             json!({"blockId": "0x5f", "count": 10})
         )
-        .await
-        .unwrap(),
-        Route::Split {
-            segments: vec![
-                (0, RpcParams(json!({"blockId": "0x5f", "count": "0x5"}))),
-                (1, RpcParams(json!({"blockId": "0x64", "count": "0x5"}))),
-            ],
-            merge: Merge::ExecutionOutcome,
-        }
+        .await,
+        expected
     );
     // A hash re-resolves by canonical height.
     assert_eq!(
-        route("reth_getBlockExecutionOutcome", json!([hash(95), "0xa"]))
-            .await
-            .unwrap(),
-        route("reth_getBlockExecutionOutcome", json!(["0x5f", "0xa"]))
-            .await
-            .unwrap(),
+        route(
+            &router,
+            "reth_getBlockExecutionOutcome",
+            json!([hash(95), "0xa"])
+        )
+        .await,
+        route(
+            &router,
+            "reth_getBlockExecutionOutcome",
+            json!(["0x5f", "0xa"])
+        )
+        .await,
     );
-
     // Clamped at the head.
-    let (router, _) = router_with(vec![100, 995], FakeBackend::default());
+    let (clamped, _) = router_with(vec![100, 995], FakeBackend::default());
     assert_eq!(
-        router
-            .route(
-                "reth_getBlockExecutionOutcome",
-                RpcParams(json!(["0x3e0", "0x80"]))
-            )
-            .await
-            .unwrap(),
-        Route::Split {
-            segments: vec![
-                (1, RpcParams(json!(["0x3e0", "0x3"]))),
-                (2, RpcParams(json!(["0x3e3", "0x6"]))),
-            ],
-            merge: Merge::ExecutionOutcome,
-        }
+        route(
+            &clamped,
+            "reth_getBlockExecutionOutcome",
+            json!(["0x3e0", "0x80"])
+        )
+        .await,
+        split(
+            vec![(1, json!(["0x3e0", "0x3"])), (2, json!(["0x3e3", "0x6"]))],
+            outcome
+        )
     );
 
-    for params in [json!(["0x0"]), json!(["pending", 3])] {
-        assert_eq!(
-            route("reth_getBlockExecutionOutcome", params.clone())
-                .await
-                .unwrap(),
-            era(LIVE, params)
-        );
-    }
-    for count in [json!(0), json!("0x81")] {
-        let err = route("reth_getBlockExecutionOutcome", json!(["0x1", count]))
-            .await
-            .unwrap_err();
-        assert_eq!(
-            (err.code(), err.message()),
-            (-32602, "block count must be between 1 and 128")
-        );
-    }
-}
-
-#[tokio::test]
-async fn trace_filters_split_at_boundaries() {
-    let filter = json!({
-        "fromBlock": "0x5a",
-        "toBlock": "0x6e",
-        "fromAddress": ["0x0000000000000000000000000000000000000001"],
-        "mode": "union",
-        "after": 2,
-        "count": "0x3",
-    });
-    let segment = |from: u64, to: u64| {
-        let mut filter = filter.clone();
-        filter["fromBlock"] = hex(from);
-        filter["toBlock"] = hex(to);
-        let filter = filter.as_object_mut().unwrap();
-        filter.remove("after");
-        filter.remove("count");
-        RpcParams(json!([filter]))
-    };
+    // Segments keep the caller's filter without pagination, which applies once to the merge.
+    let filter = json!({"fromBlock": "0x5a", "toBlock": "0x6e", "mode": "union", "after": 2, "count": "0x3"});
+    let segment =
+        |from: u64, to: u64| json!([{"fromBlock": hex(from), "toBlock": hex(to), "mode": "union"}]);
     assert_eq!(
-        route("trace_filter", json!([filter])).await.unwrap(),
-        Route::Split {
-            segments: vec![(0, segment(90, 99)), (1, segment(100, 110))],
-            merge: Merge::TraceFilter {
+        route(&router, "trace_filter", json!([filter])).await,
+        split(
+            vec![(0, segment(90, 99)), (1, segment(100, 110))],
+            Merge::TraceFilter {
                 after: Some(2),
-                count: Some(3),
+                count: Some(3)
             },
-        }
+        )
     );
-
-    // Two boundaries: three eras.
-    let mut three = filter.clone();
-    three["fromBlock"] = hex(150);
-    three["toBlock"] = hex(210);
-    let (router, _) = router_with(vec![100, 160, 200], FakeBackend::default());
-    let Route::Split { segments, .. } = router
-        .route("trace_filter", RpcParams(json!([three])))
-        .await
-        .unwrap()
+    let mut three_eras = filter;
+    three_eras["fromBlock"] = hex(150);
+    three_eras["toBlock"] = hex(210);
+    let (three, _) = router_with(vec![100, 160, 200], FakeBackend::default());
+    let Route::Split { segments, .. } = route(&three, "trace_filter", json!([three_eras])).await
     else {
         panic!("expected a split")
     };
-    let bounds: Vec<_> = segments
-        .iter()
-        .map(|(era, params)| {
-            (
-                *era,
-                params.0[0]["fromBlock"].clone(),
-                params.0[0]["toBlock"].clone(),
-            )
-        })
+    let segments: Vec<_> = segments
+        .into_iter()
+        .map(|(era, params)| (era, params.0))
         .collect();
     assert_eq!(
-        bounds,
+        segments,
         [
-            (1, hex(150), hex(159)),
-            (2, hex(160), hex(199)),
-            (3, hex(200), hex(210))
+            (1, segment(150, 159)),
+            (2, segment(160, 199)),
+            (3, segment(200, 210))
         ]
     );
-
-    // One era keeps pagination and pins both bounds.
+    // Equal bounds resolve once.
+    let reads = backend.resolutions();
     assert_eq!(
-        route(
-            "trace_filter",
-            json!([{"fromBlock": "0x1", "toBlock": "0x2", "after": 1}])
-        )
-        .await
-        .unwrap(),
-        era(
-            0,
-            json!([{"fromBlock": "0x1", "toBlock": "0x2", "after": 1}])
-        )
-    );
-    let (router, backend) = default_router();
-    assert_eq!(
-        router
-            .route("trace_filter", RpcParams(json!([{"toBlock": null}])))
-            .await
-            .unwrap(),
+        route(&router, "trace_filter", json!([{"toBlock": null}])).await,
         era(
             LIVE,
             json!([{"fromBlock": hex(1000), "toBlock": hex(1000)}])
         )
     );
-    assert_eq!(backend.resolutions(), 1);
+    assert_eq!(backend.resolutions(), reads + 1);
 
-    let err = route(
-        "trace_filter",
-        json!([{"fromBlock": "0x6e", "toBlock": "0x5a"}]),
-    )
-    .await
-    .unwrap_err();
+    let relay = |era, start: u64, end: u64, is_last| RelaySegment {
+        era,
+        params: RpcParams(json!(["traceChain", hex(start), hex(end), {}])),
+        last_block: end,
+        is_last,
+    };
     assert_eq!(
-        (err.code(), err.message()),
-        (
-            -32602,
-            "invalid parameters: fromBlock cannot be greater than toBlock"
+        route(
+            &router,
+            "debug_subscribe",
+            json!(["traceChain", "0x5a", "0x6e", {}])
         )
+        .await,
+        Route::Relay {
+            segments: vec![relay(0, 90, 99, false), relay(1, 99, 110, true)],
+        }
     );
-    let err = route(
-        "trace_filter",
-        json!([{"fromBlock": "0x0", "toBlock": "0x65"}]),
-    )
-    .await
-    .unwrap_err();
-    assert_eq!(
-        (err.code(), err.message()),
-        (
-            -32602,
-            "Block range too large; currently limited to 100 blocks"
-        )
-    );
+    let named =
+        json!({"subscription": "traceChain", "startExclusive": "0x5a", "endInclusive": "0xc8"});
+    assert!(matches!(
+        route(&router, "debug_subscribe", named).await,
+        Route::Relay { segments } if segments.len() == 3
+    ));
 }
 
 #[tokio::test]
 async fn split_points_follow_era_selection() {
-    // Blocks `n` at timestamp `3n`: the boundary 100 falls between blocks 33 and 34, and the era
-    // ending at 101 holds no block at all.
+    let bounds = |route: Route| {
+        let Route::Split { segments, .. } = route else {
+            panic!("expected a split")
+        };
+        let bound = |params: &RpcParams, name: &str| {
+            u64::from_str_radix(&params.0[0][name].as_str().unwrap()[2..], 16).unwrap()
+        };
+        segments
+            .iter()
+            .map(|(era, params)| (*era, bound(params, "fromBlock"), bound(params, "toBlock")))
+            .collect::<Vec<_>>()
+    };
+    let filter = |from: u64, to: u64| json!([{"fromBlock": hex(from), "toBlock": hex(to)}]);
+
+    // With block `n` at `3n`, boundary 100 falls between blocks 33 and 34 and era 1 is empty.
     let backend = FakeBackend {
         timestamp: |number| 3 * number,
         ..Default::default()
     };
-    let (router, _) = router_with(vec![100, 101], backend);
-    let Route::Split { segments, .. } = router
-        .route(
-            "trace_filter",
-            RpcParams(json!([{"fromBlock": "0x1e", "toBlock": "0x28"}])),
-        )
-        .await
-        .unwrap()
-    else {
-        panic!("expected a split")
-    };
-    assert_eq!(
-        segments
-            .iter()
-            .map(|(era, params)| (*era, params.0[0]["fromBlock"].clone()))
-            .collect::<Vec<_>>(),
-        [(0, hex(30)), (2, hex(34))]
-    );
-
-    // Boundaries at the first and last block of the range.
-    let (router, _) = default_router();
-    for (from, to, expected) in [
-        (99, 100, vec![(0, 99, 99), (1, 100, 100)]),
-        (100, 200, vec![(1, 100, 199), (2, 200, 200)]),
+    let (sparse, _) = router_with(vec![100, 101], backend);
+    let (router, _) = router();
+    for (router, from, to, expected) in [
+        (&sparse, 30, 40, vec![(0, 30, 33), (2, 34, 40)]),
+        (&router, 99, 100, vec![(0, 99, 99), (1, 100, 100)]),
+        (&router, 100, 200, vec![(1, 100, 199), (2, 200, 200)]),
     ] {
-        let Route::Split { segments, .. } = router
-            .route(
-                "trace_filter",
-                RpcParams(json!([{"fromBlock": hex(from), "toBlock": hex(to)}])),
-            )
-            .await
-            .unwrap()
-        else {
-            panic!("expected a split")
-        };
-        let bounds: Vec<_> = segments
-            .iter()
-            .map(|(era, params)| {
-                let bound = |name: &str| {
-                    u64::from_str_radix(&params.0[0][name].as_str().unwrap()[2..], 16).unwrap()
-                };
-                (*era, bound("fromBlock"), bound("toBlock"))
-            })
-            .collect();
-        assert_eq!(bounds, expected);
+        assert_eq!(
+            bounds(route(router, "trace_filter", filter(from, to)).await),
+            expected
+        );
     }
 
     // Logarithmic header reads.
-    let backend = FakeBackend {
+    let backend = Arc::new(FakeBackend {
         head: 1 << 20,
         ..Default::default()
-    };
-    let backend = Arc::new(backend);
+    });
     let router = Router::new(vec![1 << 19], u64::MAX, backend.clone());
-    router
-        .route(
-            "trace_filter",
-            RpcParams(json!([{"fromBlock": "0x0", "toBlock": hex(1 << 20)}])),
-        )
-        .await
-        .unwrap();
+    route(&router, "trace_filter", filter(0, 1 << 20)).await;
     assert!(backend.resolutions() <= 2 + 21, "{}", backend.resolutions());
 }
 
 #[tokio::test]
 async fn first_block_at_is_a_binary_search() {
-    let timestamp = async |number: u64| Ok::<_, ()>(number * 10);
-    assert_eq!(first_block_at(0, 10, 0, timestamp).await, Ok(0));
-    assert_eq!(first_block_at(0, 10, 41, timestamp).await, Ok(5));
-    assert_eq!(first_block_at(0, 10, 50, timestamp).await, Ok(5));
-    assert_eq!(first_block_at(3, 10, 0, timestamp).await, Ok(3));
-    assert_eq!(first_block_at(0, 10, 1000, timestamp).await, Ok(10));
-}
-
-#[tokio::test]
-async fn trace_chain_relays_historical_segments() {
-    let params = json!(["traceChain", "0x5a", "0x6e", {"tracer": "callTracer"}]);
-    let segment = |era, start: u64, end: u64, is_last| RelaySegment {
-        era,
-        params: RpcParams(json!(["traceChain", hex(start), hex(end), {"tracer": "callTracer"}])),
-        last_block: end,
-        is_last,
+    let timestamp = async |number: u64| Ok::<_, &str>(number * 10);
+    for (low, boundary, expected) in [(0, 0, 0), (0, 41, 5), (0, 50, 5), (3, 0, 3), (0, 1000, 10)] {
+        assert_eq!(
+            first_block_at(low, 10, boundary, timestamp).await,
+            Ok(expected)
+        );
+    }
+    let missing = async |number: u64| {
+        if number < 3 {
+            Ok(number)
+        } else {
+            Err("missing")
+        }
     };
-    assert_eq!(
-        route("debug_subscribe", params).await.unwrap(),
-        Route::Relay {
-            segments: vec![segment(0, 90, 99, false), segment(1, 99, 110, true)],
-        }
-    );
-    assert_eq!(
-        route(
-            "debug_subscribe",
-            json!(["traceChain", "0xa", "0x14", null])
-        )
-        .await
-        .unwrap(),
-        Route::Relay {
-            segments: vec![RelaySegment {
-                era: 0,
-                params: RpcParams(json!(["traceChain", "0xa", "0x14", null])),
-                last_block: 20,
-                is_last: true,
-            }],
-        }
-    );
-    assert!(matches!(
-        route(
-            "debug_subscribe",
-            json!({"subscription": "traceChain", "startExclusive": "0x5a", "endInclusive": "0xc8"})
-        )
-        .await
-        .unwrap(),
-        Route::Relay { segments } if segments.len() == 3
-    ));
-
-    // Live-only, empty, and other subscriptions stay native and untouched.
-    for params in [
-        json!(["traceChain", "0x3e0", "0x3e8"]),
-        json!(["traceChain", "0x6e", "0x5a"]),
-        json!(["traceChain", "0x5a", "0x5a"]),
-        json!(["newHeads"]),
-    ] {
-        assert_eq!(
-            route("debug_subscribe", params.clone()).await.unwrap(),
-            era(LIVE, params)
-        );
-    }
-}
-
-#[tokio::test]
-async fn raw_blocks_route_by_their_header() {
-    assert!(matches!(
-        route("debug_traceBlock", json!(["0x96"])).await.unwrap(),
-        Route::Era(1, _)
-    ));
-}
-
-#[tokio::test]
-async fn unknown_methods_fail_closed() {
-    for method in [
-        "testing_buildBlockV1",
-        "flashbots_validateBuilderSubmissionV3",
-        "foo_bar",
-    ] {
-        let err = route(method, json!([])).await.unwrap_err();
-        assert_eq!(
-            (err.code(), err.message().to_owned()),
-            (-32004, format!("{method} has no era routing policy"))
-        );
-        assert!(is_execution_method(method));
-    }
-    for method in [
-        "eth_getBalance",
-        "eth_getLogs",
-        "engine_newPayloadV4",
-        "reth_newPayload",
-        "consensus_getFinalization",
-        "tempo_forkSchedule",
-        "debug_getRawBlock",
-        "ots_getBlockDetails",
-        "debug_subscribe",
-    ] {
-        assert!(!is_execution_method(method), "{method}");
-    }
+    assert_eq!(first_block_at(0, 5, 4, missing).await, Err("missing"));
 }

@@ -1,9 +1,4 @@
-//! Certified consensus bootstrap after a historical sync handoff.
-//!
-//! Frozen era writers sync execution storage through the last frozen checkpoint without
-//! consensus. Before the consensus or follow engine starts, this anchors consensus storage at a
-//! certified finalization at or above that historical tip, drives execution to it, and persists
-//! finality only through the durable execution prefix.
+//! Certified consensus bootstrap after frozen era writers synced execution without consensus.
 
 use std::{future::Future, num::NonZeroU64, time::Duration};
 
@@ -44,9 +39,8 @@ const SYNC_POLL_INTERVAL: Duration = Duration::from_secs(1);
 
 /// Anchors consensus storage at a certified floor at or above the execution head.
 ///
-/// `identity` overrides the chain's trusted network identity. `latest_finalization` is awaited
-/// only when no reusable certificate is archived under `partition_prefix`, so a restart recovers
-/// without an upstream. The caller races this against shutdown.
+/// `latest_finalization` is awaited only when no reusable certificate is archived, so restarts
+/// recover offline. Finality is persisted only through the durable execution prefix.
 #[instrument(skip_all, err)]
 pub async fn bootstrap<TContext>(
     mut context: TContext,
