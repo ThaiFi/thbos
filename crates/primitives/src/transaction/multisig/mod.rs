@@ -181,14 +181,11 @@ impl MultisigConfig {
             }
             return Err(MultisigConfigError::OwnersNotAscending);
         }
-        let total_weight: u16 = self
+        let total_weight = self
             .owners
             .iter()
-            .map(|owner| u16::from(owner.weight))
-            .sum();
-        let Ok(total_weight) = u8::try_from(total_weight) else {
-            return Err(MultisigConfigError::TotalWeightExceedsMax);
-        };
+            .try_fold(0u8, |total, owner| total.checked_add(owner.weight))
+            .ok_or(MultisigConfigError::TotalWeightExceedsMax)?;
         let mut largest_weights = [0u8; MAX_MULTISIG_SIGNATURES];
         for owner in &self.owners {
             if owner.weight > largest_weights[0] {
