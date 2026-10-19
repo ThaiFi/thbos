@@ -313,6 +313,9 @@ enum KeychainCheck {
 #[derive(Clone, Copy, Debug)]
 enum NonceLane {
     Protocol,
+    /// The protocol lane of a simulation: the nonce check is disabled and the transaction nonce is
+    /// not zero, so the `nonce == 0` charge does not apply.
+    ProtocolSimulated,
     TwoD,
     Expiring,
 }
@@ -913,8 +916,9 @@ fn block_gas(f: &mut Fixture, tx: &AASigned) -> BlockGas {
     }
 }
 
-/// Gas of a nonce-zero first registration of the sender on `lane`, whose only call is a `CREATE`
-/// when `create_first` and a read of the commitment otherwise.
+/// Gas of a first registration of the sender on `lane` (at transaction nonce zero, except on the
+/// simulated lane), whose only call is a `CREATE` when `create_first` and a read of the
+/// commitment otherwise.
 fn sender_registration_gas(lane: NonceLane, create_first: bool, empty_sender: bool) -> BlockGas {
     let mut f = Fixture::new();
     let account = f.account;
@@ -928,14 +932,18 @@ fn sender_registration_gas(lane: NonceLane, create_first: bool, empty_sender: bo
     } else {
         f.getter()
     };
+    if matches!(lane, NonceLane::ProtocolSimulated) {
+        f.evm.ctx_mut().cfg.disable_nonce_check = true;
+    }
     let tx = TempoTransaction {
         nonce_key: match lane {
-            NonceLane::Protocol => U256::ZERO,
+            NonceLane::Protocol | NonceLane::ProtocolSimulated => U256::ZERO,
             NonceLane::TwoD => U256::ONE,
             NonceLane::Expiring => TEMPO_EXPIRING_NONCE_KEY,
         },
         valid_before: matches!(lane, NonceLane::Expiring).then_some(EXPIRING_VALID_BEFORE),
         gas_limit: 5_000_000,
+        nonce: u64::from(matches!(lane, NonceLane::ProtocolSimulated)),
         ..aa_tx(0, vec![call])
     };
     let tx = multisig_signed(&f, tx);
@@ -998,7 +1006,8 @@ fn registration_charges_the_new_account_cost_once_for_every_nonce_type() {
     }
     // The `nonce == 0` charge of the protocol lane creates the sender; a 2D `nonce == 0` charge
     // pays the nonce-key slot, so registration still pays. A first-call CREATE from a nonce-zero
-    // sender pays the creation on a 2D or expiring lane, so registration adds nothing.
+    // sender pays the creation on a 2D or expiring lane, so registration adds nothing. A protocol
+    // lane without the `nonce == 0` charge has no CREATE charge either, so registration pays.
     for Row {
         lane,
         create_first,
@@ -1033,6 +1042,11 @@ fn registration_charges_the_new_account_cost_once_for_every_nonce_type() {
             lane: NonceLane::Expiring,
             create_first: true,
             registration_charges_new_account: false,
+        },
+        Row {
+            lane: NonceLane::ProtocolSimulated,
+            create_first: true,
+            registration_charges_new_account: true,
         },
     ] {
         let funded = sender_registration_gas(lane, create_first, false);
