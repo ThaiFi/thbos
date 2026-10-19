@@ -31,7 +31,7 @@ use reth_trie_db::{
     DatabaseHashedCursorFactory, DatabaseStateRoot, DatabaseTrieCursorFactory, with_adapter,
 };
 use revm::{
-    context::result::{EVMError, ExecutionResult, InvalidTransaction},
+    context::result::{EVMError, ExecutionResult, InvalidTransaction, OutOfGasError},
     context_interface::cfg::GasId,
     state::EvmStorageSlot,
 };
@@ -45,15 +45,17 @@ use tempo_chainspec::{
 use tempo_contracts::precompiles::{
     ACCOUNT_KEYCHAIN_ADDRESS, AccountKeychainError, ISignatureVerifier, ITIP20ChannelReserve,
     PATH_USD_ADDRESS, SIGNATURE_VERIFIER_ADDRESS, TIP20_CHANNEL_RESERVE_ADDRESS,
-    account_keychain::IAccountKeychain, nonce::INonce, tip20::ITIP20,
+    ZONE_PORTAL_PREFIX, account_keychain::IAccountKeychain, nonce::INonce, tip20::ITIP20,
 };
 use tempo_evm::{
     StorageActionReplay, StorageActionReplayError, TempoEvmConfig, supports_storage_action_replay,
 };
 use tempo_precompiles::{
     error::TempoPrecompileError,
-    native_multisig::keccak_cost,
+    input_cost,
+    native_multisig::{initial_account_proof_gas, keccak_cost},
     nonce::NonceManager,
+    signature_verifier::multisig_verification_gas,
     tip20::{PERMIT_TYPEHASH, TIP20Token},
     tip20_channel_reserve::TIP20ChannelReserve,
 };
@@ -273,6 +275,7 @@ enum SignedAction {
 enum Verifier {
     Keychain,
     KeychainAdmin,
+    Multisig,
 }
 
 impl Verifier {
@@ -285,6 +288,12 @@ impl Verifier {
             }
             .abi_encode(),
             Self::KeychainAdmin => ISignatureVerifier::verifyKeychainAdminCall {
+                account,
+                hash,
+                signature,
+            }
+            .abi_encode(),
+            Self::Multisig => ISignatureVerifier::verifyMultisigCall {
                 account,
                 hash,
                 signature,
@@ -4499,26 +4508,6 @@ fn root_keychain_signature(kind: SigKind, seed: u8, hash: B256) -> (Address, Byt
     keychain_signature(kind, seed, address, hash)
 }
 
-/// `owner`'s approval of `inner_digest` as the one-owner multisig `account`.
-fn multisig_approval(
-    account: Address,
-    owner: &PrivateKeySigner,
-    inner_digest: B256,
-) -> MultisigSignature {
-    let config = MultisigConfig {
-        salt: B256::ZERO,
-        version: 0,
-        threshold: 1,
-        owners: vec![MultisigOwner {
-            owner: owner.address(),
-            weight: 1,
-        }],
-    };
-    let digest = multisig_digest(inner_digest, account, config.version);
-    let approval = PrimitiveSignature::Secp256k1(owner.sign_hash_sync(&digest).unwrap());
-    MultisigSignature::try_new(account, config, vec![approval]).unwrap()
-}
-
 /// Grants `key` of `kind` to the fixture's account, signed by its root.
 fn grant_kind(f: &mut Fixture, nonce: u64, kind: SigKind, key: Address, admin: bool) {
     let signature_type = match kind {
@@ -4726,8 +4715,16 @@ fn retired_root_signatures_still_recover_and_keychain_format_is_unchanged() {
     // A V2 keychain signature whose inner signature is a multisig one is not a keychain one,
     // retired key or not, whether the multisig names the parent account or another.
     let signing_hash = KeychainSignature::signing_hash(hash, account);
+    let other_owner = signer(3);
+    let other_config = MultisigConfig {
+        owners: vec![MultisigOwner {
+            owner: other_owner.address(),
+            weight: 1,
+        }],
+        ..f.config.clone()
+    };
     for named in [account, signer(2).address()] {
-        let multisig = multisig_approval(named, &signer(3), signing_hash);
+        let multisig = multisig_approval(named, &other_config, &other_owner, signing_hash);
         let signature = TempoSignature::Keychain(KeychainSignature::new(account, multisig));
         for function in [Verifier::Keychain, Verifier::KeychainAdmin] {
             let call = function.call(account, hash, signature.to_bytes());
@@ -4922,4 +4919,366 @@ fn retired_root_check_in_admin_caller_reads_the_warm_sender() {
     };
     // The sender is always loaded: one warm account access, nothing more.
     assert_eq!(gas_at(TempoHardfork::T14) - gas_at(TempoHardfork::T13), 100);
+}
+
+/// An existing relayer, so that the new-account charge of its first transaction does not enter
+/// the gas of the checks that it sends.
+fn seed_relayer(f: &mut Fixture) -> Address {
+    let relayer = signer(9).address();
+    f.evm
+        .db_mut()
+        .insert_account(relayer, AccountInfo::default().with_nonce(1));
+    relayer
+}
+
+/// Executes `call` from the relayer with `gas_limit` and `warm` in the access list.
+fn relayed(
+    f: &mut Fixture,
+    call: Call,
+    gas_limit: u64,
+    warm: Option<Address>,
+) -> ExecutionResult<HaltReason> {
+    let relayer = signer(9).address();
+    let nonce = nonce_of(f, relayer);
+    let tx = f.sign_primitive(TempoTransaction {
+        gas_limit,
+        access_list: AccessList(
+            warm.into_iter()
+                .map(|address| AccessListItem {
+                    address,
+                    storage_keys: Vec::new(),
+                })
+                .collect(),
+        ),
+        ..aa_tx(nonce, vec![call])
+    });
+    f.run_as(relayer, &tx)
+}
+
+/// The `verifyMultisig` call of `signature`.
+fn verify_multisig_call(account: Address, hash: B256, signature: &MultisigSignature) -> Call {
+    Verifier::Multisig.call(
+        account,
+        hash,
+        TempoSignature::Multisig(signature.clone()).to_bytes(),
+    )
+}
+
+/// The hash that the multisig verification tests approve.
+const MULTISIG_HASH: B256 = B256::repeat_byte(0x42);
+
+#[derive(Clone, Copy, Debug)]
+enum Verdict {
+    Valid,
+    Invalid,
+    Reverts,
+}
+
+/// How the verified account is loaded.
+#[derive(Clone, Copy, Debug)]
+enum Access {
+    Cold,
+    /// In the access list of the transaction.
+    Listed,
+    /// An EVM precompile.
+    Warm,
+}
+
+/// Checks what `verifyMultisig` returns for `signature` and the gas of the transaction: its
+/// calldata, the ABI input, and the charge for `signature`: the account access, the
+/// verification and, while the account is unregistered, the derivation of its address.
+fn check_multisig_verdict(
+    f: &mut Fixture,
+    account: Address,
+    signature: &MultisigSignature,
+    registered: bool,
+    access: Access,
+    verdict: Verdict,
+    label: &str,
+) {
+    let spec = TempoHardfork::T14;
+    let params = tempo_gas_params(spec);
+    let cold_extra = match access {
+        Access::Cold => params.cold_account_additional_cost(),
+        Access::Listed | Access::Warm => 0,
+    };
+    let access_gas = params.warm_storage_read_cost() + cold_extra;
+    let initial = if registered {
+        0
+    } else {
+        initial_account_proof_gas(signature.config())
+    };
+    let charge = access_gas + multisig_verification_gas(signature) + initial;
+
+    let call = verify_multisig_call(account, MULTISIG_HASH, signature);
+    let zeros = call.input.iter().filter(|byte| **byte == 0).count() as u64;
+    let nonzeros = call.input.len() as u64 - zeros;
+    // Intrinsic gas: 21000 plus 4 per zero and 16 per non-zero calldata byte. A transaction
+    // uses at least its calldata floor: 21000 plus 10 per zero and 40 per non-zero byte.
+    let listed = matches!(access, Access::Listed).then_some(account);
+    // Each address in the access list costs 2400 intrinsic gas.
+    let access_list = if listed.is_some() { 2_400 } else { 0 };
+    let execution = 21_000
+        + 4 * zeros
+        + 16 * nonzeros
+        + access_list
+        + input_cost(spec, call.input.len()).unwrap()
+        + charge;
+    let floor = 21_000 + 10 * zeros + 40 * nonzeros;
+    let result = relayed(f, call, 1_000_000, listed);
+    assert_eq!(result.tx_gas_used(), execution.max(floor), "{label}: gas");
+    match verdict {
+        Verdict::Valid | Verdict::Invalid => {
+            assert!(result.is_success(), "{label}: {result:?}");
+            let valid = matches!(verdict, Verdict::Valid);
+            assert_eq!(
+                bool::abi_decode(result.output().unwrap()).unwrap(),
+                valid,
+                "{label}"
+            );
+        }
+        Verdict::Reverts => {
+            assert_reverts_with(&result, ISignatureVerifier::InvalidSignature {}, label)
+        }
+    }
+}
+
+#[test]
+fn verify_multisig_before_and_after_rotation() {
+    let mut f = Fixture::new();
+    seed_relayer(&mut f);
+    let account = f.account;
+    let (cold, listed) = (Access::Cold, Access::Listed);
+
+    // Unregistered: the initial configuration derives the account, and nothing is written.
+    let initial = multisig_approval(account, &f.config, &f.owner, MULTISIG_HASH);
+    assert_eq!(multisig_verification_gas(&initial), 4_012);
+    let valid = Verdict::Valid;
+    check_multisig_verdict(
+        &mut f,
+        account,
+        &initial,
+        false,
+        cold,
+        valid,
+        "unregistered",
+    );
+    assert_eq!(f.commitment(), B256::ZERO);
+    // An initial configuration is version 0: a later version has no commitment to match.
+    let later = MultisigConfig {
+        version: 1,
+        ..f.config.clone()
+    };
+    let unregistered_later = multisig_approval(account, &later, &f.owner, MULTISIG_HASH);
+    let invalid = Verdict::Invalid;
+    let label = "unregistered later version";
+    check_multisig_verdict(
+        &mut f,
+        account,
+        &unregistered_later,
+        false,
+        cold,
+        invalid,
+        label,
+    );
+
+    // Registered by a rotation: only the new configuration matches, and the derivation is not
+    // charged any more.
+    let next_owner = signer(2);
+    let next = MultisigConfig {
+        version: 1,
+        owners: vec![MultisigOwner {
+            owner: next_owner.address(),
+            weight: 1,
+        }],
+        ..f.config.clone()
+    };
+    let rotate = f.signed(3, vec![Fixture::rotation(&f.config, &next)]);
+    assert!(f.run(&rotate).is_success());
+    assert_eq!(f.commitment(), next.commitment().unwrap());
+    let current = multisig_approval(account, &next, &next_owner, MULTISIG_HASH);
+    check_multisig_verdict(&mut f, account, &current, true, cold, valid, "rotated");
+    let label = "rotated, listed account";
+    check_multisig_verdict(&mut f, account, &current, true, listed, valid, label);
+    let stale = multisig_approval(account, &f.config, &f.owner, MULTISIG_HASH);
+    let label = "stale configuration";
+    check_multisig_verdict(&mut f, account, &stale, true, cold, invalid, label);
+}
+
+#[test]
+fn verify_multisig_false_cases_charge_before_they_check() {
+    let mut f = Fixture::new();
+    seed_relayer(&mut f);
+    let account = f.account;
+    let (cold, invalid) = (Access::Cold, Verdict::Invalid);
+    let valid = multisig_approval(account, &f.config, &f.owner, MULTISIG_HASH);
+
+    // The signature names another account than the one checked.
+    let names_other = multisig_approval(signer(5).address(), &f.config, &f.owner, MULTISIG_HASH);
+    let label = "account mismatch";
+    check_multisig_verdict(&mut f, account, &names_other, false, cold, invalid, label);
+
+    // Accounts that cannot be native multisig accounts, even when the signature names them: a
+    // Tempo and an EVM precompile, a virtual address and a zone portal.
+    let mut virtual_address = Address::ZERO;
+    virtual_address.0[4..14].fill(0xfd);
+    let mut zone_portal = Address::with_last_byte(1);
+    zone_portal.0[..12].copy_from_slice(ZONE_PORTAL_PREFIX.as_slice());
+    for (address, access) in [
+        (NATIVE_MULTISIG_ADDRESS, cold),
+        (Address::with_last_byte(1), Access::Warm),
+        (virtual_address, cold),
+        (zone_portal, cold),
+    ] {
+        let names_address = multisig_approval(address, &f.config, &f.owner, MULTISIG_HASH);
+        let label = format!("invalid account {address}");
+        check_multisig_verdict(
+            &mut f,
+            address,
+            &names_address,
+            false,
+            access,
+            invalid,
+            &label,
+        );
+    }
+
+    // A signature that derives another account than the one it names.
+    let other_salt = MultisigConfig {
+        salt: B256::repeat_byte(1),
+        ..f.config.clone()
+    };
+    let misderived = multisig_approval(account, &other_salt, &f.owner, MULTISIG_HASH);
+    let label = "initial account mismatch";
+    check_multisig_verdict(&mut f, account, &misderived, false, cold, invalid, label);
+
+    // An initial configuration needs the configured recovery factory.
+    let factory = f.evm.ctx_mut().block.multisig_recovery_factory.take();
+    assert!(factory.is_some());
+    let label = "no recovery factory";
+    check_multisig_verdict(&mut f, account, &valid, false, cold, invalid, label);
+    f.evm.ctx_mut().block.multisig_recovery_factory = factory;
+
+    // An account with code is not a multisig account, however well signed.
+    let label = "valid";
+    check_multisig_verdict(&mut f, account, &valid, false, cold, Verdict::Valid, label);
+    let info = f.evm.db_mut().basic(account).unwrap().unwrap();
+    f.evm
+        .db_mut()
+        .insert_account(account, info.with_code(Bytecode::new_legacy(bytes!("00"))));
+    let label = "account with code";
+    check_multisig_verdict(&mut f, account, &valid, false, cold, invalid, label);
+}
+
+#[test]
+fn verify_multisig_reverts() {
+    let mut f = Fixture::new();
+    seed_relayer(&mut f);
+    let account = f.account;
+
+    // Anything that is not a multisig signature is a format error.
+    let secp = PrimitiveSignature::Secp256k1(f.owner.sign_hash_sync(&MULTISIG_HASH).unwrap());
+    let keychain = TempoSignature::Keychain(KeychainSignature::new(account, secp.clone()));
+    for (label, signature) in [
+        ("primitive", secp.to_bytes()),
+        ("keychain", keychain.to_bytes()),
+        ("empty", Bytes::new()),
+        ("truncated", Bytes::from_static(&[0x05, 0xc0])),
+    ] {
+        let call = Verifier::Multisig.call(account, MULTISIG_HASH, signature);
+        let result = relayed(&mut f, call, 1_000_000, None);
+        assert_reverts_with(&result, ISignatureVerifier::InvalidFormat {}, label);
+    }
+
+    // Approvals that do not verify revert after the charge: another hash, and a key outside the
+    // configuration.
+    let other_hash = multisig_approval(account, &f.config, &f.owner, B256::repeat_byte(0x43));
+    let stranger = multisig_approval(account, &f.config, &signer(7), MULTISIG_HASH);
+    for (label, signature) in [("other hash", &other_hash), ("unknown owner", &stranger)] {
+        check_multisig_verdict(
+            &mut f,
+            account,
+            signature,
+            false,
+            Access::Cold,
+            Verdict::Reverts,
+            label,
+        );
+    }
+    assert_eq!(f.commitment(), B256::ZERO);
+}
+
+#[test]
+fn verify_multisig_runs_in_a_staticcall() {
+    let mut f = Fixture::new();
+    seed_relayer(&mut f);
+    let account = f.account;
+    // Returns the result of a STATICCALL to the verifier, and reverts with its revert data.
+    let code = [
+        bytes!("365f5f375f5f365f73").as_ref(),
+        SIGNATURE_VERIFIER_ADDRESS.as_slice(),
+        bytes!("5afa3d5f5f3e6029573d5ffd5b3d5ff3").as_ref(),
+    ]
+    .concat();
+    let proxy = f.install_contract(Address::repeat_byte(0x56), code);
+    let through_proxy = |signature: &MultisigSignature, hash| Call {
+        input: verify_multisig_call(account, hash, signature).input,
+        ..proxy.clone()
+    };
+
+    let valid = multisig_approval(account, &f.config, &f.owner, MULTISIG_HASH);
+    let result = relayed(
+        &mut f,
+        through_proxy(&valid, MULTISIG_HASH),
+        1_000_000,
+        None,
+    );
+    assert!(result.is_success(), "{result:?}");
+    assert!(bool::abi_decode(result.output().unwrap()).unwrap());
+    // The unregistered account is read, not registered.
+    assert_eq!(f.commitment(), B256::ZERO);
+    let other_hash = B256::repeat_byte(0x43);
+    let result = relayed(&mut f, through_proxy(&valid, other_hash), 1_000_000, None);
+    assert_reverts_with(
+        &result,
+        ISignatureVerifier::InvalidSignature {},
+        "other hash",
+    );
+}
+
+#[test]
+fn verify_multisig_needs_its_gas() {
+    for registered in [false, true] {
+        let mut f = Fixture::new();
+        seed_relayer(&mut f);
+        let account = f.account;
+        if registered {
+            let next = MultisigConfig {
+                version: 1,
+                ..f.config.clone()
+            };
+            let rotate = f.signed(3, vec![Fixture::rotation(&f.config, &next)]);
+            assert!(f.run(&rotate).is_success());
+            f.config = next;
+        }
+        let signature = multisig_approval(account, &f.config, &f.owner, MULTISIG_HASH);
+        let call = verify_multisig_call(account, MULTISIG_HASH, &signature);
+        // The gas the call uses when it has plenty is exactly what it needs.
+        let result = relayed(&mut f, call.clone(), 1_000_000, None);
+        assert!(result.is_success(), "{result:?}");
+        let needed = result.tx_gas_used();
+        let result = relayed(&mut f, call.clone(), needed, None);
+        assert!(result.is_success(), "registered: {registered}: {result:?}");
+        let result = relayed(&mut f, call, needed - 1, None);
+        assert!(
+            matches!(
+                result,
+                ExecutionResult::Halt {
+                    reason: HaltReason::OutOfGas(OutOfGasError::Precompile),
+                    ..
+                }
+            ),
+            "registered: {registered}: {result:?}"
+        );
+    }
 }

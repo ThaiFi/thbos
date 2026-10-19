@@ -256,6 +256,18 @@ fn multisig_signed(f: &Fixture, tx: TempoTransaction) -> AASigned {
     tx.into_signed(TempoSignature::Multisig(signature))
 }
 
+/// `owner`'s approval of `inner_digest` as the multisig `account` with `config`.
+fn multisig_approval(
+    account: Address,
+    config: &MultisigConfig,
+    owner: &PrivateKeySigner,
+    inner_digest: B256,
+) -> MultisigSignature {
+    let digest = multisig_digest(inner_digest, account, config.version);
+    let approval = PrimitiveSignature::Secp256k1(owner.sign_hash_sync(&digest).unwrap());
+    MultisigSignature::try_new(account, config.clone(), vec![approval]).unwrap()
+}
+
 fn abi_owners(config: &MultisigConfig) -> Vec<INativeMultisig::MultisigOwner> {
     config
         .owners
