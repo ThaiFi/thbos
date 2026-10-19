@@ -1791,7 +1791,7 @@ fn expect_revert(
         matches!(result, ExecutionResult::Revert { .. }),
         "{label}: {result:?}"
     );
-    assert_eq!(result.output().unwrap().as_ref(), error, "{label}");
+    assert_eq!(result.output().unwrap(), error, "{label}");
     assert!(multisig_logs(&result).is_empty(), "{label}");
 }
 
@@ -2142,7 +2142,7 @@ fn eoa_migration_after_delegation_cleared() {
     // An earlier transaction clearing the delegation makes the account eligible again.
     set_delegation(&mut f, 6, Address::ZERO);
     let info = f.evm.db_mut().basic(f.account).unwrap().unwrap();
-    assert_eq!(info.code_hash, KECCAK256_EMPTY);
+    assert_eq!(info.code_hash(), KECCAK256_EMPTY);
     assert_eq!(info.nonce, 8);
     let tx = f.primitive(8, vec![Fixture::upgrade(&config)]);
     let result = f.run(&tx);
@@ -3181,7 +3181,7 @@ fn account_state(f: &mut Fixture, address: Address) -> AccountState {
         let code = info
             .code
             .clone()
-            .unwrap_or_else(|| f.evm.db_mut().code_by_hash(info.code_hash).unwrap());
+            .unwrap_or_else(|| f.evm.db_mut().code_by_hash(info.code_hash()).unwrap());
         let bytes = code.original_bytes();
         assert_eq!(bytes[..3], [0xef, 0x01, 0x00], "{bytes:?}");
         Address::from_slice(&bytes[3..])
@@ -3588,11 +3588,7 @@ fn assert_reverts_with(result: &ExecutionResult<HaltReason>, error: impl SolErro
         matches!(result, ExecutionResult::Revert { .. }),
         "{label}: {result:?}"
     );
-    assert_eq!(
-        result.output().unwrap().as_ref(),
-        error.abi_encode().as_slice(),
-        "{label}"
-    );
+    assert_eq!(result.output().unwrap(), &error.abi_encode(), "{label}");
     assert!(result.logs().is_empty(), "{label}");
 }
 
@@ -3641,7 +3637,7 @@ fn permit_signed(
             spender,
             value,
             deadline,
-            v: 27 + u8::from(signature.v()),
+            v: signature.v_byte(),
             r: signature.r().into(),
             s: signature.s().into(),
         }
