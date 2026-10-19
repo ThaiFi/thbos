@@ -6,7 +6,5 @@ images.path
 /tempo-dst
 /build-info.env
 dst-out/
-ready/libvmcall.h
-ready/ready.c
 initrd.gz
 gcroot-*
