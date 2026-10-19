@@ -4,12 +4,16 @@ use crate::error::ZonePrecompileError;
 use exithatch::ForcedExitReason as Reason;
 use tempo_precompiles::{tip20::Recipient, tip403_registry::TIP403Registry};
 
-/// Gas allotted to one forced-exit debit attempt: debit, token hooks, fallback mapping, and
-/// enqueue. An attempt that needs more produces `DebitFailed`.
+/// Upper bound on the gas of one forced-exit debit attempt (debit, token hooks, fallback mapping,
+/// and enqueue) that the weight-14 admission budget assumes.
 ///
-/// About twice the costliest measured debit (2.56M at T14 gas, cold outbox state). Even when
-/// every request spends the full allotment, a forced exit stays cheaper than the 14 deposits
-/// its admission weight displaces, so the deposit-only queue remains the worst weight-14 mix.
+/// The attempt runs only native code with no user-supplied logic, so its cost is bounded by the
+/// implementation, and tests enforce this bound at production gas. It is metered on the advance's
+/// gas, not a separate gas limit: an attempt that uses more is rolled back as `DebitFailed`.
+///
+/// About twice the costliest measured debit (2.81M at T14 gas). Even when every request spends the
+/// full bound, a forced exit stays cheaper than the 14 deposits its admission weight displaces, so
+/// the deposit-only queue remains the worst weight-14 mix.
 pub(crate) const FORCED_EXIT_DEBIT_GAS: u64 = 5_000_000;
 
 /// Private authenticated input; never emitted as a public L1 attribution.
@@ -100,10 +104,11 @@ impl ZoneOutbox {
             .is_none())
     }
 
-    /// Run the debit attempt as a caught sub-call limited to `gas`. A revert, or using more than
-    /// `gas`, rolls the attempt back and produces `DebitFailed`.
+    /// Run the debit attempt under a checkpoint. A revert, or using more than `gas`, rolls the
+    /// attempt back and produces `DebitFailed`. `gas` is checked against the advance's own gas
+    /// after the attempt; it is not a separate gas limit.
     ///
-    /// Returns `Err` only when the advance cannot fund the allotment, or for an error that
+    /// Returns `Err` only when the advance does not have `gas` left, or for an error that
     /// [`aborts_advance`].
     pub(super) fn try_debit(
         &mut self,
@@ -116,8 +121,8 @@ impl ZoneOutbox {
         }
         let checkpoint = self.storage.checkpoint();
         // The attempt is a bounded sequence of native operations metered on the advance's gas, so
-        // it is classified after it ends. Since the advance funds the full allotment, running out
-        // of gas inside the attempt means the allotment was exhausted.
+        // it is classified after it ends. Since the advance has `gas` left, running out of gas
+        // inside the attempt means it used more than `gas`.
         match self.debit(request) {
             Ok(()) if self.storage.gas_used() - start <= gas => {
                 checkpoint.commit();

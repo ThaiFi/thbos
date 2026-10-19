@@ -764,8 +764,9 @@ fn forced_balance_boundaries_and_classification_order() -> eyre::Result<()> {
 #[test]
 fn maximum_forced_exit_workload_fits_system_gas_budget() -> eyre::Result<()> {
     const REQUESTS: u64 = 210 / 14; // ZonePortal.FORCED_EXIT_ADMISSION_WEIGHT
+    let gas_params = tempo_revm::gas_params::tempo_gas_params(TempoHardfork::T14);
     let mut h = active_harness()?;
-    h.ctx.cfg.gas_params = tempo_revm::gas_params::tempo_gas_params(TempoHardfork::T14);
+    h.ctx.cfg.gas_params = gas_params.clone();
     let enabled_tokens = (1..=8).map(maximum_metadata_token).collect::<Vec<_>>();
     h.set_token_enablements(&enabled_tokens);
     // Maximum-size WebAuthn roots: the largest admitted ciphertext and the most expensive
@@ -777,11 +778,11 @@ fn maximum_forced_exit_workload_fits_system_gas_budget() -> eyre::Result<()> {
         vec![ForcedExitResult::Exited; REQUESTS as usize]
     );
     assert_eq!(h.pending_withdrawals()?.len(), REQUESTS as usize);
-    // Add a separate full transition for the 20 reserved refund entries. This overcounts
-    // header/cursor work rather than hiding it. Also charge every request its full debit
-    // allotment on top of the debit it actually ran.
+    // Add a separate full transition for the 20 reserved refund entries, at the same gas
+    // schedule. This overcounts header/cursor work rather than hiding it. Also charge every
+    // request its full debit bound on top of the debit it actually ran.
     let gas_bound = executed.output.gas_used
-        + failed_deposit_gas(20, 0)?
+        + failed_deposit_gas(20, 0, Some(gas_params))?
         + REQUESTS * crate::outbox::FORCED_EXIT_DEBIT_GAS;
     eprintln!(
         "{REQUESTS} max-size WebAuthn forced exits + 8 token initializations + 20 refund bound: \
