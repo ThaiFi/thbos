@@ -1189,6 +1189,7 @@ mod tests {
     use super::*;
     use crate::test_utils::TxBuilder;
     use alloy_consensus::TxEip1559;
+    use alloy_eips::eip7702::Authorization;
     use alloy_primitives::{Address, Signature, TxKind, address};
     use alloy_signer::SignerSync;
     use alloy_signer_local::PrivateKeySigner;
@@ -1343,8 +1344,8 @@ mod tests {
 
         // The authority of an authorization list entry is skipped by the block, not retired
         // (TIP-1112), so it is no role.
-        let authorization = alloy_eips::eip7702::Authorization {
-            chain_id: U256::from(1),
+        let authorization = Authorization {
+            chain_id: U256::ONE,
             address: recipient,
             nonce: 0,
         };
