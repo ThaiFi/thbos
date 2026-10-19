@@ -469,24 +469,22 @@ async fn portal_refund_liability<P: Provider<TempoNetwork>>(
         .await
         .wrap_err("failed scanning ZonePortal RefundClaimed events")?;
 
-    let pending_total = pending
-        .into_iter()
-        .filter(|(event, _)| event.token == token)
-        .try_fold(U256::ZERO, |total, (event, _)| {
-            total
-                .checked_add(U256::from(event.amount))
-                .ok_or_else(|| eyre::eyre!("Portal pending refund total overflow"))
-        })?;
-    let claimed_total = claimed
-        .into_iter()
-        .filter(|(event, _)| event.token == token)
-        .try_fold(U256::ZERO, |total, (event, _)| {
-            total
-                .checked_add(U256::from(event.amount))
-                .ok_or_else(|| eyre::eyre!("Portal claimed refund total overflow"))
-        })?;
+    let pending_total = sum_amounts(
+        pending
+            .into_iter()
+            .map(|(event, _)| (event.token, event.amount)),
+        token,
+        "Portal pending refund",
+    )?;
+    let claimed_total = sum_amounts(
+        claimed
+            .into_iter()
+            .map(|(event, _)| (event.token, event.amount)),
+        token,
+        "Portal claimed refund",
+    )?;
 
-    outstanding_refunds("Portal", pending_total, claimed_total)
+    outstanding("Portal refund", pending_total, claimed_total)
 }
 
 /// Forced-exit fees parked for admins, kept apart from user refunds in `pendingForcedExitFees`.
@@ -517,24 +515,22 @@ async fn portal_forced_exit_fee_liability<P: Provider<TempoNetwork>>(
         .await
         .wrap_err("failed scanning ZonePortal ForcedExitFeesClaimed events")?;
 
-    let pending_total = pending
-        .into_iter()
-        .filter(|(event, _)| event.token == token)
-        .try_fold(U256::ZERO, |total, (event, _)| {
-            total
-                .checked_add(U256::from(event.amount))
-                .ok_or_else(|| eyre::eyre!("Portal parked fee total overflow"))
-        })?;
-    let claimed_total = claimed
-        .into_iter()
-        .filter(|(event, _)| event.token == token)
-        .try_fold(U256::ZERO, |total, (event, _)| {
-            total
-                .checked_add(U256::from(event.amount))
-                .ok_or_else(|| eyre::eyre!("Portal claimed fee total overflow"))
-        })?;
+    let pending_total = sum_amounts(
+        pending
+            .into_iter()
+            .map(|(event, _)| (event.token, event.amount)),
+        token,
+        "Portal parked fee",
+    )?;
+    let claimed_total = sum_amounts(
+        claimed
+            .into_iter()
+            .map(|(event, _)| (event.token, event.amount)),
+        token,
+        "Portal claimed fee",
+    )?;
 
-    outstanding_refunds("Portal forced-exit fee", pending_total, claimed_total)
+    outstanding("Portal forced-exit fee", pending_total, claimed_total)
 }
 
 async fn inbox_refund_liability<P: Provider<TempoNetwork>>(
@@ -563,31 +559,43 @@ async fn inbox_refund_liability<P: Provider<TempoNetwork>>(
         .await
         .wrap_err("failed scanning ZoneInbox RefundClaimed events")?;
 
-    let pending_total = pending
-        .into_iter()
-        .filter(|(event, _)| event.token == token)
-        .try_fold(U256::ZERO, |total, (event, _)| {
-            total
-                .checked_add(U256::from(event.amount))
-                .ok_or_else(|| eyre::eyre!("Inbox pending refund total overflow"))
-        })?;
-    let claimed_total = claimed
-        .into_iter()
-        .filter(|(event, _)| event.token == token)
-        .try_fold(U256::ZERO, |total, (event, _)| {
-            total
-                .checked_add(U256::from(event.amount))
-                .ok_or_else(|| eyre::eyre!("Inbox claimed refund total overflow"))
-        })?;
+    let pending_total = sum_amounts(
+        pending
+            .into_iter()
+            .map(|(event, _)| (event.token, event.amount)),
+        token,
+        "Inbox pending refund",
+    )?;
+    let claimed_total = sum_amounts(
+        claimed
+            .into_iter()
+            .map(|(event, _)| (event.token, event.amount)),
+        token,
+        "Inbox claimed refund",
+    )?;
 
-    outstanding_refunds("Inbox", pending_total, claimed_total)
+    outstanding("Inbox refund", pending_total, claimed_total)
 }
 
-fn outstanding_refunds(scope: &str, pending: U256, claimed: U256) -> eyre::Result<U256> {
+/// Sum the `token` amounts among `(token, amount)` event pairs, failing on overflow.
+fn sum_amounts(
+    items: impl IntoIterator<Item = (Address, u128)>,
+    token: Address,
+    label: &str,
+) -> eyre::Result<U256> {
+    items
+        .into_iter()
+        .filter(|(item_token, _)| *item_token == token)
+        .try_fold(U256::ZERO, |total, (_, amount)| {
+            total
+                .checked_add(U256::from(amount))
+                .ok_or_else(|| eyre::eyre!("{label} total overflow"))
+        })
+}
+
+fn outstanding(scope: &str, pending: U256, claimed: U256) -> eyre::Result<U256> {
     pending.checked_sub(claimed).ok_or_else(|| {
-        eyre::eyre!(
-            "{scope} refund event history is incomplete: claimed {claimed}, pending {pending}"
-        )
+        eyre::eyre!("{scope} event history is incomplete: claimed {claimed}, pending {pending}")
     })
 }
 
@@ -596,16 +604,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn outstanding_refunds_subtracts_claims() {
+    fn outstanding_subtracts_claims() {
         assert_eq!(
-            outstanding_refunds("test", U256::from(100), U256::from(35)).unwrap(),
+            outstanding("test", U256::from(100), U256::from(35)).unwrap(),
             U256::from(65)
         );
     }
 
     #[test]
-    fn outstanding_refunds_rejects_incomplete_history() {
-        assert!(outstanding_refunds("test", U256::from(10), U256::from(11)).is_err());
+    fn outstanding_rejects_incomplete_history() {
+        assert!(outstanding("test", U256::from(10), U256::from(11)).is_err());
     }
 
     #[test]
@@ -649,7 +657,7 @@ mod tests {
             U256::ZERO
         );
         assert_eq!(
-            outstanding_refunds("Portal", U256::from(990), U256::ZERO).unwrap(),
+            outstanding("Portal refund", U256::from(990), U256::ZERO).unwrap(),
             U256::from(990)
         );
     }
