@@ -92,7 +92,7 @@ fn from_tempo_events<'a>(events: impl IntoIterator<Item = &'a L1PortalEvent>) ->
                 });
             }
             // The payer's fee stays in the Portal as backing for the admin's refund claim.
-            L1PortalEvent::ForcedExitCompensationPending { token, amount } => {
+            L1PortalEvent::ForcedExitFeePending { token, amount } => {
                 effects.push(Effect::Liability {
                     token,
                     kind: LiabilityKind::TempoRefund,
@@ -439,13 +439,13 @@ mod tests {
     }
 
     #[test]
-    fn parked_forced_exit_compensation_is_a_tempo_refund_until_claimed() {
+    fn parked_forced_exit_fee_is_a_tempo_refund_until_claimed() {
         let token = Address::repeat_byte(1);
         let amount = U256::from(100_000);
         let mut state = crate::accounting::State::default();
         state.apply(&[Effect::EnableToken(token)]).unwrap();
 
-        let pending = L1PortalEvent::ForcedExitCompensationPending {
+        let pending = L1PortalEvent::ForcedExitFeePending {
             token,
             amount: 100_000,
         };

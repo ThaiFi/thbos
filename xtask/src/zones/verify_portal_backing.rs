@@ -449,15 +449,15 @@ async fn portal_refund_liability<P: Provider<TempoNetwork>>(
         .query()
         .await
         .wrap_err("failed scanning ZonePortal DepositBounceBackPending events")?;
-    let compensation = portal
-        .ForcedExitCompensationPending_filter()
+    let fee = portal
+        .ForcedExitFeePending_filter()
         .from_block(from_block)
         .to_block(to_block)
         .chunked()
         .chunk_size(LOG_QUERY_BLOCK_CHUNK)
         .query()
         .await
-        .wrap_err("failed scanning ZonePortal ForcedExitCompensationPending events")?;
+        .wrap_err("failed scanning ZonePortal ForcedExitFeePending events")?;
     let claimed = portal
         .RefundClaimed_filter()
         .from_block(from_block)
@@ -476,8 +476,8 @@ async fn portal_refund_liability<P: Provider<TempoNetwork>>(
                 .checked_add(U256::from(event.amount))
                 .ok_or_else(|| eyre::eyre!("Portal pending refund total overflow"))
         })?;
-    // Parked forced-exit compensation is claimed through the same refund balance.
-    let pending_total = compensation
+    // Parked forced-exit fees are claimed through the same refund balance.
+    let pending_total = fee
         .into_iter()
         .filter(|(event, _)| event.token == token)
         .try_fold(pending_total, |total, (event, _)| {

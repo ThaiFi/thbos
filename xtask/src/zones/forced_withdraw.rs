@@ -19,7 +19,7 @@ use zone_precompiles::ecies::{EncryptionContext, encrypt_request};
 use zone_primitives::constants::zone_chain_id;
 
 /// Request withdrawal of the account's full liquid token balance, without an L2 transaction.
-/// Admission charges compensation even if Zone execution later rejects the request.
+/// Admission charges the fee even if Zone execution later rejects the request.
 #[derive(clap::Parser)]
 #[command(
     after_help = "Example (PRIVATE_KEY contains the account root key):\n  cargo zone-xtask forced-withdraw --l1-rpc-url http://localhost:8545 --portal <PORTAL> --to <RECIPIENT> --approve --wait-for-processing\n\nOnly L1 RPC is required. The amount is the full liquid balance at execution time.\n--wait-for-processing observes inbox settlement, not successful L1 delivery."
@@ -48,7 +48,7 @@ pub(crate) struct ForcedWithdraw {
     /// Exclusive L1 admission deadline, in Unix seconds. Defaults to latest L1 timestamp + 600.
     #[arg(long)]
     admit_before: Option<u64>,
-    /// Approve exactly the compensation amount if the payer's allowance is insufficient.
+    /// Approve exactly the fee amount if the payer's allowance is insufficient.
     #[arg(long)]
     approve: bool,
     /// Wait for the L1 settled inbox cursor; this does NOT establish payout or rejection reason.
@@ -139,16 +139,11 @@ impl ForcedWithdraw {
             "unsupported forced-exit format (expected version 1)"
         );
         ensure!(
-            portal
-                .FORCED_EXIT_COMPENSATION()
-                .block(block)
-                .call()
-                .await?
-                == exithatch::FORCED_EXIT_COMPENSATION,
-            "unexpected compensation for forced-exit v1"
+            portal.FORCED_EXIT_FEE().block(block).call().await? == exithatch::FORCED_EXIT_FEE,
+            "unexpected fee for forced-exit v1"
         );
         // The approved amount comes from the protocol constant, never from an RPC getter.
-        let compensation = U256::from(exithatch::FORCED_EXIT_COMPENSATION);
+        let fee = U256::from(exithatch::FORCED_EXIT_FEE);
         ensure!(
             !portal.paused().block(block).call().await?,
             "portal is paused"
@@ -178,27 +173,27 @@ impl ForcedWithdraw {
         )?;
         let token = ITIP20::new(self.token, &provider);
         ensure!(
-            token.balanceOf(payer_address).call().await? >= compensation,
-            "fee payer lacks {compensation} token base units for compensation (transaction gas is additional)"
+            token.balanceOf(payer_address).call().await? >= fee,
+            "fee payer lacks {fee} token base units for the fee (transaction gas is additional)"
         );
         let allowance = token.allowance(payer_address, self.portal).call().await?;
-        if allowance < compensation {
+        if allowance < fee {
             ensure!(
                 self.approve,
-                "insufficient compensation allowance; approve {compensation} for portal {} or pass --approve",
+                "insufficient fee allowance; approve {fee} for portal {} or pass --approve",
                 self.portal
             );
             let receipt = token
-                .approve(self.portal, compensation)
+                .approve(self.portal, fee)
                 .send_sync()
                 .await
-                .wrap_err("compensation approval failed")?;
+                .wrap_err("fee approval failed")?;
             ensure!(
                 receipt.status(),
-                "compensation approval reverted: {}",
+                "fee approval reverted: {}",
                 receipt.transaction_hash
             );
-            println!("Compensation approval: {}", receipt.transaction_hash);
+            println!("Fee approval: {}", receipt.transaction_hash);
         }
         // Fetch after approval to minimize key-rotation races. All encryption context binds to
         // the actual L1 payer, which may differ from the authorized account.
@@ -234,9 +229,7 @@ impl ForcedWithdraw {
             header.timestamp() < auth.admitBefore,
             "admission deadline elapsed before submission"
         );
-        println!(
-            "Requesting full liquid balance withdrawal; compensation: {compensation} token base units."
-        );
+        println!("Requesting full liquid balance withdrawal; fee: {fee} token base units.");
         println!(
             "Authorization nonce: {}; admit before: {}",
             auth.nonce, auth.admitBefore
@@ -436,7 +429,7 @@ mod rpc_tests {
         registry_portal: Address,
         registry_zone_id: u32,
         version: u64,
-        compensation: u128,
+        fee: u128,
         allowance: U256,
     }
 
@@ -447,7 +440,7 @@ mod rpc_tests {
                 registry_portal: PORTAL,
                 registry_zone_id: ZONE_ID,
                 version: 1,
-                compensation: exithatch::FORCED_EXIT_COMPENSATION,
+                fee: exithatch::FORCED_EXIT_FEE,
                 allowance: U256::ZERO,
             }
         }
@@ -542,8 +535,8 @@ mod rpc_tests {
                     ZONE_ID.abi_encode()
                 } else if selector == ZonePortal::forcedExitVersionCall::SELECTOR {
                     scenario.version.abi_encode()
-                } else if selector == ZonePortal::FORCED_EXIT_COMPENSATIONCall::SELECTOR {
-                    scenario.compensation.abi_encode()
+                } else if selector == ZonePortal::FORCED_EXIT_FEECall::SELECTOR {
+                    scenario.fee.abi_encode()
                 } else if selector == ZonePortal::pausedCall::SELECTOR {
                     false.abi_encode()
                 } else if selector == ZonePortal::tokenConfigCall::SELECTOR {
@@ -629,7 +622,7 @@ mod rpc_tests {
             let (error, observed) = run(
                 Scenario {
                     registered: false,
-                    compensation: 1_000_000_000,
+                    fee: 1_000_000_000,
                     ..Default::default()
                 },
                 approve,
@@ -667,17 +660,17 @@ mod rpc_tests {
             ),
             (
                 Scenario {
-                    compensation: 1_000_000_000,
+                    fee: 1_000_000_000,
                     ..Default::default()
                 },
-                "unexpected compensation",
+                "unexpected fee",
             ),
             (
                 Scenario {
-                    compensation: 0,
+                    fee: 0,
                     ..Default::default()
                 },
-                "unexpected compensation",
+                "unexpected fee",
             ),
         ] {
             let (error, observed) = run(scenario, true).await;
@@ -721,9 +714,6 @@ mod rpc_tests {
         assert_eq!(tx.to(), Some(tempo_precompiles::PATH_USD_ADDRESS));
         let approval = ITIP20::approveCall::abi_decode(tx.input()).unwrap();
         assert_eq!(approval.spender, PORTAL);
-        assert_eq!(
-            approval.amount,
-            U256::from(exithatch::FORCED_EXIT_COMPENSATION)
-        );
+        assert_eq!(approval.amount, U256::from(exithatch::FORCED_EXIT_FEE));
     }
 }

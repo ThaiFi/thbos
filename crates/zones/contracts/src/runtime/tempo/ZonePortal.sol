@@ -55,8 +55,8 @@ contract ZonePortal is IZonePortal {
     ///      to adjust the zoneGasRate based on operational costs.
     uint64 public constant FIXED_DEPOSIT_GAS = 100_000;
 
-    /// @notice Fixed TIP-1012 compensation in six-decimal token base units.
-    uint128 public constant FORCED_EXIT_COMPENSATION = 100_000;
+    /// @notice Fixed TIP-1012 fee in six-decimal token base units.
+    uint128 public constant FORCED_EXIT_FEE = 100_000;
 
     /// @notice Shared admission units consumed by one forced request (one actual queue entry).
     /// @dev Conservative execution bound: 210 public units admit at most 15 forced exits.
@@ -164,7 +164,7 @@ contract ZonePortal is IZonePortal {
     /// @dev Tokens can never be removed from this list (non-custodial guarantee).
     address[] internal _enabledTokens;
 
-    /// @notice Refunds parked after a deposit bounce-back or forced-exit compensation transfer
+    /// @notice Refunds parked after a deposit bounce-back or forced-exit fee transfer
     ///         fails on Tempo.
     mapping(address token => mapping(address owner => uint128 amount)) public refunds;
 
@@ -1079,13 +1079,13 @@ contract ZonePortal is IZonePortal {
         // Require direct receipt before paying the admin from the portal's balance.
         // A diverted inbound transfer must not spend existing deposit backing.
         (bool authorized,) = TIP403_REGISTRY.validateReceivePolicy(token, msg.sender, address(this));
-        if (!authorized) revert ForcedExitCompensationRejected();
-        ITIP20(token).transferFrom(msg.sender, address(this), FORCED_EXIT_COMPENSATION);
-        // The admin must not be able to block forced exits by refusing compensation, so a failed
+        if (!authorized) revert ForcedExitFeeRejected();
+        ITIP20(token).transferFrom(msg.sender, address(this), FORCED_EXIT_FEE);
+        // The admin must not be able to block forced exits by refusing the fee, so a failed
         // payout is parked for claimRefund instead of reverting admission.
-        if (!_tryTransfer(token, admin, FORCED_EXIT_COMPENSATION)) {
-            refunds[token][admin] += FORCED_EXIT_COMPENSATION;
-            emit ForcedExitCompensationPending(admin, token, FORCED_EXIT_COMPENSATION);
+        if (!_tryTransfer(token, admin, FORCED_EXIT_FEE)) {
+            refunds[token][admin] += FORCED_EXIT_FEE;
+            emit ForcedExitFeePending(admin, token, FORCED_EXIT_FEE);
         }
 
         requestId = forcedExitCount + 1;

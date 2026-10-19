@@ -48,8 +48,8 @@ pub(crate) enum L1PortalEvent {
     ForcedExitsActivated,
     /// A forced exit admitted to the deposit queue. It escrows no principal.
     ForcedExitRequested,
-    /// Forced-exit compensation the admin could not receive, parked as a claimable refund.
-    ForcedExitCompensationPending {
+    /// Forced-exit fee the admin could not receive, parked as a claimable refund.
+    ForcedExitFeePending {
         token: Address,
         amount: u128,
     },
@@ -151,13 +151,13 @@ fn decode_portal_event(log: &Log, block: u64) -> eyre::Result<Option<L1PortalEve
             decode_event::<ZonePortal::ForcedExitRequested>(log, "ForcedExitRequested", block)?;
             L1PortalEvent::ForcedExitRequested
         }
-        ZonePortal::ForcedExitCompensationPending::SIGNATURE_HASH => {
-            let e = decode_event::<ZonePortal::ForcedExitCompensationPending>(
+        ZonePortal::ForcedExitFeePending::SIGNATURE_HASH => {
+            let e = decode_event::<ZonePortal::ForcedExitFeePending>(
                 log,
-                "ForcedExitCompensationPending",
+                "ForcedExitFeePending",
                 block,
             )?;
-            L1PortalEvent::ForcedExitCompensationPending {
+            L1PortalEvent::ForcedExitFeePending {
                 token: e.token,
                 amount: e.amount,
             }
@@ -395,8 +395,8 @@ mod tests {
         }
         .encode_log_data())
     }
-    fn compensation_pending() -> alloy_rpc_types_eth::Log {
-        log(ZonePortal::ForcedExitCompensationPending {
+    fn fee_pending() -> alloy_rpc_types_eth::Log {
+        log(ZonePortal::ForcedExitFeePending {
             admin: Address::repeat_byte(19),
             token: Address::repeat_byte(20),
             amount: 100_000,
@@ -456,7 +456,7 @@ mod tests {
                 withdrawal_bounce(),
                 deposit_bounce(),
                 pending(),
-                compensation_pending(),
+                fee_pending(),
                 refund(),
             ],
         )])
@@ -487,7 +487,7 @@ mod tests {
         ));
         assert!(matches!(
             events[8],
-            L1PortalEvent::ForcedExitCompensationPending {
+            L1PortalEvent::ForcedExitFeePending {
                 amount: 100_000,
                 ..
             }
