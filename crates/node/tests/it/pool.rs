@@ -3,7 +3,7 @@ use alloy::{
     signers::{SignerSync, local::PrivateKeySigner},
 };
 use alloy_eips::{Decodable2718, Encodable2718};
-use alloy_primitives::{Address, TxKind, U64, U256};
+use alloy_primitives::{Address, TxKind, U64, U256, address};
 use reth_chainspec::EthChainSpec;
 use reth_e2e_test_utils::{node::Finality, wait::assert_holds_for, wallet::test_signer};
 use reth_ethereum::{
@@ -50,6 +50,10 @@ async fn test_fallback_balance_updates_revalidate_only_relevant_crossings() -> e
         U256::from_be_slice(DEFAULT_FEE_TOKEN.as_slice())
     )
     .into();
+    // A token chosen by TIP-20 inference never depends on fallback balances.
+    let inferred_token = address!("0x20c0000000000000000000000000000000000001");
+    genesis["alloc"][format!("{inferred_token:#x}")]["storage"][format!("{slot:#066x}")] =
+        format!("{:#066x}", fee * U256::from(4)).into();
     let mut ousd = genesis["alloc"][format!("{DEFAULT_FEE_TOKEN:#x}")].clone();
     ousd["storage"][format!("{:#066x}", U256::from(slots::QUOTE_TOKEN))] = format!(
         "{:#066x}",
@@ -88,39 +92,40 @@ async fn test_fallback_balance_updates_revalidate_only_relevant_crossings() -> e
         let envelope: TempoTxEnvelope = tx.into_signed(signature.into()).into();
         Ok(envelope.try_into_recovered()?)
     };
-    // Supply a real OUSD -> pathUSD route; pool AMM validation stays enabled.
-    let mint = signed_tx(
-        &funder,
-        0,
-        10_000_000,
-        Some(DEFAULT_FEE_TOKEN),
-        TIP_FEE_MANAGER_ADDRESS,
-        ITIPFeeAMM::mintCall {
-            userToken: OUSD_ADDRESS,
-            validatorToken: DEFAULT_FEE_TOKEN,
-            amountValidatorToken: U256::from(1_000_000),
-            to: funder.address(),
-        }
-        .abi_encode()
-        .into(),
-    )?;
-    let mint_hash = *mint.tx_hash();
-    setup
-        .node
-        .inner
-        .pool
-        .add_consensus_transaction(mint, TransactionOrigin::Local)
-        .await?;
-    setup.node.advance_block_synced().await?;
-    assert!(
+    // Supply real OUSD and inferred-token routes to pathUSD; pool AMM validation stays enabled.
+    for (nonce, user_token) in [(0, OUSD_ADDRESS), (1, inferred_token)] {
+        let mint = signed_tx(
+            &funder,
+            nonce,
+            10_000_000,
+            Some(DEFAULT_FEE_TOKEN),
+            TIP_FEE_MANAGER_ADDRESS,
+            ITIPFeeAMM::mintCall {
+                userToken: user_token,
+                validatorToken: DEFAULT_FEE_TOKEN,
+                amountValidatorToken: U256::from(1_000_000),
+                to: funder.address(),
+            }
+            .abi_encode()
+            .into(),
+        )?;
+        let mint_hash = *mint.tx_hash();
         setup
             .node
-            .rpc
-            .transaction_receipt(mint_hash)
-            .await?
-            .expect("liquidity setup must be included")
-            .status()
-    );
+            .inner
+            .pool
+            .add_consensus_transaction(mint, TransactionOrigin::Local)
+            .await?;
+        setup.node.advance_block_synced().await?;
+        assert!(
+            setup
+                .node
+                .transaction_receipt(mint_hash)
+                .await?
+                .expect("liquidity setup must be included")
+                .status()
+        );
+    }
 
     // The missing nonces keep this transaction queued throughout the balance changes.
     let queued = signed_tx(
@@ -149,8 +154,33 @@ async fn test_fallback_balance_updates_revalidate_only_relevant_crossings() -> e
             .fee_balance_slot(),
         Some((OUSD_ADDRESS, slot))
     );
+    let inferred = signed_tx(
+        &payer,
+        101,
+        1_000_000,
+        None,
+        inferred_token,
+        ITIP20::transferCall {
+            to: Address::repeat_byte(0x72),
+            amount: U256::ZERO,
+        }
+        .abi_encode()
+        .into(),
+    )?;
+    let inferred_hash = *inferred.tx_hash();
+    setup
+        .node
+        .inner
+        .pool
+        .add_consensus_transaction(inferred, TransactionOrigin::Local)
+        .await?;
+    let inferred = setup.node.inner.pool.get(&inferred_hash).unwrap();
+    assert_eq!(
+        inferred.transaction.fee_balance_slot(),
+        Some((inferred_token, slot))
+    );
 
-    let mut funder_nonce = 1;
+    let mut funder_nonce = 2;
     let mut payer_nonce = 0;
     for (credit, token, amount, selected, refresh) in [
         (false, OUSD_ADDRESS, fee, OUSD_ADDRESS, false), // Debit leaves enough for the fee.
@@ -219,7 +249,6 @@ async fn test_fallback_balance_updates_revalidate_only_relevant_crossings() -> e
         assert!(
             setup
                 .node
-                .rpc
                 .transaction_receipt(transfer_hash)
                 .await?
                 .expect("balance-changing transaction must be included")
@@ -258,6 +287,13 @@ async fn test_fallback_balance_updates_revalidate_only_relevant_crossings() -> e
                 .fee_balance_slot(),
             Some((selected, slot))
         );
+        assert!(
+            Arc::ptr_eq(
+                &inferred,
+                &setup.node.inner.pool.get(&inferred_hash).unwrap()
+            ),
+            "fallback balance updates must leave inferred-token transactions untouched"
+        );
     }
     Ok(())
 }
@@ -269,6 +305,7 @@ async fn submit_pending_tx() -> eyre::Result<()> {
         .build_with_node_access()
         .await?
         .node
+        .into_inner()
         .inner;
 
     // <cast mktx 0x20c0000000000000000000000000000000000000 'transfer(address,uint256)' 0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC 100000000 --private-key 0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d --gas-limit 2000000 --gas-price 44000000000000 --priority-gas-price 1 --chain-id 1337 --nonce 0>
@@ -303,6 +340,7 @@ async fn test_insufficient_funds() -> eyre::Result<()> {
         .build_with_node_access()
         .await?
         .node
+        .into_inner()
         .inner;
 
     let tx = TempoTransaction {
@@ -680,7 +718,7 @@ async fn test_evict_txs_on_transfer_policy_change() -> eyre::Result<()> {
     let mut encoded = Vec::new();
     envelope.encode_2718(&mut encoded);
 
-    node2.rpc.inject_tx(encoded.into()).await?;
+    node2.inject_tx(encoded.into()).await?;
     let policy_payload = node2.build_and_submit_payload().await?;
 
     // === Step 2: On node1, add 10 AA transactions using DEFAULT_FEE_TOKEN ===
