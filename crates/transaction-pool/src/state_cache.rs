@@ -27,7 +27,7 @@ impl StateCache {
     /// Maximum number of cached accounts.
     ///
     /// The caps bound memory if a flood of unique accounts is validated within a single
-    /// block interval. TinyLFU admission can retain frequently used reads after reaching a cap.
+    /// block interval. `TinyLFU` admission can retain frequently used reads after reaching a cap.
     const MAX_ACCOUNTS: usize = 1 << 17;
     /// Maximum number of cached storage slots.
     const MAX_STORAGE_SLOTS: usize = 1 << 18;
