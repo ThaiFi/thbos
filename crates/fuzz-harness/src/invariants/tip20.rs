@@ -1,91 +1,75 @@
-use std::collections::BTreeSet;
+//! TIP-20 supply invariants.
+//!
+//! - `TEMPO-TIP20-SUPPLY-CAP`: a token's `totalSupply` does not exceed its
+//!   `supplyCap`. A zero cap is not exempt: minting checks the cap without
+//!   exception, and `setSupplyCap` rejects a cap below the supply.
+//! - `TEMPO-TIP20-BALANCE-SUM`: the balances of the accounts the state holds
+//!   sum to at most `totalSupply`, without overflow.
+//! - `TEMPO-TIP20-VIEW`: a token's views answer.
 
 use alloy_primitives::{Address, U256};
 use tempo_contracts::precompiles::ITIP20;
-use tempo_fuzz_types::StateInput;
+use tempo_primitives::is_tip20_prefix;
 
-use super::{HarnessEvm, fmt_addr, is_tip20_like, state_accounts, view_call};
+use super::Views;
 
-pub(super) fn validate(
-    evm: &mut HarnessEvm,
-    side: &'static str,
-    state: &StateInput,
-) -> Result<(), String> {
-    check_supply(evm, side, state)
-}
-
-fn check_supply(
-    evm: &mut HarnessEvm,
-    side: &'static str,
-    state: &StateInput,
-) -> Result<(), String> {
-    let tokens = known_tip20_tokens(state);
-    let accounts = known_accounts(state);
-
-    for token in tokens {
-        let Some(total_supply) = total_supply(evm, token)? else {
-            continue;
-        };
-
-        if let Some(supply_cap) = supply_cap(evm, token)? {
-            if !supply_cap.is_zero() && total_supply > supply_cap {
-                return Err(format!(
-                    "TEMPO-TIP20-SUPPLY-CAP side={side} token={} total_supply={} supply_cap={}",
-                    fmt_addr(token),
-                    total_supply,
-                    supply_cap
-                ));
-            }
-        }
-
-        let mut known_balance_sum = U256::ZERO;
-        for account in &accounts {
-            let balance = balance_of(evm, token, *account)?.unwrap_or(U256::ZERO);
-            known_balance_sum = known_balance_sum.checked_add(balance).ok_or_else(|| {
-                format!(
-                    "TEMPO-TIP20-BALANCE-SUM side={side} token={} known balance summation overflowed",
-                    fmt_addr(token)
-                )
-            })?;
-        }
-
-        if known_balance_sum > total_supply {
-            let final_excess = known_balance_sum.saturating_sub(total_supply);
-            return Err(format!(
-                "TEMPO-TIP20-BALANCE-SUM side={side} token={} known_balances={} total_supply={} excess={}",
-                fmt_addr(token),
-                known_balance_sum,
-                total_supply,
-                final_excess
-            ));
+/// The invariants broken by each TIP-20 token among `accounts` for which
+/// `selected` holds, as `(id, message)`.
+pub(super) fn check(
+    views: &mut Views<'_>,
+    accounts: &[Address],
+    selected: impl Fn(&Address) -> bool,
+) -> Vec<(&'static str, String)> {
+    let mut failures = Vec::new();
+    let tokens = accounts
+        .iter()
+        .filter(|account| is_tip20_prefix(**account) && selected(account));
+    for &token in tokens {
+        if let Err(message) = check_token(views, token, accounts, &mut failures) {
+            failures.push(("TEMPO-TIP20-VIEW", message));
         }
     }
-
-    Ok(())
+    failures
 }
 
-fn known_tip20_tokens(state: &StateInput) -> BTreeSet<Address> {
-    state_accounts(state)
-        .filter(|address| is_tip20_like(*address))
-        .collect()
-}
-
-fn known_accounts(state: &StateInput) -> BTreeSet<Address> {
-    state_accounts(state).collect()
-}
-
-fn total_supply(evm: &mut HarnessEvm, token: Address) -> Result<Option<U256>, String> {
-    view_call::<ITIP20::totalSupplyCall>(evm, token, ITIP20::totalSupplyCall {})
-}
-
-fn supply_cap(evm: &mut HarnessEvm, token: Address) -> Result<Option<U256>, String> {
-    view_call::<ITIP20::supplyCapCall>(evm, token, ITIP20::supplyCapCall {})
-}
-
-fn balance_of(
-    evm: &mut HarnessEvm,
+fn check_token(
+    views: &mut Views<'_>,
     token: Address,
-    account: Address,
-) -> Result<Option<U256>, String> {
-    view_call::<ITIP20::balanceOfCall>(evm, token, ITIP20::balanceOfCall { account })
+    accounts: &[Address],
+    failures: &mut Vec<(&'static str, String)>,
+) -> Result<(), String> {
+    let Some(supply) = views.call(token, ITIP20::totalSupplyCall {})? else {
+        return Ok(());
+    };
+    if let Some(cap) = views.call(token, ITIP20::supplyCapCall {})?
+        && supply > cap
+    {
+        failures.push((
+            "TEMPO-TIP20-SUPPLY-CAP",
+            format!("token={token} total_supply={supply} supply_cap={cap}"),
+        ));
+    }
+
+    let mut sum = U256::ZERO;
+    for &account in accounts {
+        // A balance nobody answers for is left out: a subset sums to less.
+        let Some(balance) = views.call(token, ITIP20::balanceOfCall { account })? else {
+            continue;
+        };
+        let Some(next) = sum.checked_add(balance) else {
+            failures.push((
+                "TEMPO-TIP20-BALANCE-SUM",
+                format!("token={token} balances overflow at account={account}"),
+            ));
+            return Ok(());
+        };
+        sum = next;
+    }
+    if sum > supply {
+        failures.push((
+            "TEMPO-TIP20-BALANCE-SUM",
+            format!("token={token} balances={sum} total_supply={supply}"),
+        ));
+    }
+    Ok(())
 }

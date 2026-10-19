@@ -1,34 +1,23 @@
-use std::fmt;
+//! The typed inputs and outcomes of the Tempo fuzz harness, shared by the
+//! harness and the runners that load it. They are exchanged bincode-encoded
+//! across the harness's C ABI; [`TYPED_HARNESS_SCHEMA_VERSION`] changes with
+//! their encoding.
 
+use std::{collections::BTreeMap, fmt};
+
+use alloy_primitives::{Address, B256, Bytes, Log, U256};
 use serde::{
     Deserialize, Deserializer, Serialize, Serializer,
     de::{Error as DeError, SeqAccess, Visitor},
 };
+use tempo_hardfork::{TempoHardfork, constants::moderato::MODERATO_CHAIN_ID};
 
 pub type FuzzStatus = i32;
 
 pub const FUZZ_REJECT: FuzzStatus = 0;
 pub const FUZZ_ACCEPT: FuzzStatus = 1;
 
-pub const TYPED_HARNESS_SCHEMA_VERSION: u32 = 2;
-
-pub const PINNED_CHAIN_ID: u64 = 42431;
-pub const MODERATO_T0_TIMESTAMP: u64 = 1_770_303_600;
-pub const MODERATO_T1_TIMESTAMP: u64 = MODERATO_T0_TIMESTAMP;
-pub const MODERATO_T2_TIMESTAMP: u64 = 1_774_537_200;
-pub const MODERATO_T3_TIMESTAMP: u64 = 1_776_780_000;
-pub const MODERATO_T4_TIMESTAMP: u64 = 1_778_767_200;
-/// Synthetic post-T4 activations used by the harness. They make unreleased
-/// forks independently selectable without binding fixtures to a live schedule.
-pub const FUZZ_T5_TIMESTAMP: u64 = MODERATO_T4_TIMESTAMP + 1_000_000;
-pub const FUZZ_T6_TIMESTAMP: u64 = FUZZ_T5_TIMESTAMP + 1_000_000;
-pub const FUZZ_T7_TIMESTAMP: u64 = FUZZ_T6_TIMESTAMP + 1_000_000;
-pub const FUZZ_T8_TIMESTAMP: u64 = FUZZ_T7_TIMESTAMP + 1_000_000;
-pub const FUZZ_T9_TIMESTAMP: u64 = FUZZ_T8_TIMESTAMP + 1_000_000;
-pub const FUZZ_T10_TIMESTAMP: u64 = FUZZ_T9_TIMESTAMP + 1_000_000;
-pub const FUZZ_T11_TIMESTAMP: u64 = FUZZ_T10_TIMESTAMP + 1_000_000;
-pub const FUZZ_T12_TIMESTAMP: u64 = FUZZ_T11_TIMESTAMP + 1_000_000;
-pub const FUZZ_T13_TIMESTAMP: u64 = FUZZ_T12_TIMESTAMP + 1_000_000;
+pub const TYPED_HARNESS_SCHEMA_VERSION: u32 = 3;
 
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, Hash, PartialEq, Serialize)]
@@ -38,10 +27,10 @@ pub enum ErrorClass {
     InvalidInput = 1,
     RlpDecode = 2,
     Rejected = 3,
-    Reverted = 4,
-    Unimplemented = 5,
-    Internal = 6,
-    Invariant = 7,
+    Internal = 4,
+    /// Execution read an account, storage slot, code or block hash that an
+    /// exact pre-state ([`PreState::Exact`]) does not hold.
+    IncompletePreState = 5,
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -118,24 +107,19 @@ where
     }
 }
 
+/// Accounts by address.
 #[derive(Clone, Debug, Default, Deserialize, Eq, Hash, PartialEq, Serialize)]
 pub struct StateInput {
-    pub accounts: Vec<AccountInput>,
+    pub accounts: BTreeMap<Address, AccountInput>,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
+/// An account and the storage slots given for it.
+#[derive(Clone, Debug, Default, Deserialize, Eq, Hash, PartialEq, Serialize)]
 pub struct AccountInput {
-    pub address: [u8; 20],
-    pub balance: [u8; 32],
+    pub balance: U256,
     pub nonce: u64,
-    pub code: Vec<u8>,
-    pub storage: Vec<StorageInput>,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
-pub struct StorageInput {
-    pub slot: [u8; 32],
-    pub value: [u8; 32],
+    pub code: Bytes,
+    pub storage: BTreeMap<U256, U256>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
@@ -145,8 +129,8 @@ pub struct BlockContextInput {
     pub timestamp_millis_part: u64,
     pub basefee: u64,
     pub gas_limit: u64,
-    pub beneficiary: [u8; 20],
-    pub hardfork: u8,
+    pub beneficiary: Address,
+    pub hardfork: TempoHardfork,
 }
 
 impl Default for BlockContextInput {
@@ -157,74 +141,46 @@ impl Default for BlockContextInput {
             timestamp_millis_part: 0,
             basefee: 0,
             gas_limit: 30_000_000,
-            beneficiary: [0; 20],
-            hardfork: 1,
+            beneficiary: Address::ZERO,
+            hardfork: TempoHardfork::T1,
         }
     }
 }
 
+/// The chain to execute on: the dev genesis configuration with this chain ID
+/// and these hardfork activation timestamps. A hardfork the schedule does not
+/// list activates at its [`TempoHardfork::variant_index`], or with the
+/// hardfork before it if that is later. Listed activations must not decrease
+/// in hardfork order.
 #[derive(Clone, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
 pub struct ChainSpecInput {
     pub chain_id: u64,
-    pub hardforks: Vec<HardforkActivationInput>,
+    pub hardforks: BTreeMap<TempoHardfork, u64>,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
-pub struct HardforkActivationInput {
-    pub hardfork: u8,
-    pub timestamp: u64,
-}
+/// Seconds between the activations [`ChainSpecInput::default`] gives the
+/// hardforks Moderato has not scheduled.
+const UNSCHEDULED_SPACING: u64 = 1_000_000;
 
 impl Default for ChainSpecInput {
+    /// Moderato's chain ID and schedule. Hardforks Moderato has not scheduled
+    /// follow its last one, a million seconds apart, so each can be
+    /// selected on its own.
     fn default() -> Self {
+        let mut previous = 0;
+        let hardforks = TempoHardfork::VARIANTS
+            .iter()
+            .map(|&fork| {
+                let activation = fork
+                    .moderato_activation_timestamp()
+                    .unwrap_or(previous + UNSCHEDULED_SPACING);
+                previous = activation;
+                (fork, activation)
+            })
+            .collect();
         Self {
-            chain_id: PINNED_CHAIN_ID,
-            hardforks: vec![
-                HardforkActivationInput {
-                    hardfork: 3,
-                    timestamp: MODERATO_T3_TIMESTAMP,
-                },
-                HardforkActivationInput {
-                    hardfork: 4,
-                    timestamp: MODERATO_T4_TIMESTAMP,
-                },
-                HardforkActivationInput {
-                    hardfork: 5,
-                    timestamp: FUZZ_T5_TIMESTAMP,
-                },
-                HardforkActivationInput {
-                    hardfork: 6,
-                    timestamp: FUZZ_T6_TIMESTAMP,
-                },
-                HardforkActivationInput {
-                    hardfork: 7,
-                    timestamp: FUZZ_T7_TIMESTAMP,
-                },
-                HardforkActivationInput {
-                    hardfork: 8,
-                    timestamp: FUZZ_T8_TIMESTAMP,
-                },
-                HardforkActivationInput {
-                    hardfork: 9,
-                    timestamp: FUZZ_T9_TIMESTAMP,
-                },
-                HardforkActivationInput {
-                    hardfork: 10,
-                    timestamp: FUZZ_T10_TIMESTAMP,
-                },
-                HardforkActivationInput {
-                    hardfork: 11,
-                    timestamp: FUZZ_T11_TIMESTAMP,
-                },
-                HardforkActivationInput {
-                    hardfork: 12,
-                    timestamp: FUZZ_T12_TIMESTAMP,
-                },
-                HardforkActivationInput {
-                    hardfork: 13,
-                    timestamp: FUZZ_T13_TIMESTAMP,
-                },
-            ],
+            chain_id: MODERATO_CHAIN_ID,
+            hardforks,
         }
     }
 }
@@ -245,11 +201,9 @@ pub enum TempoHarnessInput {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct TempoTransactionInput {
-    pub chain_spec: ChainSpecInput,
-    pub fork: u8,
-    pub tx: Vec<u8>,
+    pub tx: Bytes,
     /// Sender verified by the ingress boundary. `None` asks the harness to recover it.
-    pub sender: Option<[u8; 20]>,
+    pub sender: Option<Address>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -257,32 +211,61 @@ pub struct TempoStateInput {
     pub chain_spec: ChainSpecInput,
     pub pre_state: StateInput,
     pub block_context: BlockContextInput,
-    pub tx: Vec<u8>,
+    pub tx: Bytes,
     /// Sender verified by the ingress boundary. `None` asks the harness to recover it.
-    pub sender: Option<[u8; 20]>,
+    pub sender: Option<Address>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct TempoBlockchainInput {
     pub chain_spec: ChainSpecInput,
-    pub pre_state: StateInput,
+    pub pre_state: PreState,
     pub blocks: NonEmpty<TempoBlock>,
+}
+
+/// The state blocks execute on.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub enum PreState {
+    /// The dev genesis allocation plus these accounts, which must not be
+    /// genesis accounts. Anything else reads as empty.
+    Genesis(StateInput),
+    /// Exactly this state, e.g. a block's pre-state taken from a node, and the
+    /// block hashes `BLOCKHASH` may read. Reading anything it does not hold
+    /// fails the input with [`ErrorClass::IncompletePreState`]: an unlisted
+    /// account, an unlisted slot of a listed account, or an unlisted block
+    /// hash. An account with no balance, nonce, code or storage does not
+    /// exist, so all its slots read as zero.
+    Exact {
+        state: StateInput,
+        block_hashes: BTreeMap<u64, B256>,
+    },
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
 pub struct TempoBlock {
-    pub context: BlockContextInput,
-    pub txs: Vec<Vec<u8>>,
-    /// Verified transaction senders in transaction order.
-    pub senders: Vec<[u8; 20]>,
+    pub header: BlockHeaderInput,
+    /// EIP-2718 encoded transactions.
+    pub txs: Vec<Bytes>,
+    /// Verified transaction senders in transaction order. Empty asks the
+    /// harness to recover them.
+    pub senders: Vec<Address>,
+}
+
+/// How a block's header is given.
+#[derive(Clone, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
+pub enum BlockHeaderInput {
+    /// The fields a fuzzer picks. The harness fills in the rest, and moves
+    /// the timestamp into the window where the requested hardfork is active.
+    Context(BlockContextInput),
+    /// An RLP-encoded Tempo header, executed exactly as given.
+    Rlp(Bytes),
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Eq, Hash, PartialEq, Serialize)]
 pub struct TransactionOutcome {
     pub error: ErrorClass,
-    pub sender: Option<[u8; 20]>,
+    pub sender: Option<Address>,
     pub tx_type: Option<u8>,
-    pub intrinsic_gas: Option<u64>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
@@ -308,18 +291,24 @@ pub enum TempoHarnessOutcome {
 
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub struct TempoExecutionOutcome {
+    /// Why execution stopped: a block failed, or the input could not be
+    /// executed at all, in which case the rest of the outcome is empty.
+    /// [`ErrorClass::None`] when every block applied.
     pub error: ErrorClass,
+    /// Receipts of the blocks that applied, in order.
     pub receipts: Vec<TxReceiptOutput>,
-    pub state_root: Option<[u8; 32]>,
-    pub final_state: Option<StateInput>,
+    /// The state root of `final_state`. `None` for an exact pre-state, which
+    /// holds only part of the state.
+    pub state_root: Option<B256>,
+    /// The state after the last block that applied, without empty accounts
+    /// and zero slots. A block that fails leaves no changes.
+    pub final_state: StateInput,
+    /// How `final_state` differs from the pre-state, and what each
+    /// transaction changed.
     pub state_diff: StateDiff,
+    /// Invariants broken after a block's pre-execution changes or after a
+    /// transaction. They do not stop execution.
     pub invariant_failures: Vec<InvariantFailure>,
-}
-
-#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
-pub struct HarnessCapabilities {
-    #[serde(default)]
-    pub supported_hardforks: Vec<u8>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -327,10 +316,11 @@ pub struct TempoHarnessCapabilities {
     pub schema_version: u32,
     pub implementation: String,
     pub git_revision: String,
-    pub supported_hardforks: NonEmpty<u8>,
+    pub supported_hardforks: NonEmpty<TempoHardfork>,
     pub supported_inputs: NonEmpty<HarnessInputKind>,
 }
 
+/// State changes, by address and then slot.
 #[derive(Clone, Debug, Default, Deserialize, Eq, Hash, PartialEq, Serialize)]
 pub struct StateDiff {
     pub accounts: Vec<AccountDiff>,
@@ -346,12 +336,13 @@ pub struct TxStateDiff {
     pub storage: Vec<StorageChangeOutput>,
 }
 
+/// An account's new balance, nonce and code, each only if it changed.
 #[derive(Clone, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
 pub struct AccountDiff {
-    pub address: [u8; 20],
-    pub balance: Option<[u8; 32]>,
+    pub address: Address,
+    pub balance: Option<U256>,
     pub nonce: Option<u64>,
-    pub code: Option<Vec<u8>>,
+    pub code: Option<Bytes>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
@@ -362,21 +353,14 @@ pub struct TxReceiptOutput {
     pub cumulative_gas_used: u64,
     pub gas_used: u64,
     pub effective_gas_price: u128,
-    pub output: Vec<u8>,
-    pub logs: Vec<LogOutput>,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
-pub struct LogOutput {
-    pub address: [u8; 20],
-    pub topics: Vec<[u8; 32]>,
-    pub data: Vec<u8>,
+    pub output: Bytes,
+    pub logs: Vec<Log>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
 pub struct StorageChangeOutput {
-    pub address: [u8; 20],
-    pub slot: [u8; 32],
-    pub before: [u8; 32],
-    pub after: [u8; 32],
+    pub address: Address,
+    pub slot: U256,
+    pub before: U256,
+    pub after: U256,
 }

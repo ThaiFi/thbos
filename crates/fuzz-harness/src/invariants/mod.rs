@@ -1,84 +1,84 @@
+//! Protocol invariants, checked on the state after a block's pre-execution
+//! changes and after each transaction.
+//!
+//! A check reads state only through view calls, over the accounts the state
+//! holds. On an exact pre-state those are the accounts execution touched, so a
+//! check asserts only what holds for any subset of accounts, and a view that
+//! reads a key the pre-state lacks answers nothing rather than failing.
+
 mod tip20;
 
-use alloy_evm::Evm as _;
-use alloy_primitives::{Address, Bytes};
+use alloy_evm::{Evm as _, EvmEnv};
+use alloy_primitives::Address;
 use alloy_sol_types::SolCall;
-use revm::{
-    context::result::{ExecutionResult, Output},
-    database::{EmptyDB, in_memory_db::CacheDB},
-};
+use revm::database_interface::WrapDatabaseRef;
+use tempo_chainspec::hardfork::TempoHardfork;
 use tempo_evm::evm::TempoEvm;
-use tempo_fuzz_types::StateInput;
+use tempo_fuzz_types::{InvariantFailure, InvariantScope};
+use tempo_primitives::TempoBlockEnv;
 
-pub(crate) type HarnessEvm = TempoEvm<CacheDB<EmptyDB>>;
+use crate::state::Db;
 
-pub(crate) fn validate_state_invariants(
-    evm: &mut HarnessEvm,
-    side: &'static str,
-    state: &StateInput,
-) -> Result<(), String> {
-    tip20::validate(evm, side, state)?;
-    Ok(())
-}
-
-pub(super) fn view_call<C>(
-    evm: &mut HarnessEvm,
-    target: Address,
-    call: C,
-) -> Result<Option<C::Return>, String>
-where
-    C: SolCall,
-{
-    let result = evm
-        .transact_system_call(Address::ZERO, target, Bytes::from(call.abi_encode()))
-        .map_err(|err| format!("view_call target={} error={err}", fmt_addr(target)))?;
-    match result.result {
-        ExecutionResult::Success {
-            output: Output::Call(output),
-            ..
-        } => {
-            if output.is_empty() {
-                return Ok(None);
-            }
-            C::abi_decode_returns(&output)
-                .map(Some)
-                .map_err(|err| format!("view_call target={} decode_error={err}", fmt_addr(target)))
-        }
-        ExecutionResult::Success { .. } => Ok(None),
-        ExecutionResult::Revert { output, .. } => Err(format!(
-            "view_call target={} reverted output=0x{}",
-            fmt_addr(target),
-            hex_prefix(&output, 32)
-        )),
-        ExecutionResult::Halt { reason, .. } => Err(format!(
-            "view_call target={} halted reason={reason:?}",
-            fmt_addr(target)
-        )),
-    }
-}
-
-pub(super) fn state_accounts(state: &StateInput) -> impl Iterator<Item = Address> + '_ {
-    state
+/// Appends to `failures` each invariant `db` breaks, at `scope`. `env` is the
+/// block's environment. `changed`, sorted, limits the check to contracts whose
+/// state changed, as no other contract's invariants can have broken; `None`
+/// checks every contract.
+pub(crate) fn check(
+    db: &Db,
+    env: &EvmEnv<TempoHardfork, TempoBlockEnv>,
+    scope: &InvariantScope,
+    changed: Option<&[Address]>,
+    failures: &mut Vec<InvariantFailure>,
+) {
+    let missed = db.db.missed();
+    let mut accounts: Vec<Address> = db
+        .cache
         .accounts
         .iter()
-        .map(|account| Address::from(account.address))
-}
+        .filter(|(_, account)| account.info().is_some())
+        .map(|(address, _)| *address)
+        .collect();
+    accounts.sort_unstable();
 
-pub(super) fn is_tip20_like(address: Address) -> bool {
-    address.as_slice().starts_with(&[0x20, 0xc0])
-}
-
-pub(super) fn fmt_addr(address: Address) -> String {
-    format!("{address:#x}")
-}
-
-fn hex_prefix(bytes: &[u8], max_len: usize) -> String {
-    const LUT: &[u8; 16] = b"0123456789abcdef";
-    let bytes = &bytes[..bytes.len().min(max_len)];
-    let mut out = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        out.push(LUT[(byte >> 4) as usize] as char);
-        out.push(LUT[(byte & 0x0f) as usize] as char);
+    let mut views = Views(TempoEvm::new(WrapDatabaseRef(db), env.clone()));
+    let changed =
+        |contract: &Address| changed.is_none_or(|changed| changed.binary_search(contract).is_ok());
+    for (id, message) in tip20::check(&mut views, &accounts, changed) {
+        failures.push(InvariantFailure {
+            id: id.to_string(),
+            message,
+            scope: scope.clone(),
+        });
     }
-    out
+    db.db.restore_missed(missed);
+}
+
+/// Read-only calls against the state being checked.
+struct Views<'a>(TempoEvm<WrapDatabaseRef<&'a Db>>);
+
+impl Views<'_> {
+    /// `call`'s return value from `target`. `Ok(None)` when nothing answers:
+    /// `target` has no code, or the view read a key the pre-state lacks.
+    /// `Err` when the view reverts, halts or returns something undecodable.
+    fn call<C: SolCall>(&mut self, target: Address, call: C) -> Result<Option<C::Return>, String> {
+        self.0.components().0.0.db.restore_missed(false);
+        let result = self
+            .0
+            .transact_system_call(Address::ZERO, target, call.abi_encode().into());
+        if self.0.components().0.0.db.missed() {
+            return Ok(None);
+        }
+        let result = result
+            .map_err(|err| format!("{} on {target}: {err}", C::SIGNATURE))?
+            .result;
+        if !result.is_success() {
+            return Err(format!("{} on {target}: {result:?}", C::SIGNATURE));
+        }
+        match result.output() {
+            Some(output) if !output.is_empty() => C::abi_decode_returns(output)
+                .map(Some)
+                .map_err(|err| format!("{} on {target} returned {output}: {err}", C::SIGNATURE)),
+            _ => Ok(None),
+        }
+    }
 }

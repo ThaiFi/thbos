@@ -9,5 +9,6 @@ publish.workspace = true
 path = "src/lib.rs"
 
 [dependencies]
-bincode = "1.3.3"
-serde = { version = "1", features = ["derive"] }
+alloy-primitives = { workspace = true, features = ["serde"] }
+serde = { workspace = true, features = ["std"] }
+tempo-hardfork = { workspace = true, features = ["serde", "std"] }
