@@ -22,10 +22,7 @@ use reth_revm::{
     context::result::{ExecutionResult, HaltReason, ResultAndState},
     state::{Account, Bytecode, EvmState, EvmStorageSlot, TransactionId},
 };
-use tempo_chainspec::{
-    TempoChainSpec,
-    hardfork::{TempoHardfork, TempoHardforks},
-};
+use tempo_chainspec::{TempoChainSpec, hardfork::TempoHardforks};
 use tempo_contracts::precompiles::{
     ADDRESS_REGISTRY_ADDRESS, CURRENT_COMMITTEE_ADDRESS, ICurrentCommittee, INITIAL_FACTORY_OWNER,
     InitialZoneFactoryAccount, RECEIVE_POLICY_GUARD_ADDRESS, SIGNATURE_VERIFIER_ADDRESS,
@@ -503,13 +500,10 @@ where
     type Result = TempoTxResult;
 
     fn apply_pre_execution_changes(&mut self) -> Result<(), alloy_evm::block::BlockExecutionError> {
-        if self.evm().cfg.spec < TempoHardfork::MINIMUM_SUPPORTED {
-            return Err(BlockValidationError::msg(format!(
-                "pre-{} execution requires a historical binary",
-                TempoHardfork::MINIMUM_SUPPORTED
-            ))
-            .into());
-        }
+        self.evm_mut()
+            .inner_mut()
+            .ensure_supported_spec()
+            .map_err(BlockValidationError::msg)?;
 
         if self
             .inner

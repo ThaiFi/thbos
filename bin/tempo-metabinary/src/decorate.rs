@@ -14,9 +14,11 @@ use jsonrpsee::{
         },
         traits::{IdProvider, ToRpcParams as _},
     },
-    types::{ErrorObjectOwned, Id, Params, SubscriptionId},
+    types::{
+        ErrorObjectOwned, Id, Params, SubscriptionId, SubscriptionPayload, SubscriptionResponse,
+    },
 };
-use serde::{Deserialize, Serialize, de::IgnoredAny};
+use serde::{Deserialize, de::IgnoredAny};
 use serde_json::{Value, value::RawValue};
 use std::{
     collections::HashMap,
@@ -120,15 +122,9 @@ impl Decorator {
         max: usize,
         ext: Extensions,
     ) -> MethodResponse {
-        let route = match self.parse(method, &params) {
-            Ok(parsed) => self.router.route(method, parsed).await,
+        let result = match self.route(method, &params).await {
             Err(err) => Err(err),
-        };
-        let result = match route {
-            Err(err) => Err(err),
-            Ok(Route::Era(era, _)) if era == self.router.live_index() => {
-                return invoke(native, id, params, conn_id, max, ext).await;
-            }
+            Ok(Route::Live) => return invoke(native, id, params, conn_id, max, ext).await,
             Ok(Route::Era(era, params)) => self.router.backend().forward(era, method, params).await,
             Ok(Route::Split { segments, merge }) => {
                 self.split(method, native, segments, merge, conn_id, &ext)
@@ -141,8 +137,8 @@ impl Decorator {
         respond(id, result, max).with_extensions(ext)
     }
 
-    /// Parses params, translating the engine `eth_call` selector to the public name.
-    fn parse(&self, method: &str, params: &Params<'_>) -> RpcResult<RpcParams> {
+    /// Parses and routes params, translating the engine `eth_call` selector to the public name.
+    async fn route(&self, method: &str, params: &Params<'_>) -> RpcResult<Route> {
         let mut parsed = RpcParams(match params.as_str() {
             None => Value::Null,
             Some(raw) => {
@@ -161,7 +157,7 @@ impl Decorator {
                 }
             }
         }
-        Ok(parsed)
+        self.router.route(method, parsed).await
     }
 
     /// Runs split segments in block order and merges their results.
@@ -211,8 +207,7 @@ impl Decorator {
                     parts.push(part);
                 }
                 if parts.is_empty() {
-                    return serde_json::value::to_raw_value(&Value::Null)
-                        .map_err(|err| internal(err.to_string()));
+                    return Ok(RawValue::NULL.to_owned());
                 }
                 self.router.backend().merge_execution_outcomes(parts)
             }
@@ -250,13 +245,7 @@ impl Decorator {
             .map_err(|err| internal(format!("invalid native response: {err}")))?;
         match envelope.error {
             Some(err) => Err(err),
-            None => envelope.result.map_or_else(
-                || {
-                    serde_json::value::to_raw_value(&Value::Null)
-                        .map_err(|e| internal(e.to_string()))
-                },
-                Ok,
-            ),
+            None => Ok(envelope.result.unwrap_or_else(|| RawValue::NULL.to_owned())),
         }
     }
 
@@ -288,12 +277,8 @@ impl Decorator {
         sub_id: SubscriptionId<'static>,
         ext: Extensions,
     ) -> MethodResponse {
-        let route = match self.parse(DEBUG_SUBSCRIBE, &params) {
-            Ok(parsed) => self.router.route(DEBUG_SUBSCRIBE, parsed).await,
-            Err(err) => Err(err),
-        };
-        let segments = match route {
-            Ok(Route::Era(era, _)) if era == self.router.live_index() => {
+        let segments = match self.route(DEBUG_SUBSCRIBE, &params).await {
+            Ok(Route::Live) => {
                 let state = SubscriptionState {
                     conn_id,
                     id_provider: &FixedId(sub_id),
@@ -302,13 +287,11 @@ impl Decorator {
                 return native(id, params, sink, state, ext).await;
             }
             // The router splits relays into non-empty segment lists.
-            Ok(Route::Relay { segments }) => Ok(segments),
-            Ok(_) => Err(internal("traceChain must relay historical segments")),
-            Err(err) => Err(err),
-        };
-        let segments = match segments {
-            Ok(segments) => segments,
-            Err(err) => {
+            Ok(Route::Relay { segments }) => segments,
+            route => {
+                let err = route
+                    .err()
+                    .unwrap_or_else(|| internal("traceChain must relay"));
                 let response = MethodResponse::subscription_error(id, err);
                 if sink.send(response.to_json()).await.is_err() {
                     warn!("client left before its subscription error was sent");
@@ -428,14 +411,11 @@ impl Decorator {
         subscription: &SubscriptionId<'static>,
         result: &RawValue,
     ) -> bool {
-        let notification = Notification {
-            jsonrpc: "2.0",
-            method: DEBUG_SUBSCRIPTION,
-            params: NotificationParams {
-                subscription,
-                result,
-            },
+        let payload = SubscriptionPayload {
+            subscription: subscription.clone(),
+            result,
         };
+        let notification = SubscriptionResponse::new(DEBUG_SUBSCRIPTION.into(), payload);
         match serde_json::value::to_raw_value(&notification) {
             Ok(json) => sink.send(json).await.is_ok(),
             Err(err) => {
@@ -521,17 +501,4 @@ struct Envelope {
 struct TraceChainItem {
     block: U256,
     traces: Vec<IgnoredAny>,
-}
-
-#[derive(Serialize)]
-struct Notification<'a> {
-    jsonrpc: &'static str,
-    method: &'static str,
-    params: NotificationParams<'a>,
-}
-
-#[derive(Serialize)]
-struct NotificationParams<'a> {
-    subscription: &'a SubscriptionId<'static>,
-    result: &'a RawValue,
 }

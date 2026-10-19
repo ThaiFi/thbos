@@ -23,8 +23,13 @@ async fn route(router: &Router, method: &str, params: Value) -> Route {
     router.route(method, RpcParams(params)).await.unwrap()
 }
 
+/// The expected route to era `era`, which runs natively with its original params if live.
 fn era(era: usize, params: Value) -> Route {
-    Route::Era(era, RpcParams(params))
+    if era == LIVE {
+        Route::Live
+    } else {
+        Route::Era(era, RpcParams(params))
+    }
 }
 
 fn split(segments: Vec<(usize, Value)>, merge: Merge) -> Route {
@@ -295,7 +300,7 @@ async fn requests_route_to_their_rule_era() {
 }
 
 #[tokio::test]
-async fn live_requests_keep_their_params() {
+async fn live_requests_run_natively() {
     let bundle = json!({"bundle": []});
     for (method, params, resolves) in [
         ("eth_estimateGas", json!([TX]), false),

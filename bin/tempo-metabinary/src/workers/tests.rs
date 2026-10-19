@@ -1,13 +1,16 @@
 //! Lifecycle tests against this test binary re-executed as a worker by a recording shell script.
 
 use super::*;
-use crate::handshake::{EXECUTION_INFO_METHOD, EXECUTION_INFO_PROTOCOL_VERSION, ExecutionInfo};
+use crate::{
+    handshake::{EXECUTION_INFO_METHOD, EXECUTION_INFO_PROTOCOL_VERSION, ExecutionInfo},
+    routing::UNSUPPORTED_CODE,
+};
 use alloy_eips::BlockNumHash;
-use futures::StreamExt as _;
+use alloy_primitives::{B256, U64};
 use jsonrpsee::{
     RpcModule,
     server::{Server, ServerConfig},
-    types::ErrorObject,
+    types::{ErrorObject, error::CALL_EXECUTION_FAILED_CODE},
 };
 use serde_json::{Value, json};
 use std::{fs, os::unix::fs::PermissionsExt as _};
@@ -152,8 +155,10 @@ impl Fixture {
             static_files_path: None,
             rocksdb_path: None,
             rpc_config: dir.path().join("rpc.json"),
-            chain_id: U64::from(CHAIN_ID),
-            genesis_hash: GENESIS,
+            identity: WorkerIdentity {
+                chain_id: U64::from(CHAIN_ID),
+                genesis_hash: GENESIS,
+            },
             startup_timeout,
         };
         let era = FrozenEra {
@@ -191,7 +196,7 @@ impl Fixture {
 
     async fn ready_handles(&self) -> Option<usize> {
         match &*self.workers.eras[0].state.lock().await {
-            State::Running(process) => process.ready.as_ref().map(Arc::strong_count),
+            State::Running(process) => process.ready.then(|| Arc::strong_count(&process.worker)),
             _ => None,
         }
     }

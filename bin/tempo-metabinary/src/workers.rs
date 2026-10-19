@@ -4,31 +4,25 @@ use crate::{
     catalog::FrozenEra,
     handshake::{WorkerIdentity, wait_for_worker},
     process::{shutdown_children, spawn_child},
-    routing::{RpcParams, UNSUPPORTED_CODE},
+    routing::{RpcParams, unavailable, unsupported},
 };
-use alloy_primitives::{B256, U64};
 use eyre::{OptionExt as _, WrapErr as _, bail, ensure, eyre};
-use futures::Stream;
+use futures::{StreamExt as _, stream::BoxStream};
 use jsonrpsee::{
     core::{
         ClientError, RpcResult,
-        client::{ClientT, Subscription, SubscriptionClientT},
+        client::{ClientT, SubscriptionClientT},
     },
     http_client::{HttpClient, HttpClientBuilder},
-    types::{
-        ErrorObjectOwned,
-        error::{CALL_EXECUTION_FAILED_CODE, METHOD_NOT_FOUND_CODE},
-    },
-    ws_client::{WsClient, WsClientBuilder},
+    types::{ErrorObjectOwned, error::METHOD_NOT_FOUND_CODE},
+    ws_client::WsClientBuilder,
 };
 use serde_json::value::RawValue;
 use std::{
     io,
     net::{Ipv4Addr, TcpListener},
     path::{Path, PathBuf},
-    pin::Pin,
     sync::{Arc, Weak},
-    task::{Context, Poll},
     time::Duration,
 };
 use tokio::{
@@ -65,10 +59,8 @@ pub struct WorkerContext {
     pub rocksdb_path: Option<PathBuf>,
     /// Serialized RPC configuration passed through `--rpc-config`.
     pub rpc_config: PathBuf,
-    /// Chain ID workers must serve.
-    pub chain_id: U64,
-    /// Genesis hash workers must serve.
-    pub genesis_hash: B256,
+    /// Chain workers must serve.
+    pub identity: WorkerIdentity,
     /// Time a worker may take to answer the handshake.
     pub startup_timeout: Duration,
 }
@@ -117,7 +109,10 @@ impl HistoricalWorkers {
         method: &str,
         params: RpcParams,
     ) -> RpcResult<Box<RawValue>> {
-        let worker = self.get(era).await.map_err(unavailable)?;
+        let worker = self
+            .get(era)
+            .await
+            .map_err(|err| unavailable(format!("{err:#}")))?;
         worker
             .client
             .request::<Box<RawValue>, _>(method, params)
@@ -126,13 +121,18 @@ impl HistoricalWorkers {
     }
 
     /// Opens a `debug_subscribe` subscription on `era`'s worker over a dedicated WebSocket.
+    ///
+    /// The stream holds the worker and unsubscribes on drop. It ends on an invalid notification.
     pub async fn subscribe(
         self: &Arc<Self>,
         era: usize,
         params: RpcParams,
-    ) -> RpcResult<WorkerSubscription> {
+    ) -> RpcResult<BoxStream<'static, Box<RawValue>>> {
         const METHOD: &str = "debug_subscribe";
-        let worker = self.get(era).await.map_err(unavailable)?;
+        let worker = self
+            .get(era)
+            .await
+            .map_err(|err| unavailable(format!("{err:#}")))?;
         let client = WsClientBuilder::default()
             .max_request_size(u32::MAX)
             .max_response_size(u32::MAX)
@@ -144,11 +144,19 @@ impl HistoricalWorkers {
             .subscribe::<Box<RawValue>, _>(METHOD, params, "debug_unsubscribe")
             .await
             .map_err(|err| self.call_error(era, METHOD, err))?;
-        Ok(WorkerSubscription {
-            subscription,
-            _client: client,
-            _worker: worker,
-        })
+        let state = (subscription, client, worker);
+        Ok(
+            futures::stream::unfold(state, async |(mut subscription, client, worker)| {
+                match subscription.next().await? {
+                    Ok(result) => Some((result, (subscription, client, worker))),
+                    Err(err) => {
+                        warn!(%err, "invalid worker notification");
+                        None
+                    }
+                }
+            })
+            .boxed(),
+        )
     }
 
     /// Stops every worker so later requests fail. Retriable, as children stay owned until reaped.
@@ -218,8 +226,7 @@ impl HistoricalWorkers {
         };
         let Process {
             child,
-            client,
-            port,
+            worker,
             ready,
             deadline,
             last_used,
@@ -229,30 +236,21 @@ impl HistoricalWorkers {
             bail!("historical era {} exited with {status}", slot.name);
         }
         *last_used = Instant::now();
-        if let Some(ready) = ready {
-            return Ok(ready.clone());
+        if !*ready {
+            let pid = child.id().ok_or_eyre("worker was already reaped")?;
+            let check_alive = || match child.try_wait()? {
+                Some(status) => Err(eyre!("historical era {} exited with {status}", slot.name)),
+                None => Ok(()),
+            };
+            let identity = &self.context.identity;
+            tokio::select! {
+                biased;
+                () = self.shutdown.cancelled() => bail!("historical workers are shutting down"),
+                info = wait_for_worker(&worker.client, identity, pid, *deadline, check_alive) => info?,
+            };
+            *ready = true;
         }
-
-        let pid = child.id().ok_or_eyre("worker was already reaped")?;
-        let identity = WorkerIdentity {
-            chain_id: self.context.chain_id,
-            genesis_hash: self.context.genesis_hash,
-        };
-        let check_alive = || match child.try_wait()? {
-            Some(status) => Err(eyre!("historical era {} exited with {status}", slot.name)),
-            None => Ok(()),
-        };
-        tokio::select! {
-            biased;
-            () = self.shutdown.cancelled() => bail!("historical workers are shutting down"),
-            info = wait_for_worker(client, &identity, pid, *deadline, check_alive) => info?,
-        };
-        let worker = Arc::new(HistoricalWorker {
-            client: client.clone(),
-            port: *port,
-        });
-        *ready = Some(worker.clone());
-        Ok(worker)
+        Ok(worker.clone())
     }
 
     fn spawn(&self, era: &FrozenEra) -> eyre::Result<Process> {
@@ -304,9 +302,8 @@ impl HistoricalWorkers {
         let now = Instant::now();
         Ok(Process {
             child,
-            client,
-            port,
-            ready: None,
+            worker: Arc::new(HistoricalWorker { client, port }),
+            ready: false,
             deadline: now + context.startup_timeout,
             last_used: now,
             secondary,
@@ -324,11 +321,7 @@ impl HistoricalWorkers {
             let State::Running(process) = &mut *state else {
                 continue;
             };
-            if process
-                .ready
-                .as_ref()
-                .is_some_and(|ready| Arc::strong_count(ready) > 1)
-            {
+            if Arc::strong_count(&process.worker) > 1 {
                 process.last_used = now;
                 continue;
             }
@@ -357,49 +350,18 @@ impl HistoricalWorkers {
         match err {
             ClientError::Call(err) if err.code() == METHOD_NOT_FOUND_CODE => {
                 let era = self.eras.get(era).map_or("?", |slot| slot.name.as_str());
-                ErrorObjectOwned::owned(
-                    UNSUPPORTED_CODE,
-                    format!("{method} is unavailable in historical era {era}"),
-                    None::<()>,
-                )
+                unsupported(format!("{method} is unavailable in historical era {era}"))
             }
             ClientError::Call(err) => err,
-            err => ErrorObjectOwned::owned(
-                CALL_EXECUTION_FAILED_CODE,
-                format!("era RPC unavailable: {err}"),
-                None::<()>,
-            ),
+            err => unavailable(format!("era RPC unavailable: {err}")),
         }
     }
 }
 
-/// A ready worker. Holding it keeps the worker from being reaped as idle.
+/// A worker's endpoint. Holding it keeps the worker from being reaped as idle.
 pub struct HistoricalWorker {
     client: HttpClient,
     port: u16,
-}
-
-/// Raw `debug_subscribe` notification results. Holds the worker and unsubscribes on drop.
-pub struct WorkerSubscription {
-    subscription: Subscription<Box<RawValue>>,
-    _client: WsClient,
-    _worker: Arc<HistoricalWorker>,
-}
-
-impl Stream for WorkerSubscription {
-    type Item = Box<RawValue>;
-
-    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        match Pin::new(&mut self.subscription).poll_next(cx) {
-            Poll::Ready(Some(Ok(result))) => Poll::Ready(Some(result)),
-            Poll::Ready(Some(Err(err))) => {
-                warn!(%err, "invalid worker notification");
-                Poll::Ready(None)
-            }
-            Poll::Ready(None) => Poll::Ready(None),
-            Poll::Pending => Poll::Pending,
-        }
-    }
 }
 
 struct Era {
@@ -421,10 +383,9 @@ enum State {
 
 struct Process {
     child: Child,
-    client: HttpClient,
-    port: u16,
+    worker: Arc<HistoricalWorker>,
     /// Set once the handshake succeeded.
-    ready: Option<Arc<HistoricalWorker>>,
+    ready: bool,
     deadline: Instant,
     last_used: Instant,
     /// The worker's RocksDB secondary directory, removed after it stops.
@@ -456,10 +417,6 @@ fn remove_secondary(path: &Path) -> eyre::Result<()> {
         }
         _ => Ok(()),
     }
-}
-
-fn unavailable(err: eyre::Report) -> ErrorObjectOwned {
-    ErrorObjectOwned::owned(CALL_EXECUTION_FAILED_CODE, format!("{err:#}"), None::<()>)
 }
 
 #[cfg(all(test, unix))]

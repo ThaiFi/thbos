@@ -33,13 +33,8 @@ pub(crate) fn prepare(cli: &TempoCli) -> eyre::Result<ControlFlow<(), bool>> {
         .ok_or_eyre("release schedules have at least one era")?
         .checkpoint;
     let datadir = node.datadir.clone().resolve_datadir(node.chain.chain());
-    let storage = Storage {
-        chain: node.chain.clone(),
-        config: ReadOnlyConfig::from_dirs(datadir.db(), datadir.static_files(), datadir.rocksdb()),
-        datadir,
-    };
     let runner = CliRunner::try_default_runtime().wrap_err("failed to build history runtime")?;
-    let mut progress = storage.durable_progress(&schedule.eras, runner.runtime())?;
+    let mut progress = durable_progress(&node.chain, &datadir, &schedule.eras, runner.runtime())?;
 
     let debug = &node.debug;
     if node.dev.dev
@@ -77,7 +72,7 @@ pub(crate) fn prepare(cli: &TempoCli) -> eyre::Result<ControlFlow<(), bool>> {
         {
             return Ok(ControlFlow::Break(()));
         }
-        progress = storage.durable_progress(&schedule.eras, runner.runtime())?;
+        progress = durable_progress(&node.chain, &datadir, &schedule.eras, runner.runtime())?;
         ensure!(
             progress.map(|(best, _)| best) == Some(checkpoint.number),
             "{era} historical sync did not finish at its pinned checkpoint"
@@ -87,43 +82,36 @@ pub(crate) fn prepare(cli: &TempoCli) -> eyre::Result<ControlFlow<(), bool>> {
     Ok(ControlFlow::Continue(finalized <= last.number))
 }
 
-/// The node's storage.
-struct Storage {
-    chain: Arc<TempoChainSpec>,
-    datadir: ChainPath<DataDirPath>,
-    config: ReadOnlyConfig,
-}
-
-impl Storage {
-    /// Returns durable `(best, finalized)`, `None` if fresh, failing on mismatched checkpoints.
-    fn durable_progress(
-        &self,
-        eras: &[FrozenEra],
-        runtime: Runtime,
-    ) -> eyre::Result<Option<(u64, u64)>> {
-        if !self.datadir.db().join("mdbx.dat").exists() {
-            return Ok(None);
-        }
-        let factory = TempoNode::provider_factory_builder()
-            .open_read_only(self.chain.clone(), self.config.clone(), runtime)
-            .wrap_err("failed to open storage read-only")?;
-        ensure!(
-            factory.block_hash(0)? == Some(self.chain.genesis_hash()),
-            "chain specification does not match the database genesis"
-        );
-        let best = factory.best_block_number()?;
-        for era in eras.iter().filter(|era| era.checkpoint.number <= best) {
-            ensure!(
-                factory.block_hash(era.checkpoint.number)? == Some(era.checkpoint.hash),
-                "historical canonical checkpoint hash mismatch"
-            );
-        }
-        let finalized = factory
-            .provider()?
-            .last_finalized_block_number()?
-            .unwrap_or_default();
-        Ok(Some((best, finalized)))
+/// Returns durable `(best, finalized)`, `None` if fresh, failing on mismatched checkpoints.
+fn durable_progress(
+    chain: &Arc<TempoChainSpec>,
+    datadir: &ChainPath<DataDirPath>,
+    eras: &[FrozenEra],
+    runtime: Runtime,
+) -> eyre::Result<Option<(u64, u64)>> {
+    if !datadir.db().join("mdbx.dat").exists() {
+        return Ok(None);
     }
+    let config = ReadOnlyConfig::from_dirs(datadir.db(), datadir.static_files(), datadir.rocksdb());
+    let factory = TempoNode::provider_factory_builder()
+        .open_read_only(chain.clone(), config, runtime)
+        .wrap_err("failed to open storage read-only")?;
+    ensure!(
+        factory.block_hash(0)? == Some(chain.genesis_hash()),
+        "chain specification does not match the database genesis"
+    );
+    let best = factory.best_block_number()?;
+    for era in eras.iter().filter(|era| era.checkpoint.number <= best) {
+        ensure!(
+            factory.block_hash(era.checkpoint.number)? == Some(era.checkpoint.hash),
+            "historical canonical checkpoint hash mismatch"
+        );
+    }
+    let finalized = factory
+        .provider()?
+        .last_finalized_block_number()?
+        .unwrap_or_default();
+    Ok(Some((best, finalized)))
 }
 
 /// Returns the operator's arguments without follow mode.

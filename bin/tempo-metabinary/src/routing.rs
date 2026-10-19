@@ -6,7 +6,7 @@ use jsonrpsee::{
     core::{RpcResult, traits::ToRpcParams},
     types::{
         ErrorObjectOwned,
-        error::{INTERNAL_ERROR_CODE, INVALID_PARAMS_CODE},
+        error::{CALL_EXECUTION_FAILED_CODE, INTERNAL_ERROR_CODE, INVALID_PARAMS_CODE},
     },
 };
 use serde_json::{Map, Value, json, value::RawValue};
@@ -276,7 +276,9 @@ impl ToRpcParams for RpcParams {
 /// Where a request executes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Route {
-    /// One era executes the whole request.
+    /// The live era executes the request natively, with its original params.
+    Live,
+    /// A frozen era executes the whole request.
     Era(usize, RpcParams),
     /// A canonical range split into non-empty, ascending, single-era segments run in order.
     Split {
@@ -355,15 +357,14 @@ impl Router {
         &*self.backend
     }
 
-    /// Routes `method`. Callers run live routes with the original params.
+    /// Routes `method`.
     pub async fn route(&self, method: &str, mut params: RpcParams) -> RpcResult<Route> {
-        let live = self.live_index();
         let policy = policy(method);
         if !matches!(policy, Policy::Native) {
             params.ensure_shape()?;
         }
         match policy {
-            Policy::Native => Ok(Route::Era(live, params)),
+            Policy::Native => Ok(Route::Live),
             Policy::Execution => Err(unsupported(format!("{method} has no era routing policy"))),
             Policy::Block {
                 index,
@@ -380,22 +381,21 @@ impl Router {
                     .cloned()
                     .unwrap_or_else(|| default.into());
                 if is_pending(&selector) {
-                    return Ok(Route::Era(live, params));
+                    return Ok(Route::Live);
                 }
                 let block = self.backend.block(&selector).await?;
                 params.set(index, names, block.pin(&selector, number_only));
-                Ok(Route::Era(self.era(block.timestamp), params))
+                Ok(self.era_route(self.era(block.timestamp), params))
             }
             Policy::FeeHistory => self.route_fee_history(params).await,
             Policy::Transaction => {
                 let hash = params
                     .get(0, TRANSACTION_HASH)
                     .ok_or_else(|| invalid_params("missing transaction hash"))?;
-                let era = match self.backend.transaction_timestamp(hash).await? {
-                    Some(timestamp) => self.era(timestamp),
-                    None => live,
-                };
-                Ok(Route::Era(era, params))
+                Ok(match self.backend.transaction_timestamp(hash).await? {
+                    Some(timestamp) => self.era_route(self.era(timestamp), params),
+                    None => Route::Live,
+                })
             }
             Policy::Simulation { payload, base } => {
                 self.route_simulation(params, payload, base).await
@@ -407,18 +407,18 @@ impl Router {
                 number_only,
             } => {
                 let Some(Value::Object(mut container)) = params.get(index, names).cloned() else {
-                    return Ok(Route::Era(live, params));
+                    return Ok(Route::Live);
                 };
                 let Some(selector) = container.get(field).filter(|v| !v.is_null()).cloned() else {
-                    return Ok(Route::Era(live, params));
+                    return Ok(Route::Live);
                 };
                 if is_pending(&selector) {
-                    return Ok(Route::Era(live, params));
+                    return Ok(Route::Live);
                 }
                 let block = self.backend.block(&selector).await?;
                 container.insert(field.to_owned(), block.pin(&selector, number_only));
                 params.set(index, names, Value::Object(container));
-                Ok(Route::Era(self.era(block.timestamp), params))
+                Ok(self.era_route(self.era(block.timestamp), params))
             }
             Policy::MevBundle => {
                 let mut overrides = match params.get(1, SIM_OVERRIDES) {
@@ -431,22 +431,19 @@ impl Router {
                     .cloned()
                     .unwrap_or_else(|| "latest".into());
                 if is_pending(&parent) {
-                    return Ok(Route::Era(live, params));
+                    return Ok(Route::Live);
                 }
                 let time = override_time(&overrides)?;
                 let block = self.backend.block(&parent).await?;
                 overrides.insert("parentBlock".to_owned(), block.pin(&parent, false));
                 params.set(1, SIM_OVERRIDES, Value::Object(overrides));
-                Ok(Route::Era(
-                    self.era(time.unwrap_or(block.timestamp)),
-                    params,
-                ))
+                Ok(self.era_route(self.era(time.unwrap_or(block.timestamp)), params))
             }
             Policy::ExecutionOutcome => self.route_execution_outcome(params).await,
             Policy::TraceFilter => self.route_trace_filter(params).await,
             Policy::RawBlock => {
                 let timestamp = self.backend.raw_block_timestamp(&params)?;
-                Ok(Route::Era(self.era(timestamp), params))
+                Ok(self.era_route(self.era(timestamp), params))
             }
             Policy::TraceChain => self.route_trace_chain(params).await,
         }
@@ -455,15 +452,14 @@ impl Router {
     async fn route_fee_history(&self, mut params: RpcParams) -> RpcResult<Route> {
         const BLOCK_COUNT: &[&str] = &["block_count", "blockCount"];
         const NEWEST: &[&str] = &["newest_block", "newestBlock"];
-        let live = self.live_index();
         // Native validates malformed params and answers a zero count without storage.
         let count = params.get(0, BLOCK_COUNT).and_then(quantity);
         let newest = params.get(1, NEWEST).filter(|v| is_block_number_or_tag(v));
         let (Some(count), Some(newest)) = (count, newest) else {
-            return Ok(Route::Era(live, params));
+            return Ok(Route::Live);
         };
         if count == 0 {
-            return Ok(Route::Era(live, params));
+            return Ok(Route::Live);
         }
         let newest = if newest.as_str() == Some("pending") {
             "latest".into()
@@ -472,7 +468,7 @@ impl Router {
         };
         let block = self.backend.block(&newest).await?;
         params.set(1, NEWEST, block.pin(&newest, true));
-        Ok(Route::Era(self.era(block.timestamp), params))
+        Ok(self.era_route(self.era(block.timestamp), params))
     }
 
     async fn route_simulation(
@@ -508,12 +504,11 @@ impl Router {
         };
         // The executor rejects simulated times that precede the parent.
         let era = eras.first().copied().unwrap_or(base_era).max(base_era);
-        Ok(Route::Era(era, params))
+        Ok(self.era_route(era, params))
     }
 
     async fn route_execution_outcome(&self, mut params: RpcParams) -> RpcResult<Route> {
         const COUNT: &[&str] = &["count"];
-        let live = self.live_index();
         let count = match params.get(1, COUNT) {
             None => 1,
             Some(count) => quantity(count).ok_or_else(|| invalid_params("invalid block count"))?,
@@ -528,7 +523,7 @@ impl Router {
             .cloned()
             .ok_or_else(|| invalid_params("missing block id"))?;
         if is_pending(&selector) {
-            return Ok(Route::Era(live, params));
+            return Ok(Route::Live);
         }
         let mut first = self.backend.block(&selector).await?;
         if is_explicit_hash(&selector) {
@@ -537,7 +532,7 @@ impl Router {
         }
         if first.number == 0 {
             // Native answers genesis with an empty outcome without executing.
-            return Ok(Route::Era(live, params));
+            return Ok(Route::Live);
         }
         let head = self.backend.block(&"latest".into()).await?;
         let last_number = first
@@ -549,7 +544,7 @@ impl Router {
         let segments = self.split(first, last).await?;
         if let [(era, _, _)] = segments[..] {
             params.set(0, BLOCK_ID, first.pin(&selector, false));
-            return Ok(Route::Era(era, params));
+            return Ok(self.era_route(era, params));
         }
         let segments = segments
             .into_iter()
@@ -622,7 +617,7 @@ impl Router {
         let segments = self.split(from, to).await?;
         if let [(era, start, end)] = segments[..] {
             params.set(0, FILTER, segment_filter(start, end, true));
-            return Ok(Route::Era(era, params));
+            return Ok(self.era_route(era, params));
         }
         let segments = segments
             .into_iter()
@@ -636,26 +631,24 @@ impl Router {
     }
 
     async fn route_trace_chain(&self, params: RpcParams) -> RpcResult<Route> {
-        let live = self.live_index();
-        let native = Route::Era(live, params.clone());
         if params.get(0, &["subscription"]).and_then(Value::as_str) != Some("traceChain") {
-            return Ok(native);
+            return Ok(Route::Live);
         }
         let (Some(start), Some(end)) = (
             params.get(1, TRACE_CHAIN_START),
             params.get(2, TRACE_CHAIN_END),
         ) else {
-            return Ok(native);
+            return Ok(Route::Live);
         };
         let start = self.backend.block(start).await?;
         let end = self.backend.block(end).await?;
         if start.number >= end.number {
             // Native rejects the empty range with its own error.
-            return Ok(native);
+            return Ok(Route::Live);
         }
         let first = self.block_at(start.number + 1).await?;
-        if self.era(first.timestamp) == live {
-            return Ok(native);
+        if self.era(first.timestamp) == self.live_index() {
+            return Ok(Route::Live);
         }
         let segments = self.split(first, end).await?;
         let count = segments.len();
@@ -713,6 +706,14 @@ impl Router {
             .collect())
     }
 
+    fn era_route(&self, era: usize, params: RpcParams) -> Route {
+        if era == self.live_index() {
+            Route::Live
+        } else {
+            Route::Era(era, params)
+        }
+    }
+
     async fn block_at(&self, number: u64) -> RpcResult<BlockMetadata> {
         self.backend.block(&hex(number)).await
     }
@@ -746,18 +747,28 @@ pub fn is_execution_method(method: &str) -> bool {
 }
 
 /// Builds a `-32602` invalid params error.
-pub(crate) fn invalid_params(message: impl Into<String>) -> ErrorObjectOwned {
+pub fn invalid_params(message: impl Into<String>) -> ErrorObjectOwned {
     ErrorObjectOwned::owned(INVALID_PARAMS_CODE, message.into(), None::<()>)
 }
 
 /// Builds a [`UNSUPPORTED_CODE`] error.
-pub(crate) fn unsupported(message: impl Into<String>) -> ErrorObjectOwned {
+pub fn unsupported(message: impl Into<String>) -> ErrorObjectOwned {
     ErrorObjectOwned::owned(UNSUPPORTED_CODE, message.into(), None::<()>)
 }
 
 /// Builds a `-32603` internal error.
-pub(crate) fn internal(message: impl Into<String>) -> ErrorObjectOwned {
+pub fn internal(message: impl Into<String>) -> ErrorObjectOwned {
     ErrorObjectOwned::owned(INTERNAL_ERROR_CODE, message.into(), None::<()>)
+}
+
+/// Builds a `-32000` error for an unavailable worker.
+pub fn unavailable(message: impl Into<String>) -> ErrorObjectOwned {
+    ErrorObjectOwned::owned(CALL_EXECUTION_FAILED_CODE, message.into(), None::<()>)
+}
+
+/// Builds a [`UNKNOWN_BLOCK_CODE`] error.
+pub fn unknown_block() -> ErrorObjectOwned {
+    ErrorObjectOwned::owned(UNKNOWN_BLOCK_CODE, "unknown block", None::<()>)
 }
 
 /// How a method is routed.

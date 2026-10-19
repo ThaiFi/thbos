@@ -105,18 +105,16 @@ impl RpcOnly {
         let chain = self.env.chain.clone();
         // Reth's read-only open would create missing RocksDB storage.
         let data_dir = self.env.datadir.clone().resolve_datadir(chain.chain());
-        ensure!(
-            data_dir.db().exists(),
-            "rpc-only requires an existing chain database"
-        );
-        ensure!(
-            data_dir.static_files().exists(),
-            "rpc-only requires existing static files"
-        );
-        ensure!(
-            RocksDBProvider::exists(data_dir.rocksdb()),
-            "rpc-only requires existing RocksDB storage; initialize it with the node first"
-        );
+        for (exists, missing) in [
+            (data_dir.db().exists(), "an existing chain database"),
+            (data_dir.static_files().exists(), "existing static files"),
+            (
+                RocksDBProvider::exists(data_dir.rocksdb()),
+                "existing RocksDB storage; initialize it with the node first",
+            ),
+        ] {
+            ensure!(exists, "rpc-only requires {missing}");
+        }
         let Environment {
             provider_factory, ..
         } = self

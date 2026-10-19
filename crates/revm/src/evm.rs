@@ -252,7 +252,7 @@ impl<DB: Database, I> TempoEvm<DB, I> {
     }
 
     /// Fails if `cfg.spec` predates [`TempoHardfork::MINIMUM_SUPPORTED`], at execution time.
-    pub(crate) fn ensure_supported_spec(
+    pub fn ensure_supported_spec(
         &self,
     ) -> Result<(), EVMError<DB::Error, TempoInvalidTransaction>> {
         if self.inner.ctx.cfg.spec < TempoHardfork::MINIMUM_SUPPORTED {

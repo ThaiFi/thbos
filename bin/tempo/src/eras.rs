@@ -5,14 +5,8 @@ use alloy_primitives::{B256, Bytes};
 use alloy_rlp::{Decodable as _, Header as RlpHeader};
 use alloy_rpc_types_eth::BlockId;
 use eyre::{OptionExt as _, WrapErr as _};
-use futures::{FutureExt as _, StreamExt as _, future::BoxFuture, stream::BoxStream};
-use jsonrpsee::{
-    core::RpcResult,
-    types::{
-        ErrorObjectOwned,
-        error::{INTERNAL_ERROR_CODE, INVALID_PARAMS_CODE},
-    },
-};
+use futures::{FutureExt as _, future::BoxFuture, stream::BoxStream};
+use jsonrpsee::core::RpcResult;
 use reth_chainspec::EthChainSpec as _;
 use reth_ethereum::rpc::{
     builder::{TransportRpcModules, auth::AuthRpcModule},
@@ -29,7 +23,8 @@ use tempo_chainspec::spec::{MODERATO, PRESTO, TempoChainSpec};
 use tempo_metabinary::{
     catalog::{Catalog, ChainEras},
     decorate::{RpcApi, decorate},
-    routing::{Backend, BlockMetadata, Router, RpcParams, UNKNOWN_BLOCK_CODE},
+    handshake::WorkerIdentity,
+    routing::{Backend, BlockMetadata, Router, RpcParams, internal, invalid_params, unknown_block},
     workers::{DEFAULT_STARTUP_TIMEOUT, HistoricalWorkers, WorkerContext},
 };
 use tempo_primitives::{TempoHeader, TempoReceipt};
@@ -112,8 +107,10 @@ impl EraRuntime {
             static_files_path,
             rocksdb_path,
             rpc_config: rpc_config.path().to_path_buf(),
-            chain_id: alloy_primitives::U64::from(chain.chain_id()),
-            genesis_hash: chain.genesis_hash(),
+            identity: WorkerIdentity {
+                chain_id: alloy_primitives::U64::from(chain.chain_id()),
+                genesis_hash: chain.genesis_hash(),
+            },
             startup_timeout: DEFAULT_STARTUP_TIMEOUT,
         };
         Ok(Self {
@@ -220,9 +217,7 @@ impl<EthApi: NativeEthApi> Backend for NativeBackend<EthApi> {
                     .map_err(Into::into)?
                     .map(|header| metadata(header.hash(), header.header()))
             };
-            metadata.ok_or_else(|| {
-                ErrorObjectOwned::owned(UNKNOWN_BLOCK_CODE, "unknown block", None::<()>)
-            })
+            metadata.ok_or_else(unknown_block)
         }
         .boxed()
     }
@@ -263,7 +258,7 @@ impl<EthApi: NativeEthApi> Backend for NativeBackend<EthApi> {
         era: usize,
         params: RpcParams,
     ) -> BoxFuture<'a, RpcResult<BoxStream<'static, Box<RawValue>>>> {
-        async move { Ok(self.workers.subscribe(era, params).await?.boxed()) }.boxed()
+        self.workers.subscribe(era, params).boxed()
     }
 
     fn raw_block_timestamp(&self, params: &RpcParams) -> RpcResult<u64> {
@@ -272,11 +267,9 @@ impl<EthApi: NativeEthApi> Backend for NativeBackend<EthApi> {
 
     fn merge_execution_outcomes(&self, parts: Vec<Box<RawValue>>) -> RpcResult<Box<RawValue>> {
         merge_execution_outcomes(&parts).map_err(|err| {
-            ErrorObjectOwned::owned(
-                INTERNAL_ERROR_CODE,
-                format!("cannot merge execution outcomes across eras: {err:#}"),
-                None::<()>,
-            )
+            internal(format!(
+                "cannot merge execution outcomes across eras: {err:#}"
+            ))
         })
     }
 }
@@ -350,10 +343,6 @@ fn write_json_tempfile(value: &impl serde::Serialize) -> eyre::Result<tempfile::
         .tempfile()?;
     serde_json::to_writer(file.as_file(), value)?;
     Ok(file)
-}
-
-fn invalid_params(message: impl Into<String>) -> ErrorObjectOwned {
-    ErrorObjectOwned::owned(INVALID_PARAMS_CODE, message.into(), None::<()>)
 }
 
 #[cfg(test)]
@@ -521,7 +510,7 @@ mod tests {
             (RpcParams(json!([])), "missing raw block"),
         ] {
             let err = raw_block_timestamp(&raw).unwrap_err();
-            assert_eq!((err.code(), err.message()), (INVALID_PARAMS_CODE, expected));
+            assert_eq!((err.code(), err.message()), (-32602, expected));
         }
     }
 }

@@ -4,7 +4,7 @@
 
 use alloy_primitives::B256;
 use futures::{FutureExt as _, StreamExt as _, future::BoxFuture, stream::BoxStream};
-use jsonrpsee::{core::RpcResult, types::ErrorObjectOwned};
+use jsonrpsee::core::RpcResult;
 use serde_json::{Value, json, value::RawValue};
 use std::{
     collections::HashMap,
@@ -13,7 +13,7 @@ use std::{
         atomic::{AtomicUsize, Ordering},
     },
 };
-use tempo_metabinary::routing::{Backend, BlockMetadata, RpcParams, UNKNOWN_BLOCK_CODE};
+use tempo_metabinary::routing::{Backend, BlockMetadata, RpcParams, invalid_params, unknown_block};
 
 /// Forwarded calls answer with this closure's raw JSON.
 pub type ForwardFn = dyn Fn(usize, &str, &Value) -> RpcResult<String> + Send + Sync;
@@ -65,11 +65,7 @@ impl FakeBackend {
 
     fn metadata(&self, number: u64) -> RpcResult<BlockMetadata> {
         if number > self.head {
-            return Err(ErrorObjectOwned::owned(
-                UNKNOWN_BLOCK_CODE,
-                "unknown block",
-                None::<()>,
-            ));
+            return Err(unknown_block());
         }
         Ok(BlockMetadata {
             number,
@@ -116,7 +112,7 @@ impl Backend for FakeBackend {
             _ => number_of(selector),
         };
         let result = number
-            .ok_or_else(|| ErrorObjectOwned::owned(-32602, "bad selector", None::<()>))
+            .ok_or_else(|| invalid_params("bad selector"))
             .and_then(|number| self.metadata(number));
         async move { result }.boxed()
     }
