@@ -33,6 +33,9 @@ use tempo_primitives::{
 };
 use tempo_revm::{TempoTxEnv, gas_params::tempo_gas_params};
 
+/// The gas limit of the transactions built by `aa_tx`.
+const AA_GAS_LIMIT: u64 = 1_000_000;
+
 struct Fixture {
     evm: TempoEvm<State<EmptyDB>>,
     owner: PrivateKeySigner,
@@ -224,7 +227,7 @@ fn aa_tx(nonce: u64, calls: Vec<Call>) -> TempoTransaction {
         fee_token: None,
         max_priority_fee_per_gas: 0,
         max_fee_per_gas: 0,
-        gas_limit: 1_000_000,
+        gas_limit: AA_GAS_LIMIT,
         calls,
         access_list: AccessList(Vec::new()),
         nonce_key: U256::ZERO,
@@ -244,7 +247,17 @@ fn signer(seed: u8) -> PrivateKeySigner {
 
 /// Signs `tx` as the account's native multisig, with the fixture's current configuration.
 fn multisig_signed(f: &Fixture, tx: TempoTransaction) -> AASigned {
-    let signature = multisig_approval(f.account, &f.config, &f.owner, tx.signature_hash());
+    multisig_signed_by(f.account, &f.config, &f.owner, tx)
+}
+
+/// Signs `tx` as the multisig `account` with `config`, approved by `owner`.
+fn multisig_signed_by(
+    account: Address,
+    config: &MultisigConfig,
+    owner: &PrivateKeySigner,
+    tx: TempoTransaction,
+) -> AASigned {
+    let signature = multisig_approval(account, config, owner, tx.signature_hash());
     tx.into_signed(TempoSignature::Multisig(signature))
 }
 

@@ -83,6 +83,16 @@ const KEY_KINDS: [SigKind; 3] = [SigKind::P256, SigKind::WebAuthn, SigKind::Secp
 /// The expiry of an expiring-nonce transaction: just after the fixture's block timestamp of 1.
 const EXPIRING_VALID_BEFORE: NonZeroU64 = NZU64!(2);
 
+/// TIP-1016's split of the new-account cost: 25k regular and 225k state gas. T14's table keeps the
+/// split off, so the test that needs state gas applies it on top.
+const SPLIT_NEW_ACCOUNT_COST: [(GasId, u64); 2] = [
+    (GasId::new_account_cost(), 25_000),
+    (GasId::new_account_state_gas(), 225_000),
+];
+
+/// The hash that the multisig verification tests approve.
+const MULTISIG_HASH: B256 = B256::repeat_byte(0x42);
+
 /// Settled amount, deposit and close request of the channel, with the balances of its payee and
 /// payer and of the precompile that holds the deposit.
 #[derive(Debug, PartialEq, Eq)]
@@ -2439,13 +2449,6 @@ fn eoa_migration_gas_schedule() {
     }
 }
 
-/// TIP-1016's split of the new-account cost: 25k regular and 225k state gas. T14's table keeps the
-/// split off, so the test that needs state gas applies it on top.
-const SPLIT_NEW_ACCOUNT_COST: [(GasId, u64); 2] = [
-    (GasId::new_account_cost(), 25_000),
-    (GasId::new_account_state_gas(), 225_000),
-];
-
 /// The sender of an `upgradeAccount` transaction.
 #[derive(Clone, Copy, Debug)]
 enum UpgradeSender {
@@ -3235,13 +3238,7 @@ fn retired_root_error_order_and_access_gas() {
         key_authorization: Some(root_grant),
         ..aa_tx(3, vec![f.getter()])
     };
-    let witness = multisig_approval(
-        account,
-        &witness_config,
-        &witness_owner,
-        native_tx.signature_hash(),
-    );
-    let tx = native_tx.into_signed(TempoSignature::Multisig(witness));
+    let tx = multisig_signed_by(account, &witness_config, &witness_owner, native_tx);
     assert!(matches!(
         rejection(&mut f, &tx, account),
         TempoInvalidTransaction::NativeMultisig(
@@ -3866,7 +3863,7 @@ fn keychain_authorization_list_entries_stay_skipped() {
 
 /// Executes `calls` as one AA transaction that `sender` sends at its current nonce.
 fn send(f: &mut Fixture, sender: Address, calls: Vec<Call>) -> ExecutionResult<HaltReason> {
-    send_listed(f, sender, calls, AccessList(Vec::new()))
+    send_listed(f, sender, calls, AccessList(Vec::new()), AA_GAS_LIMIT)
 }
 
 fn send_listed(
@@ -3874,9 +3871,11 @@ fn send_listed(
     sender: Address,
     calls: Vec<Call>,
     access_list: AccessList,
+    gas_limit: u64,
 ) -> ExecutionResult<HaltReason> {
     let nonce = nonce_of(f, sender);
     let tx = f.sign_primitive(TempoTransaction {
+        gas_limit,
         access_list,
         ..aa_tx(nonce, calls)
     });
@@ -4416,7 +4415,7 @@ fn signature_gas(spec: TempoHardfork, action: SignedAction, warm: bool) -> u64 {
     } else {
         AccessList(Vec::new())
     };
-    let result = send_listed(&mut f, sender, vec![call], access_list);
+    let result = send_listed(&mut f, sender, vec![call], access_list, AA_GAS_LIMIT);
     assert!(result.is_success(), "{action:?} at {spec:?}: {result:?}");
     result.tx_gas_used()
 }
@@ -4893,21 +4892,15 @@ fn relayed(
     gas_limit: u64,
     warm: Option<Address>,
 ) -> ExecutionResult<HaltReason> {
-    let relayer = signer(9).address();
-    let nonce = nonce_of(f, relayer);
-    let tx = f.sign_primitive(TempoTransaction {
-        gas_limit,
-        access_list: AccessList(
-            warm.into_iter()
-                .map(|address| AccessListItem {
-                    address,
-                    storage_keys: Vec::new(),
-                })
-                .collect(),
-        ),
-        ..aa_tx(nonce, vec![call])
-    });
-    f.run_as(relayer, &tx)
+    let access_list = AccessList(
+        warm.into_iter()
+            .map(|address| AccessListItem {
+                address,
+                storage_keys: Vec::new(),
+            })
+            .collect(),
+    );
+    send_listed(f, signer(9).address(), vec![call], access_list, gas_limit)
 }
 
 /// The `verifyMultisig` call of `signature`.
@@ -4918,9 +4911,6 @@ fn verify_multisig_call(account: Address, hash: B256, signature: &MultisigSignat
         TempoSignature::Multisig(signature.clone()).to_bytes(),
     )
 }
-
-/// The hash that the multisig verification tests approve.
-const MULTISIG_HASH: B256 = B256::repeat_byte(0x42);
 
 #[derive(Clone, Copy, Debug)]
 enum Verdict {
