@@ -10,6 +10,7 @@ use alloy_sol_types::{SolCall, SolEvent, SolValue};
 use commonware_codec::Encode as _;
 use commonware_cryptography::{Signer as _, ed25519::PrivateKey as Ed25519PrivateKey};
 use eyre::WrapErr;
+use futures::future::try_join_all;
 use k256::SecretKey;
 use p256::ecdsa::SigningKey as P256SigningKey;
 use reth_node_api::FullNodeComponents;
@@ -119,6 +120,9 @@ pub(crate) const DEFAULT_POLL: std::time::Duration = std::time::Duration::from_m
 
 /// Gas limit for ordinary TIP-20 calls under the current Tempo fork schedule.
 pub(crate) const TIP20_TX_GAS: u64 = 500_000;
+
+/// Gas limit for `ZonePortal.setSequencerEncryptionKey` sent before the portal exists.
+const SET_ENCRYPTION_KEY_TX_GAS: u64 = 2_000_000;
 
 /// Gas limit for `ZoneOutbox.requestWithdrawal` test transactions.
 ///
@@ -1572,7 +1576,7 @@ impl ZoneTestNode {
 /// A Tempo L1 node running in dev mode for integration testing.
 ///
 /// Starts an in-process Tempo node that produces blocks automatically
-/// (500ms block time), providing both HTTP and WebSocket endpoints.
+/// (250ms block time), providing both HTTP and WebSocket endpoints.
 ///
 /// # Usage
 ///
@@ -2056,24 +2060,80 @@ impl L1TestNode {
     /// for gas so admin-only portal calls (e.g. `enableToken`) can be made, and the dev
     /// sequencer's encryption key is registered so the portal can accept deposits immediately.
     ///
+    /// All three transactions are submitted back to back with explicit nonces so they can share
+    /// a block. The portal address is predicted from the factory's next zone ID because the key
+    /// registration's proof of possession commits to it.
+    ///
     /// [`admin_address`]: Self::admin_address
     pub(crate) async fn create_zone(&self, factory_address: Address) -> eyre::Result<Address> {
+        use tempo_contracts::zones::ZoneFactory;
+        use tempo_precompiles::zone_factory::portal_address;
+
+        let provider = self.dev_provider();
+        let portal = portal_address(
+            ZoneFactory::new(factory_address, &provider)
+                .nextZoneId()
+                .call()
+                .await?,
+        );
+        let nonce = provider
+            .get_transaction_count(self.dev_address())
+            .pending()
+            .await?;
+
         let config =
             ZoneCreationConfig::closed(vec![self.admin_address(), self.user_signer().address()]);
-        let portal = self
-            .create_zone_with_admin_sequencer_and_config(
-                factory_address,
-                self.admin_address(),
-                self.dev_address(),
-                config,
+        let create_zone = provider
+            .send_transaction(
+                create_zone_request(
+                    factory_address,
+                    self.admin_address(),
+                    vec![self.dev_address()],
+                    1,
+                    config,
+                )
+                .nonce(nonce),
             )
             .await?;
         // The admin is not pre-funded; give it pathUSD to pay for gas on
         // admin-only portal calls.
-        self.fund_user(self.admin_address(), 10_000_000).await?;
-        let encryption_key = k256::SecretKey::from(self.dev_signer().credential());
-        self.set_sequencer_encryption_key(portal, &encryption_key)
+        let fund_admin = ITIP20::new(PATH_USD_ADDRESS, &provider)
+            .transfer(self.admin_address(), U256::from(10_000_000))
+            .nonce(nonce + 1)
+            .gas(TIP20_TX_GAS)
+            .send()
             .await?;
+        // The dev sequencer registers its own key as the encryption key.
+        let proof = zone_sequencer::prove_encryption_key_possession(portal, &self.dev_signer())?;
+        let register_key = ZonePortal::new(portal, &provider)
+            .setSequencerEncryptionKey(
+                proof.x,
+                proof.y_parity,
+                proof.pop_v,
+                proof.pop_r,
+                proof.pop_s,
+            )
+            .nonce(nonce + 2)
+            // Estimation would run before the portal exists.
+            .gas(SET_ENCRYPTION_KEY_TX_GAS)
+            .send()
+            .await?;
+
+        let created = zone_created_portal(&create_zone.get_receipt().await?)?;
+        eyre::ensure!(
+            created == portal,
+            "createZone deployed {created}, expected {portal}"
+        );
+        eyre::ensure!(
+            fund_admin.get_receipt().await?.status(),
+            "fund_user transfer failed"
+        );
+        let receipt = register_key.get_receipt().await?;
+        eyre::ensure!(
+            receipt.status(),
+            "setSequencerEncryptionKey reverted (tx: {})",
+            receipt.transaction_hash
+        );
         Ok(portal)
     }
 
@@ -2104,39 +2164,19 @@ impl L1TestNode {
         threshold: u8,
         config: ZoneCreationConfig,
     ) -> eyre::Result<Address> {
-        use tempo_contracts::zones::ZoneFactory;
-        use tempo_precompiles::PATH_USD_ADDRESS;
-
-        let l1_provider = self.dev_provider();
-        let create_zone = ZoneFactory::createZoneCall {
-            params: ZoneFactory::CreateZoneParams {
+        let receipt = self
+            .dev_provider()
+            .send_transaction(create_zone_request(
+                factory_address,
                 admin,
-                initialToken: PATH_USD_ADDRESS,
-                accessMode: config.access_mode,
-                gatewayMode: config.gateway_mode,
-                allowedAccounts: config.allowed_accounts,
-                zoneGateways: config.zone_gateways,
                 sequencers,
                 threshold,
-                rpcUrl: String::new(),
-            },
-        };
-        let receipt = l1_provider
-            .send_transaction(
-                TransactionRequest::default()
-                    .to(factory_address)
-                    .input(create_zone.abi_encode().into()),
-            )
+                config,
+            ))
             .await?
             .get_receipt()
             .await?;
-        eyre::ensure!(receipt.status(), "createZone failed");
-
-        let zone_created = receipt
-            .decoded_log::<ZoneFactory::ZoneCreated>()
-            .ok_or_else(|| eyre::eyre!("ZoneCreated event not found"))?;
-
-        Ok(zone_created.portal)
+        zone_created_portal(&receipt)
     }
 
     /// Deploy the SwapAndDepositRouter contract on L1 from the Foundry artifact.
@@ -2524,7 +2564,7 @@ impl L1TestNode {
     /// Mint tokens on L1.
     ///
     /// The dev account must be the admin of the token (set during `createToken`).
-    /// Grants `ISSUER_ROLE` to self first (admin can grant roles), then mints.
+    /// Grants `ISSUER_ROLE` to self first unless already held (admin can grant roles), then mints.
     pub(crate) async fn mint_tip20(
         &self,
         token: Address,
@@ -2536,14 +2576,20 @@ impl L1TestNode {
 
         let provider = self.dev_provider();
 
-        // Admin can grant ISSUER_ROLE to self
-        let receipt = IRolesAuth::new(token, &provider)
-            .grantRole(ISSUER_ROLE, self.dev_address())
-            .send()
+        let roles = IRolesAuth::new(token, &provider);
+        if !roles
+            .hasRole(self.dev_address(), ISSUER_ROLE)
+            .call()
             .await?
-            .get_receipt()
-            .await?;
-        eyre::ensure!(receipt.status(), "grantRole ISSUER failed on L1");
+        {
+            let receipt = roles
+                .grantRole(ISSUER_ROLE, self.dev_address())
+                .send()
+                .await?
+                .get_receipt()
+                .await?;
+            eyre::ensure!(receipt.status(), "grantRole ISSUER failed on L1");
+        }
 
         let receipt = ITIP20::new(token, &provider)
             .mint(to, U256::from(amount))
@@ -2577,29 +2623,6 @@ impl L1TestNode {
         Ok(event.policyId)
     }
 
-    /// Create a new WHITELIST policy on L1. Returns the policy ID.
-    #[allow(dead_code)]
-    pub(crate) async fn create_whitelist_policy(&self) -> eyre::Result<u64> {
-        use tempo_contracts::precompiles::ITIP403Registry;
-        use tempo_precompiles::TIP403_REGISTRY_ADDRESS;
-
-        let provider = self.dev_provider();
-        let registry = ITIP403Registry::new(TIP403_REGISTRY_ADDRESS, &provider);
-        let receipt = registry
-            .createPolicy(self.dev_address(), ITIP403Registry::PolicyType::WHITELIST)
-            .send()
-            .await?
-            .get_receipt()
-            .await?;
-        eyre::ensure!(receipt.status(), "createPolicy (WHITELIST) failed");
-
-        let event = receipt
-            .decoded_log::<ITIP403Registry::PolicyCreated>()
-            .ok_or_else(|| eyre::eyre!("PolicyCreated event not found"))?;
-
-        Ok(event.policyId)
-    }
-
     /// Add an address to a blacklist policy.
     pub(crate) async fn blacklist_address(
         &self,
@@ -2618,28 +2641,6 @@ impl L1TestNode {
             .get_receipt()
             .await?;
         eyre::ensure!(receipt.status(), "modifyPolicyBlacklist failed");
-        Ok(())
-    }
-
-    /// Add an address to a whitelist policy.
-    #[allow(dead_code)]
-    pub(crate) async fn whitelist_address(
-        &self,
-        policy_id: u64,
-        account: Address,
-    ) -> eyre::Result<()> {
-        use tempo_contracts::precompiles::ITIP403Registry;
-        use tempo_precompiles::TIP403_REGISTRY_ADDRESS;
-
-        let provider = self.dev_provider();
-        let registry = ITIP403Registry::new(TIP403_REGISTRY_ADDRESS, &provider);
-        let receipt = registry
-            .modifyPolicyWhitelist(policy_id, account, true)
-            .send()
-            .await?
-            .get_receipt()
-            .await?;
-        eyre::ensure!(receipt.status(), "modifyPolicyWhitelist failed");
         Ok(())
     }
 
@@ -2706,7 +2707,7 @@ impl L1TestNode {
         Ok(registry.isAuthorized(policy_id, user).call().await?)
     }
 
-    /// Start an L1 dev node with the default configuration (500ms block time).
+    /// Start an L1 dev node with the default configuration (250ms block time).
     pub(crate) async fn start() -> eyre::Result<Self> {
         Self::start_with(|_| {}).await
     }
@@ -2746,7 +2747,7 @@ impl L1TestNode {
                     .with_ws_api(RpcModuleSelection::All),
             )
             .apply(|mut c| {
-                c.dev.block_time = Some(Duration::from_millis(500));
+                c.dev.block_time = Some(Duration::from_millis(250));
                 c.dev.finality_depth = std::num::NonZeroUsize::MIN;
                 // Witness collection must prove older L1 checkpoints during catch-up.
                 c.rpc.rpc_eth_proof_window = 100_000;
@@ -2783,6 +2784,45 @@ impl L1TestNode {
             _tasks: tasks,
         })
     }
+}
+
+/// Builds a `createZone` transaction with pathUSD as the initial token.
+fn create_zone_request(
+    factory_address: Address,
+    admin: Address,
+    sequencers: Vec<Address>,
+    threshold: u8,
+    config: ZoneCreationConfig,
+) -> TransactionRequest {
+    use tempo_contracts::zones::ZoneFactory;
+
+    let create_zone = ZoneFactory::createZoneCall {
+        params: ZoneFactory::CreateZoneParams {
+            admin,
+            initialToken: PATH_USD_ADDRESS,
+            accessMode: config.access_mode,
+            gatewayMode: config.gateway_mode,
+            allowedAccounts: config.allowed_accounts,
+            zoneGateways: config.zone_gateways,
+            sequencers,
+            threshold,
+            rpcUrl: String::new(),
+        },
+    };
+    TransactionRequest::default()
+        .to(factory_address)
+        .input(create_zone.abi_encode().into())
+}
+
+/// Returns the portal from a successful `createZone` receipt's `ZoneCreated` event.
+fn zone_created_portal(receipt: &alloy_rpc_types_eth::TransactionReceipt) -> eyre::Result<Address> {
+    use tempo_contracts::zones::ZoneFactory;
+
+    eyre::ensure!(receipt.status(), "createZone failed");
+    let zone_created = receipt
+        .decoded_log::<ZoneFactory::ZoneCreated>()
+        .ok_or_else(|| eyre::eyre!("ZoneCreated event not found"))?;
+    Ok(zone_created.portal)
 }
 
 /// Patch a controlled post-creation test snapshot with the portal's token commitment.
@@ -4131,14 +4171,13 @@ async fn start_real_p2p_cluster_inner(
     }
     let _ = std::fs::remove_dir_all(&config_dir);
 
-    let mut nodes = Vec::with_capacity(active_nodes);
-    for (index, config) in configs.into_iter().take(active_nodes).enumerate() {
-        let additional_decryption_keys = if index == 0 {
-            Vec::new()
-        } else {
-            vec![SecretKey::from(attestation_signers[0].credential())]
-        };
-        nodes.push(
+    let nodes = try_join_all(configs.into_iter().take(active_nodes).enumerate().map(
+        |(index, config)| {
+            let additional_decryption_keys = if index == 0 {
+                Vec::new()
+            } else {
+                vec![SecretKey::from(attestation_signers[0].credential())]
+            };
             ZoneTestNode::launch_with_genesis_and_withdrawal_batch_interval_and_decryption_keys(
                 l1_rpc_urls[index].clone(),
                 portal_address,
@@ -4151,9 +4190,9 @@ async fn start_real_p2p_cluster_inner(
                 additional_decryption_keys,
                 prover_config.clone(),
             )
-            .await?,
-        );
-    }
+        },
+    ))
+    .await?;
 
     Ok(RealP2pClusterParts {
         cluster: RealP2pCluster {
