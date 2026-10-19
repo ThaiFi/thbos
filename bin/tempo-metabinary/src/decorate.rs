@@ -1,7 +1,8 @@
 //! Replaces execution callbacks of the native RPC transports in place, keeping their limits.
 
 use crate::routing::{
-    Merge, RelaySegment, Route, Router, RpcParams, internal, invalid_params, is_execution_method,
+    DEBUG_SUBSCRIBE, DEBUG_UNSUBSCRIBE, Merge, RelaySegment, Route, Router, RpcParams, internal,
+    invalid_params, is_execution_method,
 };
 use alloy_primitives::U256;
 use futures::{FutureExt as _, StreamExt as _, stream::BoxStream};
@@ -27,8 +28,6 @@ use std::{
 use tokio_util::sync::CancellationToken;
 use tracing::warn;
 
-const DEBUG_SUBSCRIBE: &str = "debug_subscribe";
-const DEBUG_UNSUBSCRIBE: &str = "debug_unsubscribe";
 const DEBUG_SUBSCRIPTION: &str = "debug_subscription";
 
 /// The API a set of methods is served on.

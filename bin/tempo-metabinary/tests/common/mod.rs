@@ -89,7 +89,7 @@ pub fn raw(value: Value) -> Box<RawValue> {
 
 fn number_of(selector: &Value) -> Option<u64> {
     match selector {
-        Value::String(tag) if tag.len() == 66 => {
+        Value::String(tag) if tag.len() == 2 + 2 * B256::len_bytes() => {
             let hash: B256 = tag.parse().ok()?;
             Some(u64::from_be_bytes(hash[24..].try_into().unwrap()) - 1)
         }

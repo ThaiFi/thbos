@@ -36,48 +36,6 @@ const BUILT_IN_CATALOG: &str = include_str!("../eras.json");
 /// Packaged catalog beside the executable, which supersedes the built-in one.
 const PACKAGED_CATALOG: &str = "tempo-eras.json";
 
-/// Returns the release's era catalog with binaries resolved against the executable's directory.
-pub(crate) fn release_catalog() -> eyre::Result<Catalog> {
-    let exe = std::env::current_exe().wrap_err("failed to locate the tempo executable")?;
-    let dir = exe
-        .parent()
-        .ok_or_eyre("tempo executable has no parent directory")?;
-    let packaged = dir.join(PACKAGED_CATALOG);
-    match std::fs::metadata(&packaged) {
-        Ok(_) => Catalog::load(&packaged),
-        Err(err) if err.kind() == io::ErrorKind::NotFound => {
-            let mut catalog: Catalog = BUILT_IN_CATALOG
-                .parse()
-                .wrap_err("invalid built-in era catalog")?;
-            catalog.resolve_binaries(dir);
-            Ok(catalog)
-        }
-        Err(err) => Err(err).wrap_err_with(|| format!("failed to inspect {}", packaged.display())),
-    }
-}
-
-/// Returns the frozen eras of `chain`, or `None` for custom and dev chains, which run natively.
-pub(crate) fn release_schedule(chain: &TempoChainSpec) -> eyre::Result<Option<ChainEras>> {
-    if !supports_release_catalog(chain) {
-        return Ok(None);
-    }
-    Ok(release_catalog()?
-        .for_chain(chain.chain_id())
-        .filter(|schedule| !schedule.eras.is_empty())
-        .cloned())
-}
-
-/// Whether `chain` is exactly a built-in chain, including fork times the genesis hash omits.
-fn supports_release_catalog(chain: &TempoChainSpec) -> bool {
-    [&**PRESTO, &**MODERATO].into_iter().any(|built_in| {
-        chain.chain_id() == built_in.chain_id()
-            && chain.genesis_hash() == built_in.genesis_hash()
-            && chain.genesis().config == built_in.genesis().config
-            && chain.inner.hardforks == built_in.inner.hardforks
-            && chain.info == built_in.info
-    })
-}
-
 /// Frozen-era workers and routing for one node.
 pub(crate) struct EraRuntime {
     workers: Arc<HistoricalWorkers>,
@@ -272,6 +230,48 @@ impl<EthApi: NativeEthApi> Backend for NativeBackend<EthApi> {
             ))
         })
     }
+}
+
+/// Returns the release's era catalog with binaries resolved against the executable's directory.
+pub(crate) fn release_catalog() -> eyre::Result<Catalog> {
+    let exe = std::env::current_exe().wrap_err("failed to locate the tempo executable")?;
+    let dir = exe
+        .parent()
+        .ok_or_eyre("tempo executable has no parent directory")?;
+    let packaged = dir.join(PACKAGED_CATALOG);
+    match std::fs::metadata(&packaged) {
+        Ok(_) => Catalog::load(&packaged),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => {
+            let mut catalog: Catalog = BUILT_IN_CATALOG
+                .parse()
+                .wrap_err("invalid built-in era catalog")?;
+            catalog.resolve_binaries(dir);
+            Ok(catalog)
+        }
+        Err(err) => Err(err).wrap_err_with(|| format!("failed to inspect {}", packaged.display())),
+    }
+}
+
+/// Returns the frozen eras of `chain`, or `None` for custom and dev chains, which run natively.
+pub(crate) fn release_schedule(chain: &TempoChainSpec) -> eyre::Result<Option<ChainEras>> {
+    if !supports_release_catalog(chain) {
+        return Ok(None);
+    }
+    Ok(release_catalog()?
+        .for_chain(chain.chain_id())
+        .filter(|schedule| !schedule.eras.is_empty())
+        .cloned())
+}
+
+/// Whether `chain` is exactly a built-in chain, including fork times the genesis hash omits.
+fn supports_release_catalog(chain: &TempoChainSpec) -> bool {
+    [&**PRESTO, &**MODERATO].into_iter().any(|built_in| {
+        chain.chain_id() == built_in.chain_id()
+            && chain.genesis_hash() == built_in.genesis_hash()
+            && chain.genesis().config == built_in.genesis().config
+            && chain.inner.hardforks == built_in.inner.hardforks
+            && chain.info == built_in.info
+    })
 }
 
 /// Returns the header timestamp of the RLP block in `debug_traceBlock` params.

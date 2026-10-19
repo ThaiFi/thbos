@@ -4,7 +4,7 @@ use crate::{
     catalog::FrozenEra,
     handshake::{WorkerIdentity, wait_for_worker},
     process::{shutdown_children, spawn_child},
-    routing::{RpcParams, unavailable, unsupported},
+    routing::{DEBUG_SUBSCRIBE, DEBUG_UNSUBSCRIBE, RpcParams, unavailable, unsupported},
 };
 use eyre::{OptionExt as _, WrapErr as _, bail, ensure, eyre};
 use futures::{StreamExt as _, stream::BoxStream};
@@ -45,25 +45,6 @@ const FAILURE_COOLDOWN: Duration = Duration::from_secs(30);
 
 /// Default [`WorkerContext::startup_timeout`].
 pub const DEFAULT_STARTUP_TIMEOUT: Duration = Duration::from_secs(120);
-
-/// Node configuration workers inherit.
-#[derive(Debug, Clone)]
-pub struct WorkerContext {
-    /// Path of the genesis JSON the live node runs.
-    pub chain: String,
-    /// The node's datadir.
-    pub datadir: PathBuf,
-    /// Custom static files directory, if configured.
-    pub static_files_path: Option<PathBuf>,
-    /// Custom RocksDB directory, if configured.
-    pub rocksdb_path: Option<PathBuf>,
-    /// Serialized RPC configuration passed through `--rpc-config`.
-    pub rpc_config: PathBuf,
-    /// Chain workers must serve.
-    pub identity: WorkerIdentity,
-    /// Time a worker may take to answer the handshake.
-    pub startup_timeout: Duration,
-}
 
 /// The frozen-era workers of one node.
 pub struct HistoricalWorkers {
@@ -128,7 +109,6 @@ impl HistoricalWorkers {
         era: usize,
         params: RpcParams,
     ) -> RpcResult<BoxStream<'static, Box<RawValue>>> {
-        const METHOD: &str = "debug_subscribe";
         let worker = self
             .get(era)
             .await
@@ -139,11 +119,11 @@ impl HistoricalWorkers {
             .request_timeout(Duration::MAX)
             .build(format!("ws://{}:{}", Ipv4Addr::LOCALHOST, worker.port))
             .await
-            .map_err(|err| self.call_error(era, METHOD, err))?;
+            .map_err(|err| self.call_error(era, DEBUG_SUBSCRIBE, err))?;
         let subscription = client
-            .subscribe::<Box<RawValue>, _>(METHOD, params, "debug_unsubscribe")
+            .subscribe::<Box<RawValue>, _>(DEBUG_SUBSCRIBE, params, DEBUG_UNSUBSCRIBE)
             .await
-            .map_err(|err| self.call_error(era, METHOD, err))?;
+            .map_err(|err| self.call_error(era, DEBUG_SUBSCRIBE, err))?;
         let state = (subscription, client, worker);
         Ok(
             futures::stream::unfold(state, async |(mut subscription, client, worker)| {
@@ -356,6 +336,25 @@ impl HistoricalWorkers {
             err => unavailable(format!("era RPC unavailable: {err}")),
         }
     }
+}
+
+/// Node configuration workers inherit.
+#[derive(Debug, Clone)]
+pub struct WorkerContext {
+    /// Path of the genesis JSON the live node runs.
+    pub chain: String,
+    /// The node's datadir.
+    pub datadir: PathBuf,
+    /// Custom static files directory, if configured.
+    pub static_files_path: Option<PathBuf>,
+    /// Custom RocksDB directory, if configured.
+    pub rocksdb_path: Option<PathBuf>,
+    /// Serialized RPC configuration passed through `--rpc-config`.
+    pub rpc_config: PathBuf,
+    /// Chain workers must serve.
+    pub identity: WorkerIdentity,
+    /// Time a worker may take to answer the handshake.
+    pub startup_timeout: Duration,
 }
 
 /// A worker's endpoint. Holding it keeps the worker from being reaped as idle.

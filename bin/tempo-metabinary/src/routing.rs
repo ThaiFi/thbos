@@ -18,6 +18,12 @@ pub const UNSUPPORTED_CODE: i32 = -32004;
 /// Error code backends return for blocks they cannot resolve.
 pub const UNKNOWN_BLOCK_CODE: i32 = -32001;
 
+/// The subscription method that relays historical `traceChain` segments.
+pub(crate) const DEBUG_SUBSCRIBE: &str = "debug_subscribe";
+
+/// The unsubscription method paired with [`DEBUG_SUBSCRIBE`].
+pub(crate) const DEBUG_UNSUBSCRIBE: &str = "debug_unsubscribe";
+
 /// Largest `reth_getBlockExecutionOutcome` block count, matching the native limit.
 const MAX_EXECUTION_OUTCOME_BLOCKS: u64 = 128;
 
@@ -28,298 +34,6 @@ const TRACE_CHAIN_END: &[&str] = &["end_inclusive", "endInclusive"];
 const STATE_CONTEXT: &[&str] = &["state_context", "stateContext"];
 const SIM_OVERRIDES: &[&str] = &["sim_overrides", "simOverrides"];
 const OVERRIDE_TIME: &[&str] = &["time", "timestamp"];
-
-/// Prefixes of namespaces that never execute blocks.
-const NATIVE_PREFIXES: &[&str] = &[
-    "engine_",
-    "net_",
-    "web3_",
-    "rpc_",
-    "txpool_",
-    "admin_",
-    "miner_",
-    "operator_",
-    "consensus_",
-    "token_",
-];
-
-/// Reviewed methods that only read stored data or don't execute.
-const NATIVE_METHODS: &[&str] = &[
-    "reth_newPayload",
-    "reth_forkchoiceUpdated",
-    "eth_subscribe",
-    "eth_unsubscribe",
-    "eth_protocolVersion",
-    "eth_syncing",
-    "eth_coinbase",
-    "eth_accounts",
-    "eth_blockNumber",
-    "eth_chainId",
-    "eth_capabilities",
-    "eth_getBlockByHash",
-    "eth_getBlockByNumber",
-    "eth_getBlockTransactionCountByHash",
-    "eth_getBlockTransactionCountByNumber",
-    "eth_getUncleCountByBlockHash",
-    "eth_getUncleCountByBlockNumber",
-    "eth_getBlockReceipts",
-    "eth_getUncleByBlockHashAndIndex",
-    "eth_getUncleByBlockNumberAndIndex",
-    "eth_getRawTransactionByHash",
-    "eth_getTransactionByHash",
-    "eth_getRawTransactionByBlockHashAndIndex",
-    "eth_getRawTransactionByBlockNumberAndIndex",
-    "eth_getTransactionByBlockHashAndIndex",
-    "eth_getTransactionByBlockNumberAndIndex",
-    "eth_getTransactionBySenderAndNonce",
-    "eth_pendingTransactions",
-    "eth_getTransactionReceipt",
-    "eth_getBalance",
-    "eth_getStorageAt",
-    "eth_getStorageValues",
-    "eth_getTransactionCount",
-    "eth_getCode",
-    "eth_getHeaderByNumber",
-    "eth_getHeaderByHash",
-    "eth_gasPrice",
-    "eth_getAccount",
-    "eth_maxPriorityFeePerGas",
-    "eth_baseFee",
-    "eth_blobBaseFee",
-    "eth_mining",
-    "eth_hashrate",
-    "eth_getWork",
-    "eth_submitHashrate",
-    "eth_submitWork",
-    "eth_sendTransaction",
-    "eth_sendRawTransaction",
-    "eth_sendRawTransactionSync",
-    "eth_sendRawTransactionConditional",
-    "eth_sign",
-    "eth_signTransaction",
-    "eth_signTypedData",
-    "eth_fillTransaction",
-    "eth_getProof",
-    "eth_getMultiProof",
-    "eth_getAccountInfo",
-    "eth_getLogs",
-    "eth_newFilter",
-    "eth_newBlockFilter",
-    "eth_newPendingTransactionFilter",
-    "eth_getFilterChanges",
-    "eth_getFilterLogs",
-    "eth_uninstallFilter",
-    "eth_getTransactions",
-    "eth_config",
-    "tempo_fundAddress",
-    "tempo_forkSchedule",
-    "debug_getRawHeader",
-    "debug_getRawBlock",
-    "debug_getRawTransaction",
-    "debug_getRawTransactions",
-    "debug_getRawReceipts",
-    "debug_getBadBlocks",
-    "debug_clearTxpool",
-    "debug_chaindbCompact",
-    "debug_chaindbProperty",
-    "debug_chainConfig",
-    "debug_codeByHash",
-    "debug_dbAncient",
-    "debug_dbAncients",
-    "debug_dbGet",
-    "debug_dumpBlock",
-    "debug_freeOSMemory",
-    "debug_gcStats",
-    "debug_getAccessibleState",
-    "debug_accountRange",
-    "debug_getModifiedAccountsByNumber",
-    "debug_getModifiedAccountsByHash",
-    "debug_memStats",
-    "debug_preimage",
-    "debug_printBlock",
-    "debug_seedHash",
-    "debug_setGCPercent",
-    "debug_setHead",
-    "debug_setTrieFlushInterval",
-    // Stubs in the pinned backend.
-    "debug_standardTraceBlockToFile",
-    "debug_storageRangeAt",
-    "debug_standardTraceBadBlockToFile",
-    "debug_stateRootWithUpdates",
-    "reth_getBalanceChangesInBlock",
-    "reth_jit",
-    "ots_getApiLevel",
-    "ots_getHeaderByNumber",
-    "erigon_getHeaderByNumber",
-    "ots_hasCode",
-    "ots_getBlockDetails",
-    "ots_getBlockDetailsByHash",
-    "ots_getBlockTransactions",
-    "ots_getTransactionBySenderAndNonce",
-    "ots_searchTransactionsBefore",
-    "ots_searchTransactionsAfter",
-];
-
-/// Node-specific operations the router needs. Implemented by the chain adapter.
-pub trait Backend: Send + Sync {
-    /// Resolves a tag, number, hash, or EIP-1898 selector, or fails with [`UNKNOWN_BLOCK_CODE`].
-    fn block<'a>(&'a self, selector: &'a Value) -> BoxFuture<'a, RpcResult<BlockMetadata>>;
-
-    /// Returns the timestamp of the block containing `hash`, `None` for pooled or unknown txs.
-    fn transaction_timestamp<'a>(
-        &'a self,
-        hash: &'a Value,
-    ) -> BoxFuture<'a, RpcResult<Option<u64>>>;
-
-    /// Forwards a call to frozen era `era`.
-    fn forward<'a>(
-        &'a self,
-        era: usize,
-        method: &'a str,
-        params: RpcParams,
-    ) -> BoxFuture<'a, RpcResult<Box<RawValue>>>;
-
-    /// Opens a `debug_subscribe` subscription on frozen era `era`, yielding raw results.
-    fn subscribe<'a>(
-        &'a self,
-        era: usize,
-        params: RpcParams,
-    ) -> BoxFuture<'a, RpcResult<BoxStream<'static, Box<RawValue>>>>;
-
-    /// Decodes the header timestamp of the RLP block in `debug_traceBlock` params.
-    fn raw_block_timestamp(&self, params: &RpcParams) -> RpcResult<u64>;
-
-    /// Merges consecutive `reth_getBlockExecutionOutcome` results, oldest first.
-    fn merge_execution_outcomes(&self, parts: Vec<Box<RawValue>>) -> RpcResult<Box<RawValue>>;
-}
-
-/// A resolved canonical or pending block.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct BlockMetadata {
-    /// Block number.
-    pub number: u64,
-    /// Block hash.
-    pub hash: B256,
-    /// Block timestamp in seconds.
-    pub timestamp: u64,
-}
-
-impl BlockMetadata {
-    /// Pins `selector` to this block, keeping explicit hashes (and `requireCanonical`) verbatim.
-    pub fn pin(&self, selector: &Value, number_only: bool) -> Value {
-        if is_explicit_hash(selector) {
-            selector.clone()
-        } else if number_only {
-            hex(self.number)
-        } else {
-            json!({ "blockHash": self.hash })
-        }
-    }
-}
-
-/// JSON-RPC params: a positional array, a named object, or null. Forwarded in the same shape.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RpcParams(pub Value);
-
-impl RpcParams {
-    /// Returns the param at `index`, or under the first of `names` present. Null is absent.
-    pub fn get(&self, index: usize, names: &[&str]) -> Option<&Value> {
-        match &self.0 {
-            Value::Array(params) => params.get(index),
-            Value::Object(params) => names.iter().find_map(|name| params.get(*name)),
-            _ => None,
-        }
-        .filter(|value| !value.is_null())
-    }
-
-    /// Writes the param at `index`, or under the caller's spelling of `names` (else `names[0]`).
-    pub fn set(&mut self, index: usize, names: &[&str], value: Value) {
-        if self.0.is_null() {
-            self.0 = Value::Array(Vec::new());
-        }
-        match &mut self.0 {
-            Value::Array(params) => {
-                if params.len() <= index {
-                    params.resize(index + 1, Value::Null);
-                }
-                params[index] = value;
-            }
-            Value::Object(params) => {
-                let name = names
-                    .iter()
-                    .find(|name| params.contains_key(**name))
-                    .unwrap_or(&names[0]);
-                params.insert((*name).to_owned(), value);
-            }
-            // Rejected by `ensure_shape` before any write.
-            _ => {}
-        }
-    }
-
-    fn ensure_shape(&self) -> RpcResult<()> {
-        match self.0 {
-            Value::Null | Value::Array(_) | Value::Object(_) => Ok(()),
-            _ => Err(invalid_params("params must be an array or an object")),
-        }
-    }
-}
-
-impl ToRpcParams for RpcParams {
-    fn to_rpc_params(self) -> Result<Option<Box<RawValue>>, serde_json::Error> {
-        match self.0 {
-            Value::Null => Ok(None),
-            params => serde_json::value::to_raw_value(&params).map(Some),
-        }
-    }
-}
-
-/// Where a request executes.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Route {
-    /// The live era executes the request natively, with its original params.
-    Live,
-    /// A frozen era executes the whole request.
-    Era(usize, RpcParams),
-    /// A canonical range split into non-empty, ascending, single-era segments run in order.
-    Split {
-        /// Era and params of each segment.
-        segments: Vec<(usize, RpcParams)>,
-        /// How segment results combine.
-        merge: Merge,
-    },
-    /// A historical `traceChain` subscription, chaining one upstream subscription per segment.
-    Relay {
-        /// Segments in block order.
-        segments: Vec<RelaySegment>,
-    },
-}
-
-/// How split results combine into the response of a single native call.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Merge {
-    /// Concatenate trace arrays, then apply the caller's pagination once over the whole range.
-    TraceFilter {
-        /// Matching traces to skip.
-        after: Option<u64>,
-        /// Maximum traces to return after skipping.
-        count: Option<u64>,
-    },
-    /// Stop at the first `null` part, then [`Backend::merge_execution_outcomes`].
-    ExecutionOutcome,
-}
-
-/// One upstream `traceChain` subscription of a relay.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RelaySegment {
-    /// Era serving the segment.
-    pub era: usize,
-    /// `["traceChain", start_exclusive, end_inclusive, opts]` in the caller's shape.
-    pub params: RpcParams,
-    /// The segment's inclusive end block.
-    pub last_block: u64,
-    /// Whether this is the relay's final segment.
-    pub is_last: bool,
-}
 
 /// Selects the era that executes each request.
 pub struct Router {
@@ -370,12 +84,8 @@ impl Router {
                 index,
                 names,
                 number_only,
+                default,
             } => {
-                let default = if method == "eth_estimateGas" {
-                    "pending"
-                } else {
-                    "latest"
-                };
                 let selector = params
                     .get(index, names)
                     .cloned()
@@ -719,6 +429,167 @@ impl Router {
     }
 }
 
+/// Where a request executes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Route {
+    /// The live era executes the request natively, with its original params.
+    Live,
+    /// A frozen era executes the whole request.
+    Era(usize, RpcParams),
+    /// A canonical range split into non-empty, ascending, single-era segments run in order.
+    Split {
+        /// Era and params of each segment.
+        segments: Vec<(usize, RpcParams)>,
+        /// How segment results combine.
+        merge: Merge,
+    },
+    /// A historical `traceChain` subscription, chaining one upstream subscription per segment.
+    Relay {
+        /// Segments in block order.
+        segments: Vec<RelaySegment>,
+    },
+}
+
+/// How split results combine into the response of a single native call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Merge {
+    /// Concatenate trace arrays, then apply the caller's pagination once over the whole range.
+    TraceFilter {
+        /// Matching traces to skip.
+        after: Option<u64>,
+        /// Maximum traces to return after skipping.
+        count: Option<u64>,
+    },
+    /// Stop at the first `null` part, then [`Backend::merge_execution_outcomes`].
+    ExecutionOutcome,
+}
+
+/// One upstream `traceChain` subscription of a relay.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RelaySegment {
+    /// Era serving the segment.
+    pub era: usize,
+    /// `["traceChain", start_exclusive, end_inclusive, opts]` in the caller's shape.
+    pub params: RpcParams,
+    /// The segment's inclusive end block.
+    pub last_block: u64,
+    /// Whether this is the relay's final segment.
+    pub is_last: bool,
+}
+
+/// Node-specific operations the router needs. Implemented by the chain adapter.
+pub trait Backend: Send + Sync {
+    /// Resolves a tag, number, hash, or EIP-1898 selector, or fails with [`UNKNOWN_BLOCK_CODE`].
+    fn block<'a>(&'a self, selector: &'a Value) -> BoxFuture<'a, RpcResult<BlockMetadata>>;
+
+    /// Returns the timestamp of the block containing `hash`, `None` for pooled or unknown txs.
+    fn transaction_timestamp<'a>(
+        &'a self,
+        hash: &'a Value,
+    ) -> BoxFuture<'a, RpcResult<Option<u64>>>;
+
+    /// Forwards a call to frozen era `era`.
+    fn forward<'a>(
+        &'a self,
+        era: usize,
+        method: &'a str,
+        params: RpcParams,
+    ) -> BoxFuture<'a, RpcResult<Box<RawValue>>>;
+
+    /// Opens a `debug_subscribe` subscription on frozen era `era`, yielding raw results.
+    fn subscribe<'a>(
+        &'a self,
+        era: usize,
+        params: RpcParams,
+    ) -> BoxFuture<'a, RpcResult<BoxStream<'static, Box<RawValue>>>>;
+
+    /// Decodes the header timestamp of the RLP block in `debug_traceBlock` params.
+    fn raw_block_timestamp(&self, params: &RpcParams) -> RpcResult<u64>;
+
+    /// Merges consecutive `reth_getBlockExecutionOutcome` results, oldest first.
+    fn merge_execution_outcomes(&self, parts: Vec<Box<RawValue>>) -> RpcResult<Box<RawValue>>;
+}
+
+/// A resolved canonical or pending block.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BlockMetadata {
+    /// Block number.
+    pub number: u64,
+    /// Block hash.
+    pub hash: B256,
+    /// Block timestamp in seconds.
+    pub timestamp: u64,
+}
+
+impl BlockMetadata {
+    /// Pins `selector` to this block, keeping explicit hashes (and `requireCanonical`) verbatim.
+    pub fn pin(&self, selector: &Value, number_only: bool) -> Value {
+        if is_explicit_hash(selector) {
+            selector.clone()
+        } else if number_only {
+            hex(self.number)
+        } else {
+            json!({ "blockHash": self.hash })
+        }
+    }
+}
+
+/// JSON-RPC params: a positional array, a named object, or null. Forwarded in the same shape.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RpcParams(pub Value);
+
+impl RpcParams {
+    /// Returns the param at `index`, or under the first of `names` present. Null is absent.
+    pub fn get(&self, index: usize, names: &[&str]) -> Option<&Value> {
+        match &self.0 {
+            Value::Array(params) => params.get(index),
+            Value::Object(params) => names.iter().find_map(|name| params.get(*name)),
+            _ => None,
+        }
+        .filter(|value| !value.is_null())
+    }
+
+    /// Writes the param at `index`, or under the caller's spelling of `names` (else `names[0]`).
+    pub fn set(&mut self, index: usize, names: &[&str], value: Value) {
+        if self.0.is_null() {
+            self.0 = Value::Array(Vec::new());
+        }
+        match &mut self.0 {
+            Value::Array(params) => {
+                if params.len() <= index {
+                    params.resize(index + 1, Value::Null);
+                }
+                params[index] = value;
+            }
+            Value::Object(params) => {
+                let name = names
+                    .iter()
+                    .find(|name| params.contains_key(**name))
+                    .unwrap_or(&names[0]);
+                params.insert((*name).to_owned(), value);
+            }
+            // Rejected by `ensure_shape` before any write.
+            _ => {}
+        }
+    }
+
+    fn ensure_shape(&self) -> RpcResult<()> {
+        match self.0 {
+            Value::Null | Value::Array(_) | Value::Object(_) => Ok(()),
+            _ => Err(invalid_params("params must be an array or an object")),
+        }
+    }
+}
+
+impl ToRpcParams for RpcParams {
+    fn to_rpc_params(self) -> Result<Option<Box<RawValue>>, serde_json::Error> {
+        match self.0 {
+            Value::Null => Ok(None),
+            params => serde_json::value::to_raw_value(&params).map(Some),
+        }
+    }
+}
+
 /// Binary-searches the first block in `low..high` with timestamp `>= boundary`, else `high`.
 pub async fn first_block_at<E, F, Fut>(
     mut low: u64,
@@ -774,11 +645,12 @@ pub fn unknown_block() -> ErrorObjectOwned {
 /// How a method is routed.
 #[derive(Debug, Clone, Copy)]
 enum Policy {
-    /// Runs where the block selected by param `index`/`names` lives.
+    /// Runs where the block selected by param `index`/`names`, else `default`, lives.
     Block {
         index: usize,
         names: &'static [&'static str],
         number_only: bool,
+        default: &'static str,
     },
     /// `eth_feeHistory`: routed by its newest block.
     FeeHistory,
@@ -813,15 +685,21 @@ enum Policy {
 }
 
 fn policy(method: &str) -> Policy {
+    const BLOCK_NUMBER: &[&str] = &["block_number", "blockNumber"];
     let block = |index, names, number_only| Policy::Block {
         index,
         names,
         number_only,
+        default: "latest",
     };
     match method {
-        "eth_call" | "eth_estimateGas" | "eth_createAccessList" => {
-            block(1, &["block_number", "blockNumber"], false)
-        }
+        "eth_call" | "eth_createAccessList" => block(1, BLOCK_NUMBER, false),
+        "eth_estimateGas" => Policy::Block {
+            index: 1,
+            names: BLOCK_NUMBER,
+            number_only: false,
+            default: "pending",
+        },
         "debug_traceCall" => block(1, BLOCK_ID, false),
         "trace_call" | "trace_rawTransaction" => block(2, BLOCK_ID, false),
         "trace_callMany" => block(1, BLOCK_ID, false),
@@ -852,7 +730,7 @@ fn policy(method: &str) -> Policy {
         | "ots_traceTransaction" => Policy::Transaction,
         "eth_simulateV1" => Policy::Simulation {
             payload: &["opts"],
-            base: &["block_number", "blockNumber"],
+            base: BLOCK_NUMBER,
         },
         "tempo_simulateV1" => Policy::Simulation {
             payload: &["payload"],
@@ -874,7 +752,7 @@ fn policy(method: &str) -> Policy {
         "reth_getBlockExecutionOutcome" => Policy::ExecutionOutcome,
         "trace_filter" => Policy::TraceFilter,
         "debug_traceBlock" => Policy::RawBlock,
-        "debug_subscribe" => Policy::TraceChain,
+        DEBUG_SUBSCRIBE => Policy::TraceChain,
         _ if NATIVE_METHODS.contains(&method)
             || NATIVE_PREFIXES
                 .iter()
@@ -885,6 +763,137 @@ fn policy(method: &str) -> Policy {
         _ => Policy::Execution,
     }
 }
+
+/// Prefixes of namespaces that never execute blocks.
+const NATIVE_PREFIXES: &[&str] = &[
+    "engine_",
+    "net_",
+    "web3_",
+    "rpc_",
+    "txpool_",
+    "admin_",
+    "miner_",
+    "operator_",
+    "consensus_",
+    "token_",
+];
+
+/// Reviewed methods that only read stored data or don't execute.
+const NATIVE_METHODS: &[&str] = &[
+    "reth_newPayload",
+    "reth_forkchoiceUpdated",
+    "eth_subscribe",
+    "eth_unsubscribe",
+    "eth_protocolVersion",
+    "eth_syncing",
+    "eth_coinbase",
+    "eth_accounts",
+    "eth_blockNumber",
+    "eth_chainId",
+    "eth_capabilities",
+    "eth_getBlockByHash",
+    "eth_getBlockByNumber",
+    "eth_getBlockTransactionCountByHash",
+    "eth_getBlockTransactionCountByNumber",
+    "eth_getUncleCountByBlockHash",
+    "eth_getUncleCountByBlockNumber",
+    "eth_getBlockReceipts",
+    "eth_getUncleByBlockHashAndIndex",
+    "eth_getUncleByBlockNumberAndIndex",
+    "eth_getRawTransactionByHash",
+    "eth_getTransactionByHash",
+    "eth_getRawTransactionByBlockHashAndIndex",
+    "eth_getRawTransactionByBlockNumberAndIndex",
+    "eth_getTransactionByBlockHashAndIndex",
+    "eth_getTransactionByBlockNumberAndIndex",
+    "eth_getTransactionBySenderAndNonce",
+    "eth_pendingTransactions",
+    "eth_getTransactionReceipt",
+    "eth_getBalance",
+    "eth_getStorageAt",
+    "eth_getStorageValues",
+    "eth_getTransactionCount",
+    "eth_getCode",
+    "eth_getHeaderByNumber",
+    "eth_getHeaderByHash",
+    "eth_gasPrice",
+    "eth_getAccount",
+    "eth_maxPriorityFeePerGas",
+    "eth_baseFee",
+    "eth_blobBaseFee",
+    "eth_mining",
+    "eth_hashrate",
+    "eth_getWork",
+    "eth_submitHashrate",
+    "eth_submitWork",
+    "eth_sendTransaction",
+    "eth_sendRawTransaction",
+    "eth_sendRawTransactionSync",
+    "eth_sendRawTransactionConditional",
+    "eth_sign",
+    "eth_signTransaction",
+    "eth_signTypedData",
+    "eth_fillTransaction",
+    "eth_getProof",
+    "eth_getMultiProof",
+    "eth_getAccountInfo",
+    "eth_getLogs",
+    "eth_newFilter",
+    "eth_newBlockFilter",
+    "eth_newPendingTransactionFilter",
+    "eth_getFilterChanges",
+    "eth_getFilterLogs",
+    "eth_uninstallFilter",
+    "eth_getTransactions",
+    "eth_config",
+    "tempo_fundAddress",
+    "tempo_forkSchedule",
+    "debug_getRawHeader",
+    "debug_getRawBlock",
+    "debug_getRawTransaction",
+    "debug_getRawTransactions",
+    "debug_getRawReceipts",
+    "debug_getBadBlocks",
+    "debug_clearTxpool",
+    "debug_chaindbCompact",
+    "debug_chaindbProperty",
+    "debug_chainConfig",
+    "debug_codeByHash",
+    "debug_dbAncient",
+    "debug_dbAncients",
+    "debug_dbGet",
+    "debug_dumpBlock",
+    "debug_freeOSMemory",
+    "debug_gcStats",
+    "debug_getAccessibleState",
+    "debug_accountRange",
+    "debug_getModifiedAccountsByNumber",
+    "debug_getModifiedAccountsByHash",
+    "debug_memStats",
+    "debug_preimage",
+    "debug_printBlock",
+    "debug_seedHash",
+    "debug_setGCPercent",
+    "debug_setHead",
+    "debug_setTrieFlushInterval",
+    // Stubs in the pinned backend.
+    "debug_standardTraceBlockToFile",
+    "debug_storageRangeAt",
+    "debug_standardTraceBadBlockToFile",
+    "debug_stateRootWithUpdates",
+    "reth_getBalanceChangesInBlock",
+    "reth_jit",
+    "ots_getApiLevel",
+    "ots_getHeaderByNumber",
+    "erigon_getHeaderByNumber",
+    "ots_hasCode",
+    "ots_getBlockDetails",
+    "ots_getBlockDetailsByHash",
+    "ots_getBlockTransactions",
+    "ots_getTransactionBySenderAndNonce",
+    "ots_searchTransactionsBefore",
+    "ots_searchTransactionsAfter",
+];
 
 /// Reads a block-override time from `time` or its alias `timestamp`.
 fn override_time(overrides: &Map<String, Value>) -> RpcResult<Option<u64>> {
@@ -914,7 +923,7 @@ fn hex(number: u64) -> Value {
 
 fn is_explicit_hash(selector: &Value) -> bool {
     match selector {
-        Value::String(hash) => hash.len() == 66 && hash.starts_with("0x"),
+        Value::String(hash) => hash.len() == 2 + 2 * B256::len_bytes() && hash.starts_with("0x"),
         Value::Object(selector) => selector.contains_key("blockHash"),
         _ => false,
     }
