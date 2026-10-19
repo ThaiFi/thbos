@@ -44,6 +44,13 @@ enum WitnessRejection {
     WrongIdentity,
 }
 
+/// One stored-commitment and approval combination, with the error it must produce.
+struct Case {
+    stored: B256,
+    approval: Signature,
+    expected: Option<String>,
+}
+
 fn spec(salt: u8, version: u64) -> (Address, MultisigSimulationSpec) {
     let owner = Address::repeat_byte(1);
     let config = MultisigConfig {
@@ -107,11 +114,31 @@ fn real_grant_checks_state_before_cryptography(admin: bool) {
     );
     let crypto_error =
         NativeMultisigError::OwnerSignatureRecoveryFailed { approval_index: 0 }.to_string();
-    for (stored, approval, expected) in [
-        (stale, invalid, Some(state_error.clone())),
-        (stale, valid, Some(state_error)),
-        (commitment, invalid, Some(crypto_error)),
-        (commitment, valid, None),
+    for Case {
+        stored,
+        approval,
+        expected,
+    } in [
+        Case {
+            stored: stale,
+            approval: invalid,
+            expected: Some(state_error.clone()),
+        },
+        Case {
+            stored: stale,
+            approval: valid,
+            expected: Some(state_error),
+        },
+        Case {
+            stored: commitment,
+            approval: invalid,
+            expected: Some(crypto_error),
+        },
+        Case {
+            stored: commitment,
+            approval: valid,
+            expected: None,
+        },
     ] {
         let mut db = AccountDb::default();
         db.insert_commitment(signing_account, stored);
