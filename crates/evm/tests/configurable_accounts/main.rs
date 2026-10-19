@@ -50,7 +50,7 @@ impl Fixture {
     }
 
     fn with_spec(configurable: bool, spec: TempoHardfork) -> Self {
-        let owner = PrivateKeySigner::from_bytes(&B256::repeat_byte(1)).unwrap();
+        let owner = signer(1);
         let factory = Address::repeat_byte(0x71);
         let config = MultisigConfig {
             salt: B256::ZERO,
@@ -100,23 +100,7 @@ impl Fixture {
     }
 
     fn signed(&self, nonce: u64, calls: Vec<Call>) -> AASigned {
-        let tx = TempoTransaction {
-            chain_id: 1,
-            nonce,
-            gas_limit: 1_000_000,
-            calls,
-            ..Default::default()
-        };
-        let digest = multisig_digest(tx.signature_hash(), self.account, self.config.version);
-        let signature = MultisigSignature::try_new(
-            self.account,
-            self.config.clone(),
-            vec![PrimitiveSignature::Secp256k1(
-                self.owner.sign_hash_sync(&digest).unwrap(),
-            )],
-        )
-        .unwrap();
-        tx.into_signed(TempoSignature::Multisig(signature))
+        multisig_signed(self, aa_tx(nonce, calls))
     }
 
     fn getter(&self) -> Call {
@@ -251,6 +235,25 @@ fn aa_tx(nonce: u64, calls: Vec<Call>) -> TempoTransaction {
         key_authorization: None,
         tempo_authorization_list: Vec::new(),
     }
+}
+
+/// The deterministic test key whose private key is `seed` repeated.
+fn signer(seed: u8) -> PrivateKeySigner {
+    PrivateKeySigner::from_bytes(&B256::repeat_byte(seed)).unwrap()
+}
+
+/// Signs `tx` as the account's native multisig, with the fixture's current configuration.
+fn multisig_signed(f: &Fixture, tx: TempoTransaction) -> AASigned {
+    let digest = multisig_digest(tx.signature_hash(), f.account, f.config.version);
+    let signature = MultisigSignature::try_new(
+        f.account,
+        f.config.clone(),
+        vec![PrimitiveSignature::Secp256k1(
+            f.owner.sign_hash_sync(&digest).unwrap(),
+        )],
+    )
+    .unwrap();
+    tx.into_signed(TempoSignature::Multisig(signature))
 }
 
 fn abi_owners(config: &MultisigConfig) -> Vec<INativeMultisig::MultisigOwner> {

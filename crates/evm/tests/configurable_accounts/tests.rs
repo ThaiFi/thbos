@@ -456,7 +456,7 @@ fn native_rotation_rejects_access_keys_and_callbacks() {
         };
         let rotation = Fixture::rotation(&f.config, &next);
         let tx = if access_key {
-            let delegate = PrivateKeySigner::from_bytes(&B256::repeat_byte(2)).unwrap();
+            let delegate = signer(2);
             let mut authorization =
                 KeyAuthorization::unrestricted(1, SignatureType::Secp256k1, delegate.address());
             if admin {
@@ -484,16 +484,7 @@ fn native_rotation_rejects_access_keys_and_callbacks() {
                 key_authorization: Some(authorization.into_signed(approval)),
                 ..Default::default()
             };
-            let signature = delegate
-                .sign_hash_sync(&KeychainSignature::signing_hash(
-                    tx.signature_hash(),
-                    f.account,
-                ))
-                .unwrap();
-            tx.into_signed(TempoSignature::Keychain(KeychainSignature::new(
-                f.account,
-                PrimitiveSignature::Secp256k1(signature),
-            )))
+            keychain_signed(tx, &delegate, f.account)
         } else {
             // Forward calldata to the precompile and bubble its revert data.
             let code = [
@@ -989,8 +980,7 @@ fn native_grant_recipient_code_change_rejects_stale_replay() {
         key_authorization: Some(grant.into_signed(approval)),
         ..Default::default()
     };
-    let signature = f.owner.sign_hash_sync(&tx.signature_hash()).unwrap();
-    let signed = tx.into_signed(signature.into());
+    let signed = f.sign_primitive(tx);
     let output = f
         .evm
         .transact(TempoTxEnv::from_recovered_tx(&signed, f.account))
@@ -1087,7 +1077,7 @@ fn native_signed_parent_delegate_case(outcome: GrantOutcome, gas_price: u128) {
     for parent_native in [false, true] {
         for delegate_native in [false, true] {
             let mut f = Fixture::with_parent(parent_native);
-            let signer = PrivateKeySigner::from_bytes(&B256::repeat_byte(2)).unwrap();
+            let signer = signer(2);
             let config = MultisigConfig {
                 salt: B256::repeat_byte(2),
                 version: 0,
@@ -1109,15 +1099,7 @@ fn native_signed_parent_delegate_case(outcome: GrantOutcome, gas_price: u128) {
             let initial_limit = 100 + fee_budget;
             let reverter = Address::repeat_byte(0x55);
             let revert = f.install_contract(reverter, bytes!("60006000fd").to_vec());
-            StorageCtx::enter_ctx(f.evm.ctx_mut(), StorageActions::disabled(), || {
-                TIP20Setup::path_usd(f.owner.address())
-                    .with_issuer(f.owner.address())
-                    .with_mint(parent, U256::from(initial_balance))
-                    .apply()
-            })
-            .unwrap();
-            let state = f.evm.ctx_mut().journaled_state.finalize();
-            f.evm.db_mut().commit(state);
+            fund(&mut f, parent, initial_balance);
             let mut targets = vec![NATIVE_MULTISIG_ADDRESS, PATH_USD_ADDRESS];
             if outcome != GrantOutcome::ScopeRejectionAndRetry {
                 targets.push(reverter);
@@ -1466,7 +1448,7 @@ fn native_first_transaction_can_rotate_configuration() {
 fn native_rotation_authorizes_next_transaction_in_same_block() {
     let mut f = Fixture::new();
     let block = f.evm.ctx_mut().block.clone();
-    let next_owner = PrivateKeySigner::from_bytes(&B256::repeat_byte(2)).unwrap();
+    let next_owner = signer(2);
     let next = MultisigConfig {
         version: 1,
         owners: vec![MultisigOwner {
@@ -1546,9 +1528,7 @@ fn native_batch_rotation_failure(registered: bool, halt: bool) {
     let v1 = MultisigConfig {
         version: 1,
         owners: vec![MultisigOwner {
-            owner: PrivateKeySigner::from_bytes(&B256::repeat_byte(2))
-                .unwrap()
-                .address(),
+            owner: signer(2).address(),
             weight: 1,
         }],
         ..f.config.clone()
@@ -1556,9 +1536,7 @@ fn native_batch_rotation_failure(registered: bool, halt: bool) {
     let v2 = MultisigConfig {
         version: 2,
         owners: vec![MultisigOwner {
-            owner: PrivateKeySigner::from_bytes(&B256::repeat_byte(3))
-                .unwrap()
-                .address(),
+            owner: signer(3).address(),
             weight: 1,
         }],
         ..f.config.clone()
@@ -1606,10 +1584,6 @@ fn native_batch_rotation_failure(registered: bool, halt: bool) {
     assert_eq!(output.result.logs().len(), 2);
     f.evm.db_mut().commit(output.state);
     assert_eq!(f.commitment(), v2.commitment().unwrap());
-}
-
-fn signer(seed: u8) -> PrivateKeySigner {
-    PrivateKeySigner::from_bytes(&B256::repeat_byte(seed)).unwrap()
 }
 
 /// Weight-one owners in the ascending order a configuration requires.
@@ -1762,17 +1736,7 @@ fn grant_key(f: &mut Fixture, nonce: u64, key: &PrivateKeySigner, admin: bool, e
 
 /// A transaction signed by the access key `key` on behalf of the account.
 fn keychain_tx(f: &Fixture, key: &PrivateKeySigner, nonce: u64, calls: Vec<Call>) -> AASigned {
-    let tx = aa_tx(nonce, calls);
-    let signature = key
-        .sign_hash_sync(&KeychainSignature::signing_hash(
-            tx.signature_hash(),
-            f.account,
-        ))
-        .unwrap();
-    tx.into_signed(TempoSignature::Keychain(KeychainSignature::new(
-        f.account,
-        PrimitiveSignature::Secp256k1(signature),
-    )))
+    keychain_signed(aa_tx(nonce, calls), key, f.account)
 }
 
 /// A contract that forwards its calldata to the multisig precompile and reverts with the result.
@@ -2404,10 +2368,8 @@ fn eoa_migration_preserves_account_state() {
 #[test]
 fn eoa_migration_then_multisig_and_rotation() {
     let mut f = Fixture::with_parent(false);
-    let config = f.upgraded(1, owner_set(vec![f.owner.address()]));
-    let tx = f.primitive(3, vec![Fixture::upgrade(&config)]);
-    let result = f.run(&tx);
-    assert_upgraded(&mut f, &result, &config);
+    let owner = f.owner.address();
+    let config = migrate(&mut f, 3, owner);
 
     // The next transaction's witness uses the event's salt at version 1.
     f.config = config.clone();
@@ -2424,7 +2386,7 @@ fn eoa_migration_then_multisig_and_rotation() {
     let next = MultisigConfig {
         version: 2,
         owners: owner_set(vec![next_owner.address()]),
-        ..config.clone()
+        ..config
     };
     let tx = f.signed(5, vec![Fixture::rotation(&config, &next), f.getter()]);
     let result = f.run(&tx);
@@ -2520,20 +2482,6 @@ where
 
 fn retired(account: Address, role: RootKeyRole) -> TempoInvalidTransaction {
     TempoInvalidTransaction::RootKeyRetired { account, role }
-}
-
-/// Signs `tx` as the account's native multisig, with the fixture's current configuration.
-fn multisig_signed(f: &Fixture, tx: TempoTransaction) -> AASigned {
-    let digest = multisig_digest(tx.signature_hash(), f.account, f.config.version);
-    let signature = MultisigSignature::try_new(
-        f.account,
-        f.config.clone(),
-        vec![PrimitiveSignature::Secp256k1(
-            f.owner.sign_hash_sync(&digest).unwrap(),
-        )],
-    )
-    .unwrap();
-    tx.into_signed(TempoSignature::Multisig(signature))
 }
 
 /// `tx` with `payer` as its fee payer, for sender `sender`.
@@ -2854,7 +2802,7 @@ fn retired_root_keeps_owner_parent_and_sender_authority() {
         "the transfer and the fee both come from X"
     );
     // Root-level keychain administration (no access key) is still X's to use.
-    let tx = multisig_signed(&f, aa_tx(7, vec![revoke]));
+    let tx = f.signed(7, vec![revoke]);
     let result = f.run(&tx);
     assert!(result.is_success(), "{result:?}");
     let tx = keychain_tx(&f, &old_key, 8, vec![f.getter()]);
@@ -3626,12 +3574,7 @@ fn send_listed(
     calls: Vec<Call>,
     access_list: AccessList,
 ) -> ExecutionResult<HaltReason> {
-    let nonce = f
-        .evm
-        .db_mut()
-        .basic(sender)
-        .unwrap()
-        .map_or(0, |info| info.nonce);
+    let nonce = nonce_of(f, sender);
     let tx = f.sign_primitive(TempoTransaction {
         access_list,
         ..aa_tx(nonce, calls)
@@ -4269,12 +4212,7 @@ fn bool_query(f: &mut Fixture, call: Call, warm: Option<Address>, label: &str) -
             .collect(),
     );
     let relayer = signer(9).address();
-    let nonce = f
-        .evm
-        .db_mut()
-        .basic(relayer)
-        .unwrap()
-        .map_or(0, |info| info.nonce);
+    let nonce = nonce_of(f, relayer);
     let tx = f.sign_primitive(TempoTransaction {
         access_list,
         ..aa_tx(nonce, vec![call])
