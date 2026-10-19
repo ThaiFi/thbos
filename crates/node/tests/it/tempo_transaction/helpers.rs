@@ -17,6 +17,7 @@ use alloy::{
 use alloy_primitives::TxKind;
 use core::num::NonZeroU64;
 use eyre::WrapErr;
+use reth_revm::context_interface::cfg::gas::COLD_ACCOUNT_ACCESS_COST;
 use tempo_chainspec::spec::TEMPO_T1_BASE_FEE;
 use tempo_contracts::precompiles::DEFAULT_FEE_TOKEN;
 use tempo_node::rpc::TempoTransactionRequest;
@@ -919,16 +920,13 @@ pub(crate) async fn assert_batch_recipient_balances(
     Ok(())
 }
 
-/// Gas that a fee payer signature adds from T14: the sponsor's account is read to check that its
-/// root key is still active, which costs one cold account access.
-const FEE_PAYER_ACCESS_GAS: u64 = 2_600;
-
 /// Raises the gas limit of a transaction that a fee payer is about to sign.
 ///
-/// `eth_fillTransaction` estimates without a fee payer, so its gas limit lacks the charge for the
-/// sponsor's account access. Before T14 the extra limit only goes unused.
+/// From T14 a fee payer signature costs one cold account access: the sponsor's account is read to
+/// check that its root key is still active. `eth_fillTransaction` estimates without a fee payer,
+/// so its gas limit lacks that charge. Before T14 the extra limit only goes unused.
 pub(crate) fn add_fee_payer_access_gas(tx: &mut TempoTransaction) {
-    tx.gas_limit += FEE_PAYER_ACCESS_GAS;
+    tx.gas_limit += COLD_ACCOUNT_ACCESS_COST;
 }
 
 pub(crate) fn sign_fee_payer(
