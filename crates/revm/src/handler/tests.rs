@@ -100,25 +100,105 @@ fn native_fixture() -> TestHandlerEvm {
 #[test]
 fn native_registration_charges_empty_sender_creation_once() {
     let gas_params = tempo_gas_params(TempoHardfork::T14);
-    for (nonce_key, funded) in [
-        (U256::ZERO, false),
-        (U256::ONE, false),
-        (TEMPO_EXPIRING_NONCE_KEY, false),
-        (TEMPO_EXPIRING_NONCE_KEY, true),
+    struct Row {
+        nonce_key: U256,
+        first_call_create: bool,
+        funded: bool,
+        sender_nonce: u64,
+        creation_charges: u64,
+    }
+    // Each row charges TIP-1000's new-account cost exactly once, except where the nonce write
+    // of `nonce_key == 0` creates the account or the sender already exists.
+    for Row {
+        nonce_key,
+        first_call_create,
+        funded,
+        sender_nonce,
+        creation_charges,
+    } in [
+        Row {
+            nonce_key: U256::ZERO,
+            first_call_create: false,
+            funded: false,
+            sender_nonce: 0,
+            creation_charges: 0,
+        },
+        Row {
+            nonce_key: U256::ZERO,
+            first_call_create: true,
+            funded: false,
+            sender_nonce: 0,
+            creation_charges: 0,
+        },
+        Row {
+            nonce_key: U256::ONE,
+            first_call_create: false,
+            funded: false,
+            sender_nonce: 0,
+            creation_charges: 1,
+        },
+        Row {
+            nonce_key: U256::ONE,
+            first_call_create: true,
+            funded: false,
+            sender_nonce: 0,
+            creation_charges: 1,
+        },
+        Row {
+            nonce_key: U256::ONE,
+            first_call_create: true,
+            funded: false,
+            sender_nonce: 1,
+            creation_charges: 0,
+        },
+        Row {
+            nonce_key: TEMPO_EXPIRING_NONCE_KEY,
+            first_call_create: false,
+            funded: false,
+            sender_nonce: 0,
+            creation_charges: 1,
+        },
+        Row {
+            nonce_key: TEMPO_EXPIRING_NONCE_KEY,
+            first_call_create: true,
+            funded: false,
+            sender_nonce: 0,
+            creation_charges: 1,
+        },
+        Row {
+            nonce_key: TEMPO_EXPIRING_NONCE_KEY,
+            first_call_create: false,
+            funded: true,
+            sender_nonce: 0,
+            creation_charges: 0,
+        },
     ] {
+        let case = format!(
+            "nonce_key={nonce_key}, first_call_create={first_call_create}, funded={funded}, sender_nonce={sender_nonce}"
+        );
         let mut test = native_fixture();
         let account = test.evm.ctx.tx.caller;
         test.evm.ctx.tx.nonce = 0;
-        test.evm.ctx.tx.tempo_tx_env.as_mut().unwrap().nonce_key = nonce_key;
+        // Room for the intrinsic `CREATE` and new-account charges.
+        test.evm.ctx.tx.gas_limit = 5_000_000;
+        {
+            let aa = test.evm.ctx.tx.tempo_tx_env.as_mut().unwrap();
+            aa.nonce_key = nonce_key;
+            if first_call_create {
+                aa.aa_calls = vec![create_call(TxKind::Create)];
+            }
+        }
         if nonce_key == TEMPO_EXPIRING_NONCE_KEY {
             test.evm.ctx.tx.fee_payer = Some(Some(Address::repeat_byte(0x45)));
+            test.evm.ctx.tx.unique_tx_identifier = Some(B256::repeat_byte(0x46));
+            test.evm.ctx.tx.tempo_tx_env.as_mut().unwrap().valid_before = Some(10);
         }
-        if funded {
-            test.evm
-                .ctx
-                .journaled_state
-                .database
-                .insert_account_info(account, AccountInfo::from_balance(U256::ONE));
+        if funded || sender_nonce != 0 {
+            let balance = if funded { U256::ONE } else { U256::ZERO };
+            test.evm.ctx.journaled_state.database.insert_account_info(
+                account,
+                AccountInfo::from_balance(balance).with_nonce(sender_nonce),
+            );
         }
         let base = validate_aa_initial_tx_gas(&test.evm).unwrap();
         let config = authorizations(&test.evm.ctx.tx)[0]
@@ -127,33 +207,25 @@ fn native_registration_charges_empty_sender_creation_once() {
             .signature
             .config();
         let proof_and_write = initial_account_proof_gas(config) + 20_000;
-        let creates_account = nonce_key == TEMPO_EXPIRING_NONCE_KEY && !funded;
         // The fee payer is a role account, charged one cold access.
         let fee_payer_access = if nonce_key == TEMPO_EXPIRING_NONCE_KEY {
             gas_params.warm_storage_read_cost() + gas_params.cold_account_additional_cost()
         } else {
             0
         };
-        let actual = test.validate_initial_tx_gas();
+        // Full validation: the sender's first-call `CREATE` charge lands in state validation.
+        let actual = test.handler.validate(&mut test.evm).unwrap();
         assert_eq!(
             actual.initial_regular_gas() - base.initial_regular_gas(),
             proof_and_write
                 + fee_payer_access
-                + if creates_account {
-                    gas_params.get(GasId::new_account_cost())
-                } else {
-                    0
-                },
-            "nonce_key={nonce_key}, funded={funded}"
+                + creation_charges * gas_params.get(GasId::new_account_cost()),
+            "{case}"
         );
         assert_eq!(
             actual.initial_state_gas_final() - base.initial_state_gas_final(),
-            if creates_account {
-                gas_params.new_account_state_gas()
-            } else {
-                0
-            },
-            "nonce_key={nonce_key}, funded={funded}"
+            creation_charges * gas_params.new_account_state_gas(),
+            "{case}"
         );
     }
 }

@@ -157,6 +157,17 @@ impl TempoTxEnv {
         }
     }
 
+    /// Whether a first-call `CREATE` from an account with nonce `caller_nonce` is charged
+    /// TIP-1000's new-account cost for the sender: only with a 2D or expiring nonce key, because
+    /// the protocol nonce write of `nonce_key == 0` creates the account without it.
+    pub(crate) fn pays_first_call_create_account_gas(&self, caller_nonce: u64) -> bool {
+        self.tempo_tx_env
+            .as_ref()
+            .is_some_and(|aa| !aa.nonce_key.is_zero())
+            && self.first_call().is_some_and(|(kind, _)| kind.is_create())
+            && caller_nonce == 0
+    }
+
     /// Returns an iterator over the top-level calls in the transaction.
     ///
     /// For AA transactions, iterates over `aa_calls`. For non-AA transactions,

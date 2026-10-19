@@ -523,47 +523,53 @@ fn native_delegate_access_is_intrinsic_once(case: GrantCase) {
 fn native_delegate_creation_gas_covers_all_nonce_types() {
     let fixture = NativeAccessFixture::new();
     let gas_params = tempo_gas_params(TempoHardfork::T14);
+    // The sender's first-call `CREATE` charge never pays for the delegate's creation.
     for nonce_key in [U256::ZERO, U256::ONE, TEMPO_EXPIRING_NONCE_KEY] {
-        for funded in [false, true] {
-            let mut test = fixture.evm_with_nonce(
-                GrantCase::PrimitiveGrantAndUse,
-                Warmth::Cold,
-                1_500_000,
-                nonce_key,
-                0,
-            );
-            if funded {
-                test.evm
-                    .ctx
-                    .journaled_state
-                    .database
-                    .insert_account_info(fixture.delegate(), AccountInfo::from_balance(U256::ONE));
-            }
-            let base = validate_aa_initial_tx_gas(&test.evm).unwrap();
-            let actual = test.validate_initial_tx_gas();
-            let proof_and_access = initial_account_proof_gas(&fixture.delegate_config)
-                + 20_000
-                + gas_params.warm_storage_read_cost()
-                + gas_params.cold_account_additional_cost();
-            assert_eq!(
-                actual.initial_regular_gas() - base.initial_regular_gas(),
-                proof_and_access
-                    + if funded {
+        for first_call_create in [false, true] {
+            for funded in [false, true] {
+                let mut test = fixture.evm_with_nonce(
+                    GrantCase::PrimitiveGrantAndUse,
+                    Warmth::Cold,
+                    1_500_000,
+                    nonce_key,
+                    0,
+                );
+                if first_call_create {
+                    test.evm.ctx.tx.tempo_tx_env.as_mut().unwrap().aa_calls =
+                        vec![create_call(TxKind::Create)];
+                }
+                if funded {
+                    test.evm.ctx.journaled_state.database.insert_account_info(
+                        fixture.delegate(),
+                        AccountInfo::from_balance(U256::ONE),
+                    );
+                }
+                let base = validate_aa_initial_tx_gas(&test.evm).unwrap();
+                let actual = test.validate_initial_tx_gas();
+                let proof_and_access = initial_account_proof_gas(&fixture.delegate_config)
+                    + 20_000
+                    + gas_params.warm_storage_read_cost()
+                    + gas_params.cold_account_additional_cost();
+                assert_eq!(
+                    actual.initial_regular_gas() - base.initial_regular_gas(),
+                    proof_and_access
+                        + if funded {
+                            0
+                        } else {
+                            gas_params.get(GasId::new_account_cost())
+                        },
+                    "nonce_key={nonce_key}, first_call_create={first_call_create}, funded={funded}"
+                );
+                assert_eq!(
+                    actual.initial_state_gas_final() - base.initial_state_gas_final(),
+                    if funded {
                         0
                     } else {
-                        gas_params.get(GasId::new_account_cost())
+                        gas_params.new_account_state_gas()
                     },
-                "nonce_key={nonce_key}, funded={funded}"
-            );
-            assert_eq!(
-                actual.initial_state_gas_final() - base.initial_state_gas_final(),
-                if funded {
-                    0
-                } else {
-                    gas_params.new_account_state_gas()
-                },
-                "nonce_key={nonce_key}, funded={funded}"
-            );
+                    "nonce_key={nonce_key}, first_call_create={first_call_create}, funded={funded}"
+                );
+            }
         }
     }
 }

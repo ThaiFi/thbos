@@ -360,9 +360,11 @@ fn validate_native_roles<J: JournalTr>(
             extra_gas += initial_account_proof_gas(signature.config());
             if first {
                 extra_gas += CONFIG_COMMITMENT_REGISTRATION_GAS;
-                if loaded.data.is_empty()
-                    && !(address == tx.caller && pays_nonce_zero_account_gas(tx, spec))
-                {
+                // The sender's creation is free here only when another TIP-1000 charge pays it.
+                let sender_creation_paid = address == tx.caller
+                    && ((aa.nonce_key.is_zero() && pays_nonce_zero_account_gas(tx, spec))
+                        || tx.pays_first_call_create_account_gas(info.nonce));
+                if loaded.data.is_empty() && !sender_creation_paid {
                     extra_gas += gas.get(GasId::new_account_cost());
                     state_gas += gas.new_account_state_gas();
                 }
