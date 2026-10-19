@@ -1479,7 +1479,7 @@ fn root_tx(f: &Fixture, kind: RootTx, nonce: u64, call: Call) -> TempoTxEnvelope
 
 fn authorization(signer: &PrivateKeySigner, target: Address, nonce: u64) -> SignedAuthorization {
     let authorization = Authorization {
-        chain_id: U256::from(1),
+        chain_id: U256::ONE,
         address: target,
         nonce,
     };
@@ -1732,7 +1732,7 @@ fn eoa_migration_error_order() {
         "AA authorization list",
         |f| {
             let authorization = Authorization {
-                chain_id: U256::from(1),
+                chain_id: U256::ONE,
                 address: Address::ZERO,
                 nonce: 0,
             };
@@ -3093,7 +3093,7 @@ fn seed_eoa(f: &mut Fixture, address: Address, nonce: u64) {
         address,
         AccountInfo {
             nonce,
-            ..AccountInfo::from_balance(U256::from(1))
+            ..AccountInfo::from_balance(U256::ONE)
         },
     );
 }
@@ -3107,7 +3107,7 @@ fn account_state(f: &mut Fixture, address: Address) -> (u64, Option<Address>, bo
         .basic(address)
         .unwrap()
         .unwrap_or_else(|| AccountInfo::from_balance(U256::ZERO));
-    let delegation = (info.code_hash != KECCAK256_EMPTY).then(|| {
+    let delegation = (!info.is_empty_code_hash()).then(|| {
         let code = info
             .code
             .clone()
@@ -3274,7 +3274,7 @@ fn retired_root_authorization_list_variants() {
             let mut f = Fixture::with_parent(false);
             let mut info = AccountInfo {
                 nonce: *nonce,
-                ..AccountInfo::from_balance(U256::from(1))
+                ..AccountInfo::from_balance(U256::ONE)
             };
             if let Some(old) = delegation {
                 info = info.with_code(Bytecode::new_eip7702(*old));
@@ -4485,7 +4485,8 @@ fn retired_root_keychain_verifiers_check_in_order() {
         // the grant lookup that accepts the same signature at T13.
         let (accepted, before) = retired_key_check(TempoHardfork::T13, function, false);
         let (rejected, after) = retired_key_check(TempoHardfork::T14, function, false);
-        assert!(accepted && !rejected, "{function:?}");
+        assert!(accepted, "{function:?}");
+        assert!(!rejected, "{function:?}");
         assert_eq!(after + lookup, before + read, "{function:?}");
     }
 }
