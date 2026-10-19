@@ -44,7 +44,6 @@ alloy-evm = { workspace = true, features = ["std"] }
 alloy-sol-types.workspace = true
 
 derive_more.workspace = true
-dashmap.workspace = true
 futures.workspace = true
 tracing.workspace = true
 itertools.workspace = true
