@@ -2,6 +2,9 @@
 // Routes protocol nonces (nonce_key=0) to Reth pool
 // Routes user nonces (nonce_key>0) to minimal 2D nonce pool
 
+mod admission;
+
+use self::admission::AdmissionCombiner;
 use crate::{
     amm::AmmLiquidityCache,
     best::MergeBestTransactions,
@@ -65,6 +68,8 @@ pub struct TempoTransactionPool<Client, EvmConfig = TempoEvmConfig> {
     >,
     /// Minimal pool for 2D nonces (nonce_key > 0)
     aa_2d_pool: Arc<RwLock<AA2dPool>>,
+    /// Combines contended AA admission requests under one pool write guard.
+    aa_admissions: Arc<AdmissionCombiner>,
 }
 
 impl<Client, EvmConfig> TempoTransactionPool<Client, EvmConfig>
@@ -86,6 +91,7 @@ where
         Self {
             protocol_pool,
             aa_2d_pool: Arc::new(RwLock::new(aa_2d_pool)),
+            aa_admissions: Arc::default(),
         }
     }
 }
@@ -582,9 +588,8 @@ where
 
                     let tx = Arc::new(tx);
                     let added =
-                        self.aa_2d_pool
-                            .write()
-                            .add_transaction(tx, state_nonce, hardfork)?;
+                        self.aa_admissions
+                            .add(&self.aa_2d_pool, tx, state_nonce, hardfork)?;
                     let hash = *added.hash();
                     if let Some(pending) = added.as_pending() {
                         if pending.discarded.iter().any(|tx| *tx.hash() == hash) {
@@ -639,6 +644,7 @@ impl<Client, EvmConfig> Clone for TempoTransactionPool<Client, EvmConfig> {
         Self {
             protocol_pool: self.protocol_pool.clone(),
             aa_2d_pool: Arc::clone(&self.aa_2d_pool),
+            aa_admissions: Arc::clone(&self.aa_admissions),
         }
     }
 }
