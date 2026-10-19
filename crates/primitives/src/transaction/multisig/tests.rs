@@ -15,7 +15,8 @@ use p256::ecdsa::{
     Signature as P256Signature, SigningKey as P256SigningKey, signature::hazmat::PrehashSigner,
 };
 use proptest::prelude::*;
-use serde::Deserialize as _;
+use serde::{Deserialize as _, de::value::BorrowedBytesDeserializer};
+use serde_json::{from_value, json, to_value};
 use sha2::{Digest, Sha256};
 
 // Deliberately non-production factory fixture: TIP-1110 has not selected its public address.
@@ -141,12 +142,6 @@ fn initial_multisig_signature() -> MultisigSignature {
     .unwrap()
 }
 
-fn generate_p256_keypair() -> (P256SigningKey, B256, B256, Address) {
-    let (signing_key, pub_key_x, pub_key_y) = tt_signature::tests::generate_p256_keypair();
-    let owner = derive_p256_address(&pub_key_x, &pub_key_y);
-    (signing_key, pub_key_x, pub_key_y, owner)
-}
-
 fn sign_p256_owner_approval_with_prehash(
     signing_key: &P256SigningKey,
     digest: B256,
@@ -217,7 +212,7 @@ fn assert_multisig_decode_rejected(encoded: &[u8]) {
 
 #[cfg(feature = "serde")]
 fn decode_binary_multisig(bytes: &[u8]) -> Result<MultisigSignature, serde::de::value::Error> {
-    MultisigSignature::deserialize(serde::de::value::BorrowedBytesDeserializer::new(bytes))
+    MultisigSignature::deserialize(BorrowedBytesDeserializer::new(bytes))
 }
 
 #[cfg(feature = "serde")]
@@ -321,13 +316,13 @@ fn bounded_access_key_envelope_roundtrips_and_rejects_v1() {
     assert!(AccountSignature::from_bytes(&encoded).is_err());
     #[cfg(feature = "serde")]
     {
-        let mut json = serde_json::to_value(&envelope).unwrap();
+        let mut json = to_value(&envelope).unwrap();
         assert_eq!(
-            serde_json::from_value::<TempoSignature>(json.clone()).unwrap(),
+            from_value::<TempoSignature>(json.clone()).unwrap(),
             envelope
         );
-        json["version"] = serde_json::to_value(KeychainVersion::V1).unwrap();
-        let legacy = serde_json::from_value::<TempoSignature>(json).unwrap();
+        json["version"] = to_value(KeychainVersion::V1).unwrap();
+        let legacy = from_value::<TempoSignature>(json).unwrap();
         assert!(legacy.as_keychain().unwrap().key_id(&B256::ZERO).is_err());
     }
 }
@@ -604,7 +599,8 @@ fn verifies_weighted_owner_signatures_in_sorted_order() {
 fn noncanonical_p256_owner_prehash_flag_canonicalizes() {
     // Preserve lenient P256 flag decoding inside a multisig envelope while ensuring its
     // re-encoding uses the canonical flag and its owner approval remains valid.
-    let (signer, pub_key_x, pub_key_y, owner) = generate_p256_keypair();
+    let (signer, pub_key_x, pub_key_y) = tt_signature::tests::generate_p256_keypair();
+    let owner = derive_p256_address(&pub_key_x, &pub_key_y);
     let config = sorted_secp_config(&[(owner, 1)], 1);
     let account = config.derive_account(TEST_FACTORY).unwrap();
     let digest = multisig_digest(B256::repeat_byte(0x42), account, 0);
@@ -808,43 +804,38 @@ fn multisig_signature_serde_roundtrips_rlp_bytes() {
 
     let signature = MultisigSignature::try_new(account, config, signatures).unwrap();
     let mut encoded = alloy_rlp::encode(&signature);
-    let json = serde_json::to_value(&signature).unwrap();
+    let json = to_value(&signature).unwrap();
+    assert_eq!(json, to_value(Bytes::from(encoded.clone())).unwrap());
     assert_eq!(
-        json,
-        serde_json::to_value(Bytes::from(encoded.clone())).unwrap()
-    );
-    assert_eq!(
-        serde_json::from_value::<MultisigSignature>(json.clone()).unwrap(),
+        from_value::<MultisigSignature>(json.clone()).unwrap(),
         signature
     );
     assert_eq!(
-        serde_json::from_value::<TempoSignature>(json).unwrap(),
+        from_value::<TempoSignature>(json).unwrap(),
         TempoSignature::Multisig(signature)
     );
     encoded.push(0x80);
-    let json = serde_json::to_value(Bytes::from(encoded)).unwrap();
-    assert!(serde_json::from_value::<MultisigSignature>(json).is_err());
+    let json = to_value(Bytes::from(encoded)).unwrap();
+    assert!(from_value::<MultisigSignature>(json).is_err());
 }
 
 #[cfg(feature = "serde")]
 #[test]
 fn multisig_signature_json_bytes_reject_malformed_shapes() {
     for encoded in malformed_multisig_encodings() {
-        let json = serde_json::to_value(Bytes::from(encoded)).unwrap();
-        assert!(serde_json::from_value::<TempoSignature>(json).is_err());
+        let json = to_value(Bytes::from(encoded)).unwrap();
+        assert!(from_value::<TempoSignature>(json).is_err());
     }
 }
 
 #[cfg(feature = "serde")]
 #[test]
 fn multisig_signature_json_rejects_structured_form() {
-    let json = serde_json::json!({
+    let json = json!({
         "account": Address::repeat_byte(0x11),
         "signatures": [],
     });
-    let error = serde_json::from_value::<TempoSignature>(json)
-        .unwrap_err()
-        .to_string();
+    let error = from_value::<TempoSignature>(json).unwrap_err().to_string();
     assert!(
         error.contains("did not match any variant") || error.contains("missing field"),
         "unexpected error: {error}"

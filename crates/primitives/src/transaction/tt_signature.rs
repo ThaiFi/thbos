@@ -2271,11 +2271,10 @@ pub(crate) mod tests {
         let TempoSignature::Multisig(multisig) = signature else {
             unreachable!()
         };
-        for (signature, key_type, primitive_type) in [
+        for (signature, key_type) in [
             (
                 AccountSignature::Primitive(PrimitiveSignature::default()),
                 SignatureType::Secp256k1,
-                Some(SignatureType::Secp256k1),
             ),
             (
                 PrimitiveSignature::P256(P256SignatureWithPreHash {
@@ -2287,7 +2286,6 @@ pub(crate) mod tests {
                 })
                 .into(),
                 SignatureType::P256,
-                Some(SignatureType::P256),
             ),
             (
                 PrimitiveSignature::WebAuthn(WebAuthnSignature {
@@ -2299,13 +2297,15 @@ pub(crate) mod tests {
                 })
                 .into(),
                 SignatureType::WebAuthn,
-                Some(SignatureType::WebAuthn),
             ),
-            (multisig.into(), SignatureType::Multisig, None),
         ] {
             assert_eq!(signature.key_type(), key_type);
-            assert_eq!(signature.primitive_signature_type(), primitive_type);
+            assert_eq!(signature.primitive_signature_type(), Some(key_type));
         }
+
+        let multisig = AccountSignature::from(multisig);
+        assert_eq!(multisig.key_type(), SignatureType::Multisig);
+        assert_eq!(multisig.primitive_signature_type(), None);
     }
 
     #[test]
