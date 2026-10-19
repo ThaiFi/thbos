@@ -36,6 +36,27 @@ pub struct TempoGasFillable {
     key_authorization: Option<Option<SignedKeyAuthorization>>,
 }
 
+impl TempoGasFillable {
+    /// Adds the fee payer access to the prepared gas limit when `request` carries the fee payer
+    /// marker and no gas limit.
+    ///
+    /// The marker is stripped for the estimate because a node before T14 rejects it. From T14 the
+    /// fee payer signature costs one cold account access that the estimate cannot see. The fork is
+    /// not known here, so the access is added at every fork: a node before T14 does not charge it
+    /// and the unused gas is refunded.
+    fn with_fee_payer_access(mut self, request: Option<&TempoTransactionRequest>) -> Self {
+        if let Some(request) = request
+            && request.fee_payer_signature == Some(FEE_PAYER_SIGNATURE_MARKER)
+            && request.gas_limit().is_none()
+        {
+            let (GasFillable::Legacy { gas_limit, .. } | GasFillable::Eip1559 { gas_limit, .. }) =
+                &mut self.gas;
+            *gas_limit = gas_limit.saturating_add(FEE_PAYER_ACCESS_GAS);
+        }
+        self
+    }
+}
+
 impl TxFiller<TempoNetwork> for TempoGasFiller {
     type Fillable = TempoGasFillable;
 
@@ -77,23 +98,12 @@ impl TxFiller<TempoNetwork> for TempoGasFiller {
         if let Some(resolved) = &key_authorization {
             estimate_request.key_authorization = resolved.clone();
         }
-        let mut gas = <GasFiller as TxFiller<TempoNetwork>>::prepare(
+        let gas = <GasFiller as TxFiller<TempoNetwork>>::prepare(
             &self.inner,
             provider,
             &estimate_request,
         )
         .await?;
-        // The marker is stripped for the estimate because a node before T14 rejects it. From T14
-        // the fee payer signature costs one cold account access that the estimate cannot see. The
-        // fork is not known here, so the access is added at every fork: a node before T14 does not
-        // charge it and the unused gas is refunded.
-        if request.fee_payer_signature == Some(FEE_PAYER_SIGNATURE_MARKER)
-            && request.gas_limit().is_none()
-        {
-            let (GasFillable::Legacy { gas_limit, .. } | GasFillable::Eip1559 { gas_limit, .. }) =
-                &mut gas;
-            *gas_limit = gas_limit.saturating_add(FEE_PAYER_ACCESS_GAS);
-        }
         Ok(TempoGasFillable {
             gas,
             key_authorization,
@@ -105,6 +115,9 @@ impl TxFiller<TempoNetwork> for TempoGasFiller {
         fillable: Self::Fillable,
         tx: SendableTx<TempoNetwork>,
     ) -> TransportResult<SendableTx<TempoNetwork>> {
+        // Checked when filling rather than when preparing: `SponsorFiller` sets the marker when it
+        // fills, after this filler prepared in the same round.
+        let fillable = fillable.with_fee_payer_access(tx.as_builder());
         let mut tx =
             <GasFiller as TxFiller<TempoNetwork>>::fill(&self.inner, fillable.gas, tx).await?;
         if let Some(request) = tx.as_mut_builder()
