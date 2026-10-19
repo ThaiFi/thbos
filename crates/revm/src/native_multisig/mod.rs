@@ -450,7 +450,8 @@ fn grant_delegate(tx: &TempoTxEnv) -> Option<Address> {
         .map(|auth| auth.key_id)
 }
 
-fn account_access_gas(gas: &GasParams, is_cold: bool) -> u64 {
+/// Gas for loading one account: a warm read, plus the cold surcharge when it was not yet accessed.
+pub fn account_access_gas(gas: &GasParams, is_cold: bool) -> u64 {
     gas.warm_storage_read_cost()
         + if is_cold {
             gas.cold_account_additional_cost()
