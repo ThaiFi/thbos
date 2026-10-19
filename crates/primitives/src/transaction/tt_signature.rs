@@ -680,15 +680,6 @@ impl From<MultisigSignature> for AccountSignature {
     }
 }
 
-impl From<AccountSignature> for TempoSignature {
-    fn from(signature: AccountSignature) -> Self {
-        match signature {
-            AccountSignature::Primitive(signature) => Self::Primitive(signature),
-            AccountSignature::Multisig(signature) => Self::Multisig(signature),
-        }
-    }
-}
-
 impl TryFrom<TempoSignature> for AccountSignature {
     type Error = &'static str;
 
@@ -764,7 +755,10 @@ impl TempoSignature {
         }
 
         if data.len() > 1 && data[0] == SIGNATURE_TYPE_MULTISIG {
-            return AccountSignature::from_bytes(data).map(Self::from);
+            return match AccountSignature::from_bytes(data)? {
+                AccountSignature::Primitive(signature) => Ok(Self::Primitive(signature)),
+                AccountSignature::Multisig(signature) => Ok(Self::Multisig(signature)),
+            };
         }
 
         // Check if this is a Keychain signature before delegating to
