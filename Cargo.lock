@@ -14706,6 +14706,7 @@ dependencies = [
  "futures",
  "itertools 0.14.0",
  "metrics",
+ "moka",
  "parking_lot",
  "proptest",
  "proptest-arbitrary-interop",

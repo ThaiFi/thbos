@@ -361,6 +361,7 @@ keccak-const = "0.2.0"
 metrics = "0.24.3"
 minisign = "0.8"
 minisign-verify = "0.2"
+moka = { version = "0.12.16", features = ["sync"] }
 once_cell = { version = "1.19", default-features = false, features = ["critical-section"] }
 p256 = { version = "0.13", default-features = false }
 p384 = { version = "0.13", features = ["ecdsa", "pkcs8"] }
