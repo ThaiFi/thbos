@@ -51,10 +51,10 @@ impl NativeMultisig {
     ) -> Result<Address> {
         let factory = self.factory()?;
         let config = config(salt, 0, threshold, owners);
-        config.validate().map_err(map_config_error)?;
+        config.validate()?;
         self.storage
             .deduct_gas(initial_account_proof_gas(&config))?;
-        let account = config.derive_account(factory).map_err(map_config_error)?;
+        let account = config.derive_account(factory)?;
         if !valid_account(account, self.storage.spec()) {
             return Err(NativeMultisigError::invalid_account().into());
         }
@@ -87,13 +87,9 @@ impl NativeMultisig {
             current.threshold,
             &current.owners,
         );
-        current
-            .validate_for_account(sender)
-            .map_err(map_config_error)?;
+        current.validate_for_account(sender)?;
         let stored = self.get_config_commitment(sender)?;
-        let hash = self
-            .storage
-            .keccak256(&current.commitment_preimage().map_err(map_config_error)?)?;
+        let hash = self.storage.keccak256(&current.commitment_preimage()?)?;
         if stored.is_zero() || stored != hash {
             return Err(NativeMultisigError::invalid_config().into());
         }
@@ -102,11 +98,8 @@ impl NativeMultisig {
             .checked_add(1)
             .ok_or_else(NativeMultisigError::invalid_config)?;
         let next = config(current.salt, version, threshold, &owners);
-        next.validate_for_account(sender)
-            .map_err(map_config_error)?;
-        let hash = self
-            .storage
-            .keccak256(&next.commitment_preimage().map_err(map_config_error)?)?;
+        next.validate_for_account(sender)?;
+        let hash = self.storage.keccak256(&next.commitment_preimage()?)?;
         if hash.is_zero() {
             return Err(NativeMultisigError::invalid_config().into());
         }
@@ -192,6 +185,27 @@ pub enum UpgradeEligibility {
     PrimitiveRoot,
 }
 
+impl From<MultisigConfigError> for TempoPrecompileError {
+    fn from(error: MultisigConfigError) -> Self {
+        match error {
+            MultisigConfigError::EmptyOwners
+            | MultisigConfigError::ZeroOwner
+            | MultisigConfigError::AccountIsOwner => NativeMultisigError::invalid_multisig_owner(),
+            MultisigConfigError::TooManyOwners => NativeMultisigError::too_many_owners(),
+            MultisigConfigError::ZeroThreshold | MultisigConfigError::ThresholdExceedsWeight => {
+                NativeMultisigError::invalid_threshold()
+            }
+            MultisigConfigError::ZeroWeight | MultisigConfigError::TotalWeightExceedsMax => {
+                NativeMultisigError::invalid_weight()
+            }
+            MultisigConfigError::DuplicateOwner => NativeMultisigError::duplicate_owner(),
+            MultisigConfigError::OwnersNotAscending => NativeMultisigError::invalid_owner_order(),
+            MultisigConfigError::DerivedAccountZero => NativeMultisigError::invalid_account(),
+        }
+        .into()
+    }
+}
+
 pub const fn keccak_cost(bytes: usize) -> u64 {
     KECCAK256 + KECCAK256WORD * bytes.div_ceil(32) as u64
 }
@@ -220,25 +234,6 @@ fn config(
             })
             .collect(),
     }
-}
-
-fn map_config_error(error: MultisigConfigError) -> TempoPrecompileError {
-    match error {
-        MultisigConfigError::EmptyOwners
-        | MultisigConfigError::ZeroOwner
-        | MultisigConfigError::AccountIsOwner => NativeMultisigError::invalid_multisig_owner(),
-        MultisigConfigError::TooManyOwners => NativeMultisigError::too_many_owners(),
-        MultisigConfigError::ZeroThreshold | MultisigConfigError::ThresholdExceedsWeight => {
-            NativeMultisigError::invalid_threshold()
-        }
-        MultisigConfigError::ZeroWeight | MultisigConfigError::TotalWeightExceedsMax => {
-            NativeMultisigError::invalid_weight()
-        }
-        MultisigConfigError::DuplicateOwner => NativeMultisigError::duplicate_owner(),
-        MultisigConfigError::OwnersNotAscending => NativeMultisigError::invalid_owner_order(),
-        MultisigConfigError::DerivedAccountZero => NativeMultisigError::invalid_account(),
-    }
-    .into()
 }
 
 #[cfg(test)]
