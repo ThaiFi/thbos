@@ -706,11 +706,16 @@ async fn eoa_migration_rpc_estimate_send_and_rotate() -> eyre::Result<()> {
             .collect::<Result<Vec<_>, _>>()?;
         assert_eq!(upgraded.len(), 1);
         let event = &upgraded[0].data;
-        assert_eq!(event.account, account.address);
-        assert_eq!(event.commitment, expected);
-        assert_eq!(event.salt, account.config.salt);
-        assert_eq!(event.threshold, account.config.threshold);
-        assert_eq!(event.owners, abi_owners(&account.config));
+        assert_eq!(
+            *event,
+            INativeMultisig::AccountUpgraded {
+                account: account.address,
+                commitment: expected,
+                salt: account.config.salt,
+                threshold: account.config.threshold,
+                owners: abi_owners(&account.config),
+            }
+        );
 
         // The account is configured now, so a second upgrade reverts when simulated.
         assert_call_reverts(
@@ -1403,12 +1408,12 @@ async fn parallel_builder_skips_root_payment_after_same_block_migration() -> eyr
     assert!(live.status(), "{live:?}");
     let token = ITIP20::new(DEFAULT_FEE_TOKEN, env.provider());
     assert_eq!(token.balanceOf(live_recipient).call().await?, U256::ONE);
-    for (hash, recipient, role) in [
-        (hashes[1], retired_recipient, "sender"),
-        (hashes[2], sponsored_recipient, "fee payer"),
-    ] {
+    for (hash, (recipient, role)) in hashes[1..].iter().zip([
+        (retired_recipient, "sender"),
+        (sponsored_recipient, "fee payer"),
+    ]) {
         assert!(
-            provider.get_transaction_receipt(hash).await?.is_none(),
+            provider.get_transaction_receipt(*hash).await?.is_none(),
             "payment with a migrated account's root key as its {role} was included"
         );
         assert_eq!(token.balanceOf(recipient).call().await?, U256::ZERO);
@@ -1442,8 +1447,9 @@ async fn parallel_builder_runs_voucher_redemption_after_same_block_migration(
     let provider = tempo_provider(&env);
 
     // Each payer opens a channel to its payee.
+    let pairs = [(&migrating, &migrating_payee), (&live, &live_payee)];
     let mut opens = Vec::new();
-    for (payer, payee) in [(&migrating, &migrating_payee), (&live, &live_payee)] {
+    for (payer, payee) in pairs {
         let tx = create_basic_aa_tx(
             chain_id,
             0,
@@ -1474,10 +1480,7 @@ async fn parallel_builder_runs_voucher_redemption_after_same_block_migration(
     }
     env.setup.node.advance_block().await?;
     let mut channels = Vec::new();
-    for (hash, payer, payee) in [
-        (opens[0], &migrating, &migrating_payee),
-        (opens[1], &live, &live_payee),
-    ] {
+    for (hash, (payer, payee)) in opens.into_iter().zip(pairs) {
         let receipt = provider
             .get_transaction_receipt(hash)
             .await?
@@ -1514,10 +1517,7 @@ async fn parallel_builder_runs_voucher_redemption_after_same_block_migration(
     let migrate: TempoTxEnvelope = migrate.into_signed(signature).into();
     let reserve = ITIP20ChannelReserve::new(TIP20_CHANNEL_RESERVE_ADDRESS, env.provider());
     let mut redemptions = Vec::new();
-    for (channel, payer, payee) in [
-        (&channels[0], &migrating, &migrating_payee),
-        (&channels[1], &live, &live_payee),
-    ] {
+    for (channel, (payer, payee)) in channels.iter().zip(pairs) {
         let digest = reserve
             .getVoucherDigest(channel.id, U96::from(VOUCHER_AMOUNT))
             .call()
