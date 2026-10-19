@@ -31,9 +31,9 @@ const GOSSIP_ROUTE_QUEUE: usize = 256;
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum VerificationMode {
     /// Complete application verification before voting to notarize.
-    #[default]
     Immediate,
     /// Defer completion of application verification until voting to finalize.
+    #[default]
     Deferred,
 }
 
@@ -654,10 +654,10 @@ mod tests {
     }
 
     #[test]
-    fn verification_mode_defaults_to_immediate() {
+    fn verification_mode_defaults_to_deferred() {
         assert_eq!(
             parse(&["--dev"]).consensus.verification_mode,
-            VerificationMode::Immediate,
+            VerificationMode::Deferred,
         );
     }
 
