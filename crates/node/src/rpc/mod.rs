@@ -31,7 +31,7 @@ use tempo_precompiles::{
     NONCE_PRECOMPILE_ADDRESS, error::TempoPrecompileError, nonce::NonceManager,
     storage::StorageActions, tip20::TIP20Error,
 };
-use tempo_primitives::transaction::TEMPO_EXPIRING_NONCE_KEY;
+use tempo_primitives::transaction::{FEE_PAYER_SIGNATURE_MARKER, TEMPO_EXPIRING_NONCE_KEY};
 pub use token::{TempoToken, TempoTokenApiServer};
 
 use crate::rpc::error::TempoEthApiError;
@@ -77,7 +77,7 @@ use tempo_evm::{TempoBlockEnv, TempoInvalidTransaction};
 use tempo_primitives::{
     TEMPO_GAS_PRICE_SCALING_FACTOR, TempoHeader, TempoPrimitives, TempoReceipt, TempoTxEnvelope,
 };
-use tempo_revm::TempoTxEnv;
+use tempo_revm::{TempoTxEnv, native_multisig::account_access_gas};
 use tempo_transaction_pool::TempoTransactionPoolExt;
 use tokio::sync::Mutex;
 
@@ -363,7 +363,40 @@ impl<N> EthFees for TempoEthApi<N> where N: TempoEthApiBounds {}
 
 impl<N> Trace for TempoEthApi<N> where N: TempoEthApiBounds {}
 
-impl<N> EthCall for TempoEthApi<N> where N: TempoEthApiBounds {}
+impl<N> EthCall for TempoEthApi<N>
+where
+    N: TempoEthApiBounds,
+{
+    /// Estimates gas for `request`, which `eth_estimateGas` and `eth_fillTransaction` both use.
+    ///
+    /// From T14 a fee payer signature costs one cold account access: the fee payer's account is
+    /// read to check its root key. A request carrying [`FEE_PAYER_SIGNATURE_MARKER`] is sponsored
+    /// by a fee payer that is not known yet, so the estimate adds that access on top of the
+    /// unsponsored estimate and keeps a request gas limit as a bound on the total. Before T14 the
+    /// marker is not handled and the request is estimated as it is.
+    async fn estimate_gas_at(
+        &self,
+        mut request: RpcTxReq<Self::NetworkTypes>,
+        at: BlockId,
+        overrides: EvmOverrides,
+    ) -> Result<U256, Self::Error> {
+        if request.fee_payer_signature != Some(FEE_PAYER_SIGNATURE_MARKER) {
+            return EstimateCall::estimate_gas_at(self, request, at, overrides).await;
+        }
+        let (evm_env, _) = self.evm_env_at(at).await?;
+        if !evm_env.cfg_env.spec.is_t14() {
+            return EstimateCall::estimate_gas_at(self, request, at, overrides).await;
+        }
+        let fee_payer_access = account_access_gas(&evm_env.cfg_env.gas_params, true);
+        request.fee_payer_signature = None;
+        request.inner.gas = request
+            .inner
+            .gas
+            .map(|limit| limit.saturating_sub(fee_payer_access));
+        let estimate = EstimateCall::estimate_gas_at(self, request, at, overrides).await?;
+        Ok(estimate.saturating_add(U256::from(fee_payer_access)))
+    }
+}
 
 impl<N> GetBlockAccessList for TempoEthApi<N> where N: TempoEthApiBounds {}
 
