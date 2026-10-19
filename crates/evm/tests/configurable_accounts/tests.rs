@@ -927,9 +927,13 @@ fn block_gas(f: &mut Fixture, tx: &AASigned) -> BlockGas {
 /// An unsigned transaction on `lane` (at nonce zero, except on the simulated lane, which also
 /// disables the nonce check of `f`).
 fn lane_tx(f: &mut Fixture, lane: NonceLane, calls: Vec<Call>) -> TempoTransaction {
-    if matches!(lane, NonceLane::ProtocolSimulated) {
-        f.evm.ctx_mut().cfg.disable_nonce_check = true;
-    }
+    let nonce = match lane {
+        NonceLane::ProtocolSimulated => {
+            f.evm.ctx_mut().cfg.disable_nonce_check = true;
+            1
+        }
+        NonceLane::Protocol | NonceLane::TwoD | NonceLane::Expiring => 0,
+    };
     TempoTransaction {
         nonce_key: match lane {
             NonceLane::Protocol | NonceLane::ProtocolSimulated => U256::ZERO,
@@ -938,8 +942,7 @@ fn lane_tx(f: &mut Fixture, lane: NonceLane, calls: Vec<Call>) -> TempoTransacti
         },
         valid_before: matches!(lane, NonceLane::Expiring).then_some(EXPIRING_VALID_BEFORE),
         gas_limit: 5_000_000,
-        nonce: u64::from(matches!(lane, NonceLane::ProtocolSimulated)),
-        ..aa_tx(0, calls)
+        ..aa_tx(nonce, calls)
     }
 }
 
