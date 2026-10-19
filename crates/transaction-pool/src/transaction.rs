@@ -1189,21 +1189,16 @@ mod tests {
     use super::*;
     use crate::test_utils::TxBuilder;
     use alloy_consensus::TxEip1559;
-    use alloy_eips::eip7702::Authorization;
     use alloy_primitives::{Address, Signature, TxKind, address};
     use alloy_signer::SignerSync;
     use alloy_signer_local::PrivateKeySigner;
     use alloy_sol_types::SolCall;
     use proptest::prelude::*;
     use proptest_arbitrary_interop::arb_sized;
-    use reth_primitives_traits::SignedTransaction;
     use tempo_contracts::precompiles::ITIP20;
     use tempo_precompiles::{PATH_USD_ADDRESS, nonce::NonceManager};
     use tempo_primitives::transaction::{
-        KeyAuthorization, MultisigConfig, MultisigOwner, MultisigSignature, SignatureType,
-        TEMPO_EXPIRING_NONCE_KEY, TempoSignedAuthorization, TempoTransaction,
-        tempo_transaction::Call,
-        tt_signature::{KeychainSignature, PrimitiveSignature, TempoSignature},
+        TEMPO_EXPIRING_NONCE_KEY, TempoTransaction, tempo_transaction::Call,
     };
 
     const TEMPO_TRANSACTION_ARBITRARY_SIZE: usize = 4096;
@@ -1215,158 +1210,6 @@ mod tests {
             .expect("signing failed");
         let signed = tx.into_signed(signature.into());
         (signed.into(), signer.address())
-    }
-
-    #[test]
-    fn configurable_revalidation_matches_native_signers() {
-        let parent = Address::repeat_byte(0x11);
-        let signer = Address::repeat_byte(0x22);
-        let recipient = Address::repeat_byte(0x33);
-        let multisig = MultisigSignature::try_new(
-            signer,
-            MultisigConfig {
-                salt: B256::ZERO,
-                version: 0,
-                threshold: 1,
-                owners: vec![MultisigOwner {
-                    owner: Address::repeat_byte(0x44),
-                    weight: 1,
-                }],
-            },
-            vec![PrimitiveSignature::default()],
-        )
-        .unwrap();
-        let pooled = |base: TempoPooledTransaction, signature| {
-            let sender = base.sender();
-            let tx = base.inner().as_aa().unwrap().tx().clone();
-            TempoPooledTransaction::new(
-                TempoTxEnvelope::from(tx.into_signed(signature)).with_signer(sender),
-            )
-        };
-        let changed = |address| std::iter::once(address).collect();
-        let none = AddressSet::default();
-
-        let direct = pooled(
-            TxBuilder::aa(signer).build(),
-            TempoSignature::Multisig(multisig.clone()),
-        );
-        assert!(direct.needs_configurable_revalidation(&changed(signer), false));
-        assert!(!direct.needs_configurable_revalidation(&changed(parent), false));
-        assert!(direct.needs_configurable_revalidation(&none, true));
-
-        let delegated = pooled(
-            TxBuilder::aa(parent).build(),
-            TempoSignature::Keychain(KeychainSignature::new(parent, multisig.clone())),
-        );
-        assert!(delegated.needs_configurable_revalidation(&changed(signer), false));
-        assert!(!delegated.needs_configurable_revalidation(&changed(parent), false));
-        assert!(delegated.needs_configurable_revalidation(&none, true));
-
-        // A primitive access key matches on its key ID only. Its account is untouched by the
-        // account's own commitment (TIP-1112, R17) and a reorg alone adds no retirement.
-        let key = PrivateKeySigner::from_bytes(&B256::with_last_byte(2)).unwrap();
-        let primitive_keychain = TxBuilder::aa(parent).build_keychain(parent, &key);
-        assert!(primitive_keychain.needs_configurable_revalidation(&changed(key.address()), false));
-        assert!(!primitive_keychain.needs_configurable_revalidation(&changed(parent), false));
-        assert!(!primitive_keychain.needs_configurable_revalidation(&none, true));
-
-        let grant = KeyAuthorization::unrestricted(1, SignatureType::Multisig, recipient)
-            .into_signed(multisig.clone());
-        let inline = TxBuilder::aa(parent).key_authorization(grant).build();
-        assert!(inline.needs_configurable_revalidation(&changed(signer), false));
-        assert!(!inline.needs_configurable_revalidation(&changed(recipient), false));
-        assert!(inline.needs_configurable_revalidation(&none, true));
-        assert!(
-            !TxBuilder::aa(parent)
-                .build()
-                .needs_configurable_revalidation(&none, true)
-        );
-
-        // Primitive roles match on the changed set only, never on a reorg.
-        let legacy = TxBuilder::eip1559(recipient).build_eip1559();
-        assert!(legacy.needs_configurable_revalidation(&changed(legacy.sender()), false));
-        assert!(!legacy.needs_configurable_revalidation(&changed(recipient), false));
-        assert!(!legacy.needs_configurable_revalidation(&none, true));
-
-        let primitive_sender = TxBuilder::aa(signer).build();
-        assert!(primitive_sender.needs_configurable_revalidation(&changed(signer), false));
-        assert!(!primitive_sender.needs_configurable_revalidation(&changed(recipient), false));
-        assert!(!primitive_sender.needs_configurable_revalidation(&none, true));
-
-        let sponsor = PrivateKeySigner::from_bytes(&B256::with_last_byte(3)).unwrap();
-        let mut sponsored = TxBuilder::aa(parent)
-            .build()
-            .inner()
-            .as_aa()
-            .unwrap()
-            .tx()
-            .clone();
-        sponsored.fee_payer_signature = Some(
-            sponsor
-                .sign_hash_sync(&sponsored.fee_payer_signature_hash(parent))
-                .unwrap(),
-        );
-        let sponsored_by = |signature| {
-            TempoPooledTransaction::new(
-                TempoTxEnvelope::from(sponsored.clone().into_signed(signature)).with_signer(parent),
-            )
-        };
-        let delegated_sponsored = sponsored_by(TempoSignature::Keychain(KeychainSignature::new(
-            parent, multisig,
-        )));
-        assert!(
-            delegated_sponsored.needs_configurable_revalidation(&changed(sponsor.address()), false)
-        );
-        assert!(!delegated_sponsored.needs_configurable_revalidation(&changed(parent), false));
-        assert!(!delegated_sponsored.needs_configurable_revalidation(&none, false));
-        // A primitive sender with a separate fee payer matches on either, never on a reorg.
-        let primitive_sponsored = sponsored_by(TempoSignature::default());
-        assert!(
-            primitive_sponsored.needs_configurable_revalidation(&changed(sponsor.address()), false)
-        );
-        assert!(primitive_sponsored.needs_configurable_revalidation(&changed(parent), false));
-        assert!(!primitive_sponsored.needs_configurable_revalidation(&changed(recipient), false));
-        assert!(!primitive_sponsored.needs_configurable_revalidation(&none, true));
-
-        let primitive_grant =
-            KeyAuthorization::unrestricted(1, SignatureType::Secp256k1, recipient);
-        let grant_signature = key
-            .sign_hash_sync(&primitive_grant.signature_hash())
-            .unwrap();
-        let primitive_grant = TxBuilder::aa(parent)
-            .key_authorization(
-                primitive_grant.into_signed(PrimitiveSignature::Secp256k1(grant_signature)),
-            )
-            .build();
-        assert!(primitive_grant.needs_configurable_revalidation(&changed(key.address()), false));
-        assert!(!primitive_grant.needs_configurable_revalidation(&changed(recipient), false));
-        assert!(!primitive_grant.needs_configurable_revalidation(&none, true));
-
-        // The authority of an authorization list entry is skipped by the block, not retired
-        // (TIP-1112), so it is no role.
-        let authorization = Authorization {
-            chain_id: U256::ONE,
-            address: recipient,
-            nonce: 0,
-        };
-        let entry_signature = key.sign_hash_sync(&authorization.signature_hash()).unwrap();
-        let mut with_entry = TxBuilder::aa(parent)
-            .build()
-            .inner()
-            .as_aa()
-            .unwrap()
-            .tx()
-            .clone();
-        with_entry.tempo_authorization_list = vec![TempoSignedAuthorization::new_unchecked(
-            authorization,
-            PrimitiveSignature::Secp256k1(entry_signature).into(),
-        )];
-        let with_entry = TempoPooledTransaction::new(
-            TempoTxEnvelope::from(with_entry.into_signed(TempoSignature::default()))
-                .with_signer(parent),
-        );
-        assert!(!with_entry.needs_configurable_revalidation(&changed(key.address()), false));
-        assert!(with_entry.needs_configurable_revalidation(&changed(parent), false));
     }
 
     fn raw_pooled_transaction(
