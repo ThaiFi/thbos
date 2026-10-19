@@ -10,6 +10,7 @@ use alloy_primitives::{
 };
 use alloy_sol_types::{SolError, SolEvent, SolValue};
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+use commonware_utils::NZU64;
 use p256::ecdsa::{SigningKey, signature::hazmat::PrehashSigner};
 use reth_chainspec::EthChainSpec;
 use reth_ethereum_primitives::Block as EthereumBlock;
@@ -31,11 +32,12 @@ use reth_trie_db::{
 };
 use revm::{
     context::result::{EVMError, ExecutionResult, InvalidTransaction},
+    context_interface::cfg::GasId,
     state::EvmStorageSlot,
 };
 use serde_json::json;
 use sha2::{Digest, Sha256};
-use std::sync::Arc;
+use std::{num::NonZeroU64, sync::Arc};
 use tempo_chainspec::{
     TempoChainSpec,
     spec::{DEV, MODERATO},
@@ -60,8 +62,8 @@ use tempo_primitives::{
     account::encode_config_commitment,
     transaction::{
         AccountSignature, CallScope, KeyAuthorization, KeychainSignature, MULTISIG_CONFIG_DOMAIN,
-        SignedKeyAuthorization, TempoSignedAuthorization, TokenLimit, calc_gas_balance_spending,
-        derive_p256_address,
+        SignedKeyAuthorization, TEMPO_EXPIRING_NONCE_KEY, TempoSignedAuthorization, TokenLimit,
+        calc_gas_balance_spending, derive_p256_address,
         tt_signature::{P256SignatureWithPreHash, WebAuthnSignature, normalize_p256_s},
     },
 };
@@ -75,6 +77,9 @@ const PROBE: Address = Address::repeat_byte(0x99);
 
 /// The key kinds a keychain signature can carry: its inner signature is a primitive one.
 const KEY_KINDS: [SigKind; 3] = [SigKind::P256, SigKind::WebAuthn, SigKind::Secp256k1];
+
+/// The expiry of an expiring-nonce transaction: just after the fixture's block timestamp of 1.
+const EXPIRING_VALID_BEFORE: NonZeroU64 = NZU64!(2);
 
 /// Settled amount, deposit and close request of the channel, with the balances of its payee and
 /// payer and of the precompile that holds the deposit.
@@ -301,6 +306,31 @@ enum KeychainCheck {
     VerifyAdminRoot,
     IsAdminRoot,
     IsAdminAccessKey { key_committed: bool },
+}
+
+/// The nonce lane of a registration transaction, which decides how TIP-1000 charges the sender's
+/// creation.
+#[derive(Clone, Copy, Debug)]
+enum NonceLane {
+    Protocol,
+    TwoD,
+    Expiring,
+}
+
+/// The block regular and state gas of a transaction.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct BlockGas {
+    regular: u64,
+    state: u64,
+}
+
+impl BlockGas {
+    fn plus(self, other: Self) -> Self {
+        Self {
+            regular: self.regular + other.regular,
+            state: self.state + other.state,
+        }
+    }
 }
 
 #[test]
@@ -862,6 +892,163 @@ fn native_first_call_registration_and_retry() {
         .unwrap(),
         f.config.commitment().unwrap()
     );
+}
+
+/// Seeds `address` as an empty account, or as a non-empty one (a balance, nonce zero).
+fn seed_account(f: &mut Fixture, address: Address, empty: bool) {
+    let balance = if empty { U256::ZERO } else { U256::ONE };
+    f.evm
+        .db_mut()
+        .insert_account(address, AccountInfo::from_balance(balance));
+}
+
+/// Runs `tx` and returns its block gas.
+fn block_gas(f: &mut Fixture, tx: &AASigned) -> BlockGas {
+    let result = f.run(tx);
+    assert!(result.is_success(), "{result:?}");
+    let gas = result.gas();
+    BlockGas {
+        regular: gas.block_regular_gas_used(),
+        state: gas.block_state_gas_used(),
+    }
+}
+
+/// Gas of a nonce-zero first registration of the sender on `lane`, whose only call is a `CREATE`
+/// when `create_first` and a read of the commitment otherwise.
+fn sender_registration_gas(lane: NonceLane, create_first: bool, empty_sender: bool) -> BlockGas {
+    let mut f = Fixture::new();
+    let account = f.account;
+    seed_account(&mut f, account, empty_sender);
+    let call = if create_first {
+        Call {
+            to: TxKind::Create,
+            value: U256::ZERO,
+            input: bytes!("00"),
+        }
+    } else {
+        f.getter()
+    };
+    let tx = TempoTransaction {
+        nonce_key: match lane {
+            NonceLane::Protocol => U256::ZERO,
+            NonceLane::TwoD => U256::ONE,
+            NonceLane::Expiring => TEMPO_EXPIRING_NONCE_KEY,
+        },
+        valid_before: matches!(lane, NonceLane::Expiring).then_some(EXPIRING_VALID_BEFORE),
+        gas_limit: 5_000_000,
+        ..aa_tx(0, vec![call])
+    };
+    let tx = multisig_signed(&f, tx);
+    block_gas(&mut f, &tx)
+}
+
+/// Gas of a nonce-zero protocol transaction of a non-native sender, signed by the access key of
+/// a native delegate that is registered in it.
+fn delegate_registration_gas(empty_delegate: bool) -> BlockGas {
+    let mut f = Fixture::with_parent(false);
+    let parent = f.account;
+    seed_account(&mut f, parent, false);
+    let key = signer(2);
+    let config = MultisigConfig {
+        salt: B256::repeat_byte(2),
+        version: 0,
+        threshold: 1,
+        owners: vec![MultisigOwner {
+            owner: key.address(),
+            weight: 1,
+        }],
+    };
+    let delegate = config.derive_account(Address::repeat_byte(0x71)).unwrap();
+    seed_account(&mut f, delegate, empty_delegate);
+    let grant = KeyAuthorization::unrestricted(1, SignatureType::Multisig, delegate);
+    let approval = f.owner.sign_hash_sync(&grant.signature_hash()).unwrap();
+    let tx = TempoTransaction {
+        key_authorization: Some(grant.into_signed(approval)),
+        gas_limit: 5_000_000,
+        ..aa_tx(0, vec![f.getter()])
+    };
+    let digest = KeychainSignature::signing_hash(tx.signature_hash(), parent);
+    let signature = MultisigSignature::try_new(
+        delegate,
+        config,
+        vec![PrimitiveSignature::Secp256k1(
+            key.sign_hash_sync(&multisig_digest(digest, delegate, 0))
+                .unwrap(),
+        )],
+    )
+    .unwrap();
+    let tx = tx.into_signed(TempoSignature::Keychain(KeychainSignature::new(
+        parent,
+        AccountSignature::Multisig(signature),
+    )));
+    block_gas(&mut f, &tx)
+}
+
+#[test]
+fn registration_charges_the_new_account_cost_once_for_every_nonce_type() {
+    let params = tempo_gas_params(TempoHardfork::T14);
+    let new_account = BlockGas {
+        regular: params.get(GasId::new_account_cost()),
+        state: params.new_account_state_gas(),
+    };
+    struct Row {
+        lane: NonceLane,
+        create_first: bool,
+        registration_charges_new_account: bool,
+    }
+    // The `nonce == 0` charge of the protocol lane creates the sender; a 2D `nonce == 0` charge
+    // pays the nonce-key slot, so registration still pays. A first-call CREATE from a nonce-zero
+    // sender pays the creation on a 2D or expiring lane, so registration adds nothing.
+    for Row {
+        lane,
+        create_first,
+        registration_charges_new_account,
+    } in [
+        Row {
+            lane: NonceLane::Protocol,
+            create_first: false,
+            registration_charges_new_account: false,
+        },
+        Row {
+            lane: NonceLane::Protocol,
+            create_first: true,
+            registration_charges_new_account: false,
+        },
+        Row {
+            lane: NonceLane::TwoD,
+            create_first: false,
+            registration_charges_new_account: true,
+        },
+        Row {
+            lane: NonceLane::Expiring,
+            create_first: false,
+            registration_charges_new_account: true,
+        },
+        Row {
+            lane: NonceLane::TwoD,
+            create_first: true,
+            registration_charges_new_account: false,
+        },
+        Row {
+            lane: NonceLane::Expiring,
+            create_first: true,
+            registration_charges_new_account: false,
+        },
+    ] {
+        let funded = sender_registration_gas(lane, create_first, false);
+        let empty = sender_registration_gas(lane, create_first, true);
+        let expected = if registration_charges_new_account {
+            funded.plus(new_account)
+        } else {
+            funded
+        };
+        assert_eq!(empty, expected, "{lane:?}, create first: {create_first}");
+    }
+
+    // A registered delegate is never the sender, so its creation is always charged.
+    let funded = delegate_registration_gas(false);
+    let empty = delegate_registration_gas(true);
+    assert_eq!(empty, funded.plus(new_account), "empty delegate");
 }
 
 #[test]
