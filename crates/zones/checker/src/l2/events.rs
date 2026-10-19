@@ -235,14 +235,14 @@ fn authenticate_receipt_withdrawals(
         };
 
         let total = principal + fee;
-        if (fee.is_zero() || token == default_fee_token)
-            && let Some(index) =
-                matching_burn(&burns, &consumed, request_index, token, sender, total)
-        {
+        // Self-paid: one burn of principal + fee in the withdrawal token.
+        if let Some(index) = matching_burn(&burns, &consumed, request_index, token, sender, total) {
             consumed[index] = true;
             continue;
         }
 
+        // Sponsored: principal burned from the sender, fee burned from the payer in the default
+        // fee token.
         let principal_burn =
             matching_burn(&burns, &consumed, request_index, token, sender, principal);
         let fee_burn = if fee.is_zero() {
@@ -1374,7 +1374,7 @@ mod tests {
         let sender = Address::repeat_byte(2);
         let mut events = burn(token, sender, 105);
         events.push(withdrawal(token, sender, 100, 5));
-        authenticate_withdrawals(events, token).unwrap();
+        authenticate_withdrawals(events, Address::repeat_byte(4)).unwrap();
     }
 
     #[test]
@@ -1389,16 +1389,15 @@ mod tests {
     }
 
     #[test]
-    fn authenticates_withdrawal_paid_in_default_token() {
+    fn authenticates_sponsored_fee_paid_in_default_token() {
         let token = Address::repeat_byte(1);
         let default_fee_token = Address::repeat_byte(4);
         let sender = Address::repeat_byte(2);
-        for fee_payer in [sender, Address::repeat_byte(3)] {
-            let mut events = burn(token, sender, 100);
-            events.extend(burn(default_fee_token, fee_payer, 5));
-            events.push(withdrawal(token, sender, 100, 5));
-            authenticate_withdrawals(events, default_fee_token).unwrap();
-        }
+        let fee_payer = Address::repeat_byte(3);
+        let mut events = burn(token, sender, 100);
+        events.extend(burn(default_fee_token, fee_payer, 5));
+        events.push(withdrawal(token, sender, 100, 5));
+        authenticate_withdrawals(events, default_fee_token).unwrap();
     }
 
     #[test]
@@ -1408,7 +1407,7 @@ mod tests {
         let default_fee_token = Address::repeat_byte(4);
         for wrong_fee_token in [token, Address::repeat_byte(5)] {
             let mut events = burn(token, sender, 100);
-            events.extend(burn(wrong_fee_token, sender, 5));
+            events.extend(burn(wrong_fee_token, Address::repeat_byte(3), 5));
             events.push(withdrawal(token, sender, 100, 5));
             let error = authenticate_withdrawals(events, default_fee_token).unwrap_err();
             assert_eq!(
@@ -1419,23 +1418,6 @@ mod tests {
                 )
             );
         }
-    }
-
-    #[test]
-    fn rejects_combined_burn_outside_default_token() {
-        let token = Address::repeat_byte(1);
-        let sender = Address::repeat_byte(2);
-        let default_fee_token = Address::repeat_byte(4);
-        let mut events = burn(token, sender, 105);
-        events.push(withdrawal(token, sender, 100, 5));
-        let error = authenticate_withdrawals(events, default_fee_token).unwrap_err();
-        assert_eq!(
-            error.to_string(),
-            format!(
-                "withdrawal in transaction {} has no matching debit and burn of principal 100 {token} and fee 5 {default_fee_token}",
-                B256::repeat_byte(1)
-            )
-        );
     }
 
     #[test]

@@ -184,22 +184,22 @@ impl ZoneOutbox {
         }
 
         let fee = self.calculate_fee_unchecked(call.gasLimit)?;
-        if fee == 0 {
-            self.transfer_and_burn(&mut zone_token, caller, call.amount)?;
+        if caller == fee_payer {
+            // Self-paid fees stay in the withdrawal token so exiting an enabled token never
+            // depends on holding, or being allowed to move, a different token.
+            let total = call
+                .amount
+                .checked_add(fee)
+                .ok_or_else(TempoPrecompileError::under_overflow)?;
+            self.transfer_and_burn(&mut zone_token, caller, total)?;
         } else {
-            let fee_token = ZoneFeeManager::new().default_fee_token()?;
-            if caller == fee_payer && call.token == fee_token {
-                let total = call
-                    .amount
-                    .checked_add(fee)
-                    .ok_or_else(TempoPrecompileError::under_overflow)?;
-                self.transfer_and_burn(&mut zone_token, caller, total)?;
-            } else {
-                let mut fee_token = TIP20Token::from_address(fee_token)?;
+            self.transfer_and_burn(&mut zone_token, caller, call.amount)?;
+            if fee != 0 {
+                let mut fee_token =
+                    TIP20Token::from_address(ZoneFeeManager::new().default_fee_token()?)?;
                 if !fee_token.is_initialized()? {
                     return Err(TempoPrecompileError::from(TIP20Error::uninitialized()).into());
                 }
-                self.transfer_and_burn(&mut zone_token, caller, call.amount)?;
                 self.transfer_and_burn(&mut fee_token, fee_payer, fee)?;
             }
         }

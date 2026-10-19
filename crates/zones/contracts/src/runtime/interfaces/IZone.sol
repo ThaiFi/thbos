@@ -1195,8 +1195,8 @@ interface IZoneOutbox {
     /// @dev Kept for observability. Proof reads from lastBatch storage instead.
     event BatchFinalized(bytes32 indexed withdrawalQueueHash, uint64 withdrawalBatchIndex);
 
-    /// @notice Tempo gas rate (Zone default fee token units per gas unit on Tempo)
-    /// @dev Fee = (WITHDRAWAL_BASE_GAS + gasLimit) * tempoGasRate, in the Zone default fee token.
+    /// @notice Tempo gas rate (token units per gas unit on Tempo)
+    /// @dev Fee = (WITHDRAWAL_BASE_GAS + gasLimit) * tempoGasRate
     function tempoGasRate() external view returns (uint128);
 
     /// @notice Next withdrawal index (monotonically increasing)
@@ -1228,7 +1228,7 @@ interface IZoneOutbox {
     /// @notice Set Tempo gas rate. Only callable by sequencer.
     /// @dev Sequencer publishes this rate and takes the risk on Tempo gas price fluctuations.
     ///      The rate must not exceed the finalized portal maxTempoGasRate.
-    /// @param _tempoGasRate Zone default fee token units per gas unit on Tempo
+    /// @param _tempoGasRate Token units per gas unit on Tempo
     function setTempoGasRate(uint128 _tempoGasRate) external;
 
     /// @notice Set maximum withdrawal requests per zone block. Only callable by sequencer.
@@ -1236,13 +1236,14 @@ interface IZoneOutbox {
     function setMaxWithdrawalsPerBlock(uint32 _maxWithdrawalsPerBlock) external;
 
     /// @notice Calculate the fee for a withdrawal with the given gasLimit
-    /// @dev Fee = (WITHDRAWAL_BASE_GAS + gasLimit) * tempoGasRate, in the Zone default fee token.
+    /// @dev Fee = (WITHDRAWAL_BASE_GAS + gasLimit) * tempoGasRate
     function calculateWithdrawalFee(uint64 gasLimit) external view returns (uint128);
 
     /// @notice Request a withdrawal from the zone back to Tempo
-    /// @dev Caller approves amount of the withdrawal token; the transaction fee payer approves
-    ///      fee of the Zone default token, captured from the portal's first enabled token at initialization.
-    ///      If both payer and token match, the allowance must cover amount + fee.
+    /// @dev When the caller pays the transaction fee, it approves amount + fee of the withdrawal token.
+    ///      When a sponsor pays, the caller approves amount of the withdrawal token and the sponsor
+    ///      approves fee of the Zone default token, captured from the portal's first enabled token
+    ///      at initialization.
     ///      The token must be enabled on the portal. Withdrawals can never be disabled
     ///      for an enabled token (non-custodial guarantee).
     /// @param token The TIP-20 token to withdraw

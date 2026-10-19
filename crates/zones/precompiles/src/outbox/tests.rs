@@ -820,18 +820,13 @@ fn request_charges_withdrawal_fee_to_effective_fee_payer() -> eyre::Result<()> {
 }
 
 #[test]
-fn withdrawal_fee_uses_cached_portal_token_for_self_and_sponsor() -> eyre::Result<()> {
-    for (fee_payer, amount) in [
-        (ALICE, 100),
-        (FEE_PAYER, 100),
-        (ALICE, u128::MAX),
-        (FEE_PAYER, u128::MAX),
-    ] {
+fn sponsored_withdrawal_fee_uses_cached_default_token() -> eyre::Result<()> {
+    for amount in [100, u128::MAX] {
         let mut harness = Harness::new()?;
         let withdrawal_token = harness.add_withdrawal_token(amount)?;
         let fee_token = harness.token;
         assert!(harness.set_gas_rate(2)?.is_success());
-        let fee_before = harness.token_state(fee_token, fee_payer)?;
+        let fee_before = harness.token_state(fee_token, FEE_PAYER)?;
         assert_eq!(
             harness.token_state(withdrawal_token, FEE_PAYER)?.balance,
             U256::ZERO
@@ -843,7 +838,7 @@ fn withdrawal_fee_uses_cached_portal_token_for_self_and_sponsor() -> eyre::Resul
 
         let output = harness.call_with_fee_payer(
             ALICE,
-            fee_payer,
+            FEE_PAYER,
             ZoneOutboxAbi::requestWithdrawalCall {
                 token: withdrawal_token,
                 to: BOB,
@@ -866,7 +861,7 @@ fn withdrawal_fee_uses_cached_portal_token_for_self_and_sponsor() -> eyre::Resul
                 outbox_balance: U256::ZERO,
             }
         );
-        let fee_after = harness.token_state(fee_token, fee_payer)?;
+        let fee_after = harness.token_state(fee_token, FEE_PAYER)?;
         assert_eq!(fee_after.balance, fee_before.balance - U256::from(120_000));
         assert_eq!(fee_after.supply, fee_before.supply - U256::from(120_000));
         assert_eq!(fee_after.outbox_balance, U256::ZERO);
@@ -903,18 +898,38 @@ fn withdrawal_fee_uses_cached_portal_token_for_self_and_sponsor() -> eyre::Resul
 }
 
 #[test]
-fn withdrawal_fee_is_not_hardcoded_to_path_usd() -> eyre::Result<()> {
+fn self_paid_withdrawal_fee_does_not_depend_on_default_token() -> eyre::Result<()> {
     let mut harness = Harness::new()?;
-    let fee_token = harness.add_withdrawal_token(100_000)?;
+    let default_fee_token = harness.add_withdrawal_token(100_000)?;
     let mut storage = test_storage_provider(&mut harness.ctx, u64::MAX, false);
-    StorageCtx::enter(&mut storage, || ZoneFeeManager::new().initialize(fee_token))?;
+    StorageCtx::enter(&mut storage, || -> TempoResult<()> {
+        ZoneFeeManager::new().initialize(default_fee_token)?;
+        let mut token = TIP20Token::from_address(default_fee_token)?;
+        token.grant_role(
+            ALICE,
+            IRolesAuth::grantRoleCall {
+                role: TIP20Token::pause_role(),
+                account: ALICE,
+            },
+        )?;
+        token.pause(ALICE, ITIP20::pauseCall {})?;
+        Ok(())
+    })?;
     drop(storage);
     assert!(harness.set_gas_rate(2)?.is_success());
-    let before = harness.balance_of(ALICE)?;
+    let default_before = harness.token_state(default_fee_token, ALICE)?;
+    let before = harness.token_state(harness.token, ALICE)?;
+
     assert!(harness.request(100, BOB, B256::ZERO)?.is_success());
-    assert_eq!(harness.balance_of(ALICE)?, before - U256::from(100));
-    assert_eq!(harness.token_state(fee_token, ALICE)?.balance, U256::ZERO);
-    assert_eq!(harness.token_state(fee_token, ALICE)?.supply, U256::ZERO);
+
+    let after = harness.token_state(harness.token, ALICE)?;
+    assert_eq!(after.balance, before.balance - U256::from(100_100));
+    assert_eq!(after.supply, before.supply - U256::from(100_100));
+    assert_eq!(
+        harness.token_state(default_fee_token, ALICE)?,
+        default_before
+    );
+    assert_eq!(harness.pending()?.len(), 1);
     Ok(())
 }
 
@@ -1082,10 +1097,25 @@ fn zero_fee_skips_invalid_or_uninitialized_default_fee_token() -> eyre::Result<(
         let mut storage = test_storage_provider(&mut harness.ctx, u64::MAX, false);
         StorageCtx::enter(&mut storage, || ZoneFeeManager::new().initialize(fee_token))?;
         drop(storage);
-        assert!(harness.request(100, BOB, B256::ZERO)?.is_success());
+        let call = ZoneOutboxAbi::requestWithdrawalCall {
+            token: harness.token,
+            to: BOB,
+            amount: 100,
+            memo: B256::ZERO,
+            gasLimit: 0,
+            zoneFallbackRecipient: ALICE,
+            data: Bytes::new(),
+            revealTo: Bytes::new(),
+        }
+        .abi_encode();
+        assert!(
+            harness
+                .call_with_fee_payer(ALICE, FEE_PAYER, &call)?
+                .is_success()
+        );
         assert!(harness.set_gas_rate(1)?.is_success());
         let before = harness.token_state(harness.token, ALICE)?;
-        assert_revert(harness.request(100, BOB, B256::ZERO), error);
+        assert_revert(harness.call_with_fee_payer(ALICE, FEE_PAYER, &call), error);
         assert_eq!(harness.token_state(harness.token, ALICE)?, before);
         assert_eq!(harness.pending()?.len(), 1);
         assert_eq!(harness.last_fallback_nonce()?, 1);
