@@ -46,7 +46,8 @@ const CONFIG_COMMITMENT_UPDATE_GAS: u64 = 5_000;
 pub enum ConfigCommitmentWriteGas {
     /// First registration was charged once in transaction intrinsic gas.
     Intrinsic,
-    /// Charge the explicit precompile operation here.
+    /// Charge the explicit precompile operation here: the field write, plus TIP-1000's
+    /// new-account cost (regular and state gas) when the write finds the account still empty.
     Precompile,
 }
 
@@ -118,7 +119,7 @@ pub trait PrecompileStorageProvider {
     /// Writes an authorized nonzero commitment through the account journal.
     /// Callers must validate registration, rotation, or migration authority first.
     /// Account-access gas belongs to that authorization read; this method charges
-    /// only the field write, or nothing when registration was charged intrinsically.
+    /// only what `gas` names, or nothing when registration was charged intrinsically.
     fn set_config_commitment(
         &mut self,
         address: Address,

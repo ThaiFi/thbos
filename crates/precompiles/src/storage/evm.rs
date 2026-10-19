@@ -9,7 +9,7 @@ use alloy_evm::EvmInternals;
 use bitflags::bitflags;
 use revm::{
     context::{CfgEnv, journaled_state::JournalCheckpoint},
-    context_interface::cfg::{GasParams, gas},
+    context_interface::cfg::{GasId, GasParams, gas},
     interpreter::{SStoreResult, StateLoad, gas::GasTracker},
     state::{AccountInfo, Bytecode},
 };
@@ -423,11 +423,23 @@ impl<'a> PrecompileStorageProvider for EvmPrecompileStorageProvider<'a> {
     ) -> Result<(), TempoPrecompileError> {
         ensure_config_commitment_writable(self.spec, self.is_static, commitment)?;
         // The authorization read already charged account access (or was intrinsic).
-        let mut account = self.internals.load_account_mut(address)?;
-        let previous = decode_config_commitment(&account.data.account().info.extension, true)
-            .map_err(|e| TempoPrecompileError::Fatal(e.to_string()))?;
-        deduct_gas(&mut self.gas_tracker, gas.cost(previous)?)?;
-        account.set_extension(encode_config_commitment(commitment).into());
+        let (previous, creates_account) = {
+            let loaded = self.internals.load_account_mut(address)?;
+            let account = loaded.data.account();
+            let previous = decode_config_commitment(&account.info.extension, true)
+                .map_err(|e| TempoPrecompileError::Fatal(e.to_string()))?;
+            (previous, account.is_empty())
+        };
+        self.deduct_gas(gas.cost(previous)?)?;
+        // The write makes an empty account permanent; an intrinsic write was priced with the
+        // transaction, creation included.
+        if creates_account && gas == ConfigCommitmentWriteGas::Precompile {
+            self.deduct_gas(self.gas_params.get(GasId::new_account_cost()))?;
+            self.deduct_state_gas(self.gas_params.new_account_state_gas())?;
+        }
+        self.internals
+            .load_account_mut(address)?
+            .set_extension(encode_config_commitment(commitment).into());
         Ok(())
     }
 
@@ -791,7 +803,7 @@ mod tests {
     use revm::{database::InMemoryDB, interpreter::StateLoad};
     use tempo_chainspec::hardfork::TempoHardfork;
     use tempo_evm::{TempoEvmFactory, evm::TempoEvm};
-    use tempo_revm::gas_params::tempo_gas_params_with_amsterdam;
+    use tempo_revm::gas_params::{tempo_gas_params, tempo_gas_params_with_amsterdam};
 
     struct TestEvm(TempoEvm<InMemoryDB>);
 
@@ -1722,7 +1734,9 @@ mod tests {
         provider
             .set_config_commitment(fresh, commitment, WriteGas::Precompile)
             .unwrap();
-        assert_eq!(provider.gas_used() - after_read, 20_000);
+        // The write also creates the empty account.
+        let created = provider.gas_params.get(GasId::new_account_cost());
+        assert_eq!(provider.gas_used() - after_read, 20_000 + created);
         assert_eq!(provider.state_gas_used(), 0);
         assert_eq!(provider.gas_refunded(), 0);
         provider.is_static = true;
@@ -1744,7 +1758,12 @@ mod tests {
     fn commitment_write_gas_boundary() {
         let address = Address::repeat_byte(1);
         let next = B256::repeat_byte(2);
-        for (previous, cost) in [(B256::ZERO, 20_000), (B256::repeat_byte(3), 5_000)] {
+        let created = tempo_gas_params(TempoHardfork::T14).get(GasId::new_account_cost());
+        // A first commitment creates the empty account; a rewrite finds the commitment itself.
+        for (previous, cost) in [
+            (B256::ZERO, 20_000 + created),
+            (B256::repeat_byte(3), 5_000),
+        ] {
             for shortfall in [1, 0] {
                 let mut evm = TestEvm::new(TempoHardfork::T14);
                 {
