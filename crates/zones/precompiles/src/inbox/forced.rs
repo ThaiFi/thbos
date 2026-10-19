@@ -96,39 +96,53 @@ impl ZoneInbox {
                     entry.token,
                     entry.requestedAtTime,
                 ) {
-                    Ok(ForcedExitResult::Rejected(reason))
-                } else if self.forced_exit_nonces[auth.account][auth.nonce].read()? {
-                    Ok(ForcedExitResult::Rejected(Reason::NonceAlreadyConsumed))
-                } else {
-                    self.forced_exit_nonces[auth.account][auth.nonce].write(true)?;
-                    let balance = TIP20Token::from_address(entry.token)?.balance_of(
-                        ITIP20::balanceOfCall {
-                            account: auth.account,
-                        },
-                    )?;
-                    // 4. Overflow and Empty precede all execution policy checks.
-                    if balance > U256::from(u128::MAX) {
-                        Ok(ForcedExitResult::Rejected(Reason::BalanceOverflow))
-                    } else if balance.is_zero() {
-                        Ok(ForcedExitResult::Empty)
-                    } else {
-                        let request = ForcedWithdrawalRequest {
-                            private_request_hash: exithatch::private_request_hash(
-                                &auth, &signature,
-                            ),
-                            token: entry.token,
-                            account: auth.account,
-                            recipient: auth.recipient,
-                            amount: balance.to::<u128>(),
-                        };
-                        Ok(
-                            match outbox.request_forced_withdrawal(l1, self.address, request)? {
-                                Ok(()) => ForcedExitResult::Exited,
-                                Err(reason) => ForcedExitResult::Rejected(reason),
-                            },
-                        )
-                    }
+                    return Ok(ForcedExitResult::Rejected(reason));
                 }
+                let (result, amount) =
+                    if self.forced_exit_nonces[auth.account][auth.nonce].read()? {
+                        (ForcedExitResult::Rejected(Reason::NonceAlreadyConsumed), 0)
+                    } else {
+                        self.forced_exit_nonces[auth.account][auth.nonce].write(true)?;
+                        let balance = TIP20Token::from_address(entry.token)?.balance_of(
+                            ITIP20::balanceOfCall {
+                                account: auth.account,
+                            },
+                        )?;
+                        // 4. Overflow and Empty precede all execution policy checks.
+                        if balance > U256::from(u128::MAX) {
+                            (ForcedExitResult::Rejected(Reason::BalanceOverflow), 0)
+                        } else if balance.is_zero() {
+                            (ForcedExitResult::Empty, 0)
+                        } else {
+                            let amount = balance.to::<u128>();
+                            let request = ForcedWithdrawalRequest {
+                                private_request_hash: exithatch::private_request_hash(
+                                    &auth, &signature,
+                                ),
+                                token: entry.token,
+                                account: auth.account,
+                                recipient: auth.recipient,
+                                amount,
+                            };
+                            match outbox.request_forced_withdrawal(l1, self.address, request)? {
+                                Ok(()) => (ForcedExitResult::Exited, amount),
+                                Err(reason) => (ForcedExitResult::Rejected(reason), 0),
+                            }
+                        }
+                    };
+                // Only authenticated results are reported, and only to the account.
+                let reason = match result {
+                    ForcedExitResult::Exited | ForcedExitResult::Empty => Reason::None,
+                    ForcedExitResult::Rejected(reason) => reason,
+                };
+                self.emit_event(ForcedExitProcessed {
+                    account: auth.account,
+                    requestId: entry.requestId,
+                    nonce: auth.nonce,
+                    reason: reason as u8,
+                    amount,
+                })?;
+                Ok(result)
             }
         }
     }

@@ -935,6 +935,8 @@ senderTag = keccak256(abi.encodePacked(account, privateRequestHash, fallbackNonc
 
 Neither the private request hash nor a public request-ID-derived tag is published on L1. The shared inbox transaction hash is not substituted for `privateRequestHash`. The Zone emits `ForcedWithdrawalRequested` with the withdrawal index, token, sender tag, recipient, amount, and fallback nonce; it omits the debited account, authorization nonce, and signature.
 
+For every authenticated result (`NonceAlreadyConsumed`, `BalanceOverflow`, `Empty`, `PolicyRejected`, `DebitFailed`, or `Exited`), the inbox emits `ForcedExitProcessed(account, requestId, nonce, reason, amount)`, where `reason` is the `ForcedExitReason` code (`0` for both `Empty` and `Exited`) and `amount` is the debited balance for `Exited` and otherwise 0. `NotActivated`, `InvalidPayload`, and `InvalidAuthorization` emit nothing, so no one can write into an unauthenticated account's private log view. The redacted RPC shows the event only to `account`.
+
 Every terminal result advances the processed queue hash and number. Rejected and empty entries create no withdrawal, principal refund, or bounce-back. Fatal errors, including resource exhaustion and state/witness failures, roll back the enclosing transition, including earlier entries, nonce consumption, and cursor progress. L1 compensation already paid at admission is unaffected.
 
 ### Forced-Exit Settlement and Recovery
@@ -1162,8 +1164,9 @@ All log queries are restricted to TIP-20 events where the authenticated account 
 | `TransferWithMemo(from, to, amount, memo)` | `from == caller` OR `to == caller` |
 | `Mint(to, amount)` | `to == caller` |
 | `Burn(from, amount)` | `from == caller` |
+| `ForcedExitProcessed(account, requestId, nonce, reason, amount)` emitted by `ZoneInbox` | `account == caller` |
 
-All other events (system events, configuration events) are filtered out. The `address` filter parameter must be a zone token address or omitted. The RPC server injects topic filters to restrict indexed address parameters to the caller, then post-filters results as a final pass.
+All other events (system events, configuration events) are filtered out. The `address` filter parameter must be a zone token address, the `ReceivePolicyGuard`, the `ZoneInbox`, or omitted. The RPC server injects topic filters to restrict indexed address parameters to the caller, then post-filters results as a final pass.
 
 To avoid leaking how much activity occurred in a block, some fields of returned logs are redacted:
 

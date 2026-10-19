@@ -4,6 +4,7 @@ use crate::{
     forced_exit_storage::ForcedExitPortalStorage,
     inbox::forced::{ForcedExitResult, OBSERVED},
 };
+use alloy_sol_types::SolEvent;
 use exithatch::{
     ForcedExitAuthorization, ForcedExitReason as Reason, MAX_SIGNATURE_SIZE, test_utils::*,
 };
@@ -245,6 +246,8 @@ struct Executed {
     output: PrecompileOutput,
     /// Every forced-exit classification, in queue order. Empty for reverted transitions.
     results: Vec<ForcedExitResult>,
+    /// `ForcedExitProcessed` events emitted by the transition, in order.
+    events: Vec<ForcedExitProcessed>,
 }
 
 /// Run one `advanceTempo` over `entries`, publishing their queue head at the next anchor.
@@ -302,16 +305,56 @@ fn execute_raw(
     };
     reload(h);
     OBSERVED.with(|observed| observed.borrow_mut().clear());
+    let logs_before = h.ctx.journaled_state.logs().len();
     let output = h.call_with_gas(Address::ZERO, call.abi_encode(), gas)?;
     let observed = OBSERVED.with(|observed| observed.take());
+    let events = h.ctx.journaled_state.logs()[logs_before..]
+        .iter()
+        .filter_map(|log| ForcedExitProcessed::decode_log(log).ok())
+        .inspect(|log| assert_eq!(log.address, ZONE_INBOX_ADDRESS))
+        .map(|log| log.data)
+        .collect::<Vec<_>>();
     let results = if output.is_success() {
         let after = with_zone(h, || Ok(ZoneInbox::new().processed_deposit_number()?))?;
         assert_eq!(after, before + count, "every entry advances the cursor");
+        assert_reported(&observed, &events);
         observed
     } else {
+        assert!(events.is_empty(), "a reverted transition emits nothing");
         Vec::new()
     };
-    Ok(Executed { output, results })
+    Ok(Executed {
+        output,
+        results,
+        events,
+    })
+}
+
+/// Every authenticated result emits exactly one `ForcedExitProcessed` with its code, in order.
+/// `NotActivated`, `InvalidPayload` and `InvalidAuthorization` emit nothing.
+fn assert_reported(results: &[ForcedExitResult], events: &[ForcedExitProcessed]) {
+    let expected = results
+        .iter()
+        .filter_map(|result| match result {
+            ForcedExitResult::Exited | ForcedExitResult::Empty => Some(Reason::None),
+            ForcedExitResult::Rejected(
+                Reason::NotActivated | Reason::InvalidPayload | Reason::InvalidAuthorization,
+            ) => None,
+            ForcedExitResult::Rejected(reason) => Some(*reason),
+        })
+        .map(|reason| reason as u8)
+        .collect::<Vec<_>>();
+    let reported = events.iter().map(|event| event.reason).collect::<Vec<_>>();
+    assert_eq!(reported, expected, "{results:?}");
+    let exits = results
+        .iter()
+        .filter(|result| *result == &ForcedExitResult::Exited)
+        .count();
+    assert_eq!(
+        events.iter().filter(|event| event.amount != 0).count(),
+        exits,
+        "only exits report a nonzero amount"
+    );
 }
 
 fn fund_account(h: &mut Harness, account: Address, amount: U256) -> eyre::Result<()> {
@@ -869,6 +912,50 @@ fn admitted_forced_workload_preserves_ordinary_capacity() -> eyre::Result<()> {
             Ok(())
         })?;
     }
+    Ok(())
+}
+
+/// `ForcedExitProcessed` carries the authenticated account, request ID, nonce, code, and the
+/// debited amount for each authenticated result, and nothing for unauthenticated ones.
+#[test]
+fn forced_exit_processed_reports_authenticated_results() -> eyre::Result<()> {
+    let mut h = active_harness()?;
+    fund(&mut h, 42)?;
+    let mut expired = auth(3);
+    expired.admitBefore = 0;
+    let entries = vec![
+        request(&mut h, 1, &payload(&auth(1)))?,
+        request(&mut h, 2, &payload(&auth(1)))?,
+        request(&mut h, 3, &vec![0; 384])?,
+        request(&mut h, 4, &payload(&expired))?,
+        request(&mut h, 5, &payload(&auth(2)))?,
+    ];
+    let executed = execute(&mut h, entries)?;
+    assert_eq!(
+        executed.results,
+        [
+            ForcedExitResult::Exited,
+            ForcedExitResult::Rejected(Reason::NonceAlreadyConsumed),
+            ForcedExitResult::Rejected(Reason::InvalidPayload),
+            ForcedExitResult::Rejected(Reason::InvalidAuthorization),
+            ForcedExitResult::Empty,
+        ]
+    );
+    let event = |request_id, nonce: u64, reason: Reason, amount| ForcedExitProcessed {
+        account: ROOT,
+        requestId: request_id,
+        nonce: U256::from(nonce),
+        reason: reason as u8,
+        amount,
+    };
+    assert_eq!(
+        executed.events,
+        [
+            event(1, 1, Reason::None, 42),
+            event(2, 1, Reason::NonceAlreadyConsumed, 0),
+            event(5, 2, Reason::None, 0),
+        ]
+    );
     Ok(())
 }
 
