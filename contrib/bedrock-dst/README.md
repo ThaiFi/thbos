@@ -1114,7 +1114,7 @@ source revisions; revisions are assigned round robin across validators.
 `--prepare-only` builds inputs, then `--prepared` with the same `RUN_DIR` runs
 without rebuilding. Supply workload settings only during preparation.
 
-The [DST workflow](https://github.com/tempoxyz/bedrock/blob/main/.github/workflows/dst.yml)
+The [DST workflow](https://github.com/tempoxyz/bedrock/blob/main/.github/workflows/tempo-e2e.yml)
 selects a harness repository, revision and directory. For this harness, use
 `workload_config` to set validators/consensus/load and `prepare_args` for node
 and txgen revisions. `memory_mb` selects guest RAM; `parallel_seeds` and
