@@ -5,10 +5,7 @@ use alloy_evm::{
     Database, Evm, RecoveredTx,
     block::{BlockExecutionError, BlockExecutor, ExecutableTx},
 };
-use alloy_primitives::{
-    Address, B256, U256,
-    map::{AddressMap, U256Map},
-};
+use alloy_primitives::{Address, B256, U256, map::HashMap};
 use reth_evm::block::InternalBlockExecutionError;
 use reth_revm::{
     Database as _, Inspector, State,
@@ -186,33 +183,27 @@ where
 
         let mut state = EvmState::default();
 
-        for (address, slots) in self.replay_state.tx_changes.iter() {
-            for (slot, change) in slots {
-                if !change.written {
-                    continue;
-                }
-
-                let account = match state.entry(*address) {
-                    Entry::Occupied(e) => e.into_mut(),
-                    Entry::Vacant(e) => {
-                        let mut account = Account::from(
-                            db.basic(*address)
-                                .map_err(BlockExecutionError::other)?
-                                .unwrap_or_default(),
-                        );
-                        account.mark_touch();
-                        e.insert(account)
-                    }
-                };
-                account.storage.insert(
-                    *slot,
-                    EvmStorageSlot::new_changed(
-                        change.original,
-                        change.current,
-                        TransactionId::ZERO,
-                    ),
-                );
+        for ((address, slot), change) in &self.replay_state.tx_changes {
+            if !change.written {
+                continue;
             }
+
+            let account = match state.entry(*address) {
+                Entry::Occupied(e) => e.into_mut(),
+                Entry::Vacant(e) => {
+                    let mut account = Account::from(
+                        db.basic(*address)
+                            .map_err(BlockExecutionError::other)?
+                            .unwrap_or_default(),
+                    );
+                    account.mark_touch();
+                    e.insert(account)
+                }
+            };
+            account.storage.insert(
+                *slot,
+                EvmStorageSlot::new_changed(change.original, change.current, TransactionId::ZERO),
+            );
         }
 
         Ok(state)
@@ -373,7 +364,7 @@ impl From<StorageActionReplayError> for BlockExecutionError {
 #[derive(Debug, Default)]
 pub struct StorageActionReplayState {
     /// Changes for the current transaction.
-    tx_changes: AddressMap<U256Map<SlotChange>>,
+    tx_changes: HashMap<(Address, U256), SlotChange>,
     /// Expiring nonce replay state.
     expiring_nonce: ExpiringNonceReplayState,
 }
@@ -397,8 +388,7 @@ impl StorageActionReplayState {
         // gas/refund data from a different storage transition.
         let change = self
             .tx_changes
-            .get_mut(&address)
-            .and_then(|slots| slots.get_mut(&slot))
+            .get_mut(&(address, slot))
             .ok_or(StorageActionReplayError::ActionConflict)?;
         change.current = value;
         change.written = true;
@@ -427,9 +417,7 @@ impl StorageActionReplayState {
     /// Records a storage slot write with a known transaction-start value.
     fn record_sstore(&mut self, address: Address, slot: U256, original: U256, current: U256) {
         self.tx_changes
-            .entry(address)
-            .or_default()
-            .entry(slot)
+            .entry((address, slot))
             .and_modify(|change| {
                 change.current = current;
                 change.written = true;
@@ -478,7 +466,7 @@ impl StorageActionReplayState {
         slot: U256,
         expected: U256,
     ) -> Result<U256, BlockExecutionError> {
-        match self.tx_changes.entry(address).or_default().entry(slot) {
+        match self.tx_changes.entry((address, slot)) {
             Entry::Occupied(change) => {
                 if change.get().current != expected {
                     return Err(StorageActionReplayError::ActionConflict.into());
@@ -516,7 +504,7 @@ impl StorageActionReplayState {
         slot: U256,
         fallback: U256,
     ) -> Result<U256, BlockExecutionError> {
-        match self.tx_changes.entry(address).or_default().entry(slot) {
+        match self.tx_changes.entry((address, slot)) {
             Entry::Occupied(change) => Ok(change.get().current),
             Entry::Vacant(change) => {
                 let current = Self::cached_storage_value(db, address, slot).unwrap_or(fallback);
@@ -738,8 +726,7 @@ mod tests {
         );
         let change = replay_state
             .tx_changes
-            .get(&address)
-            .and_then(|slots| slots.get(&slot))
+            .get(&(address, slot))
             .expect("slot change recorded");
         assert_eq!(change.original, U256::from(10));
         assert_eq!(change.current, U256::from(10));
@@ -772,8 +759,7 @@ mod tests {
         );
         let change = replay_state
             .tx_changes
-            .get(&address)
-            .and_then(|slots| slots.get(&slot))
+            .get(&(address, slot))
             .expect("slot change recorded");
         assert_eq!(change.original, U256::from(10));
         assert_eq!(change.current, U256::from(10));
@@ -835,8 +821,7 @@ mod tests {
 
         let change = replay_state
             .tx_changes
-            .get(&address)
-            .and_then(|slots| slots.get(&slot))
+            .get(&(address, slot))
             .expect("slot change recorded");
         assert_eq!(change.original, U256::from(10));
         assert_eq!(change.current, U256::from(11));
@@ -874,8 +859,7 @@ mod tests {
 
         let change = replay_state
             .tx_changes
-            .get(&address)
-            .and_then(|slots| slots.get(&slot))
+            .get(&(address, slot))
             .expect("slot change recorded");
         assert_eq!(change.original, U256::from(11));
         assert_eq!(change.current, U256::from(14));
