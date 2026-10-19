@@ -330,31 +330,29 @@ fn execute_raw(
     })
 }
 
-/// Every authenticated result emits exactly one `ForcedExitProcessed` with its code, in order.
-/// `NotActivated`, `InvalidPayload` and `InvalidAuthorization` emit nothing.
+/// Every authenticated result emits exactly one `ForcedExitProcessed` with its code and amount, in
+/// order. `NotActivated`, `InvalidPayload` and `InvalidAuthorization` emit nothing.
 fn assert_reported(results: &[ForcedExitResult], events: &[ForcedExitProcessed]) {
     let expected = results
         .iter()
-        .filter_map(|result| match result {
-            ForcedExitResult::Exited | ForcedExitResult::Empty => Some(Reason::None),
-            ForcedExitResult::Rejected(
-                Reason::NotActivated | Reason::InvalidPayload | Reason::InvalidAuthorization,
-            ) => None,
-            ForcedExitResult::Rejected(reason) => Some(*reason),
+        .filter(|result| {
+            !matches!(
+                result,
+                ForcedExitResult::Rejected(
+                    Reason::NotActivated | Reason::InvalidPayload | Reason::InvalidAuthorization
+                )
+            )
         })
-        .map(|reason| reason as u8)
+        .map(|result| match result {
+            ForcedExitResult::Exited { amount } => (result.code(), *amount),
+            _ => (result.code(), 0),
+        })
         .collect::<Vec<_>>();
-    let reported = events.iter().map(|event| event.reason).collect::<Vec<_>>();
-    assert_eq!(reported, expected, "{results:?}");
-    let exits = results
+    let reported = events
         .iter()
-        .filter(|result| *result == &ForcedExitResult::Exited)
-        .count();
-    assert_eq!(
-        events.iter().filter(|event| event.amount != 0).count(),
-        exits,
-        "only exits report a nonzero amount"
-    );
+        .map(|event| (event.reason, event.amount))
+        .collect::<Vec<_>>();
+    assert_eq!(reported, expected, "{results:?}");
 }
 
 fn fund_account(h: &mut Harness, account: Address, amount: U256) -> eyre::Result<()> {
@@ -470,7 +468,7 @@ fn forced_exit_accepts_earlier_admission_but_rejects_future_height() -> eyre::Re
         let before = snapshot(&mut h)?;
         let executed = execute(&mut h, vec![entry])?;
         if admission_block == 0 {
-            assert_eq!(executed.results, [ForcedExitResult::Exited]);
+            assert_eq!(executed.results, [ForcedExitResult::Exited { amount: 42 }]);
             assert_eq!(root_balance(&mut h)?, 0);
             assert_eq!(h.pending_withdrawals()?.len(), 1);
         } else {
@@ -511,7 +509,10 @@ fn l1_token_pause_rejects_admitted_requests_without_blocking_inbox() -> eyre::Re
             // The first request exits the full balance, leaving nothing for the second.
             assert_eq!(
                 executed.results,
-                [ForcedExitResult::Exited, ForcedExitResult::Empty]
+                [
+                    ForcedExitResult::Exited { amount: 42 },
+                    ForcedExitResult::Empty
+                ]
             );
             assert_eq!(root_balance(&mut h)?, 0);
             assert_eq!(
@@ -536,7 +537,7 @@ fn forced_full_balance_replay_and_empty_finalize_with_exact_commitment() -> eyre
     assert_eq!(
         executed.results,
         [
-            ForcedExitResult::Exited,
+            ForcedExitResult::Exited { amount: 42 },
             ForcedExitResult::Rejected(Reason::NonceAlreadyConsumed),
             ForcedExitResult::Empty,
         ]
@@ -660,7 +661,10 @@ fn rejected_requests_are_classified_and_never_stall_the_inbox() -> eyre::Result<
         };
         assert_eq!(
             executed.results,
-            [ForcedExitResult::Rejected(reason), ForcedExitResult::Exited],
+            [
+                ForcedExitResult::Rejected(reason),
+                ForcedExitResult::Exited { amount: 42 }
+            ],
             "{case:?}"
         );
         // Only an authenticated request consumes its nonce, even when execution rejects it.
@@ -719,8 +723,8 @@ fn forced_balance_boundaries_and_classification_order() -> eyre::Result<()> {
             false,
             ForcedExitResult::Rejected(Reason::BalanceOverflow),
         ),
-        (U256::ONE, true, ForcedExitResult::Exited),
-        (max, true, ForcedExitResult::Exited),
+        (U256::ONE, true, ForcedExitResult::Exited { amount: 1 }),
+        (max, true, ForcedExitResult::Exited { amount: u128::MAX }),
     ] {
         let mut h = active_harness()?;
         if amount > max {
@@ -749,7 +753,7 @@ fn forced_balance_boundaries_and_classification_order() -> eyre::Result<()> {
         );
         assert!(consumed(&mut h, 1)?);
         let pending = h.pending_withdrawals()?;
-        if expected == ForcedExitResult::Exited {
+        if matches!(expected, ForcedExitResult::Exited { .. }) {
             assert_eq!(pending.len(), 1);
             assert_eq!(pending[0].amount, amount.to::<u128>());
             assert_eq!(h.balance(PATH_USD_ADDRESS, ROOT)?, U256::ZERO);
@@ -773,7 +777,7 @@ fn maximum_forced_exit_workload_fits_system_gas_budget() -> eyre::Result<()> {
     let executed = execute_with(&mut h, entries, enabled_tokens, u64::MAX)?;
     assert_eq!(
         executed.results,
-        vec![ForcedExitResult::Exited; REQUESTS as usize]
+        vec![ForcedExitResult::Exited { amount: 1 }; REQUESTS as usize]
     );
     assert_eq!(h.pending_withdrawals()?.len(), REQUESTS as usize);
     // Add a separate full transition for the 20 reserved refund entries. This overcounts
@@ -819,7 +823,7 @@ fn forced_exit_keeps_nonce_consumed_through_pending_credit_recovery() -> eyre::R
     let entry = request(&mut h, 1, &payload(&auth(1)))?;
     assert_eq!(
         execute(&mut h, vec![entry])?.results,
-        [ForcedExitResult::Exited]
+        [ForcedExitResult::Exited { amount: 17 }]
     );
     let nonce = h.pending_withdrawals()?[0].fallbackNonce;
     let mut encoded_nonce = [0; 20];
@@ -895,7 +899,7 @@ fn admitted_forced_workload_preserves_ordinary_capacity() -> eyre::Result<()> {
         let executed = execute_with(&mut h, entries, Vec::new(), 225_000_000)?;
         assert_eq!(
             executed.results,
-            vec![ForcedExitResult::Exited; REQUESTS as usize],
+            vec![ForcedExitResult::Exited { amount: 1 }; REQUESTS as usize],
             "ordinary slots used={used}"
         );
         let pending = h.pending_withdrawals()?;
@@ -934,7 +938,7 @@ fn forced_exit_processed_reports_authenticated_results() -> eyre::Result<()> {
     assert_eq!(
         executed.results,
         [
-            ForcedExitResult::Exited,
+            ForcedExitResult::Exited { amount: 42 },
             ForcedExitResult::Rejected(Reason::NonceAlreadyConsumed),
             ForcedExitResult::Rejected(Reason::InvalidPayload),
             ForcedExitResult::Rejected(Reason::InvalidAuthorization),
@@ -992,7 +996,7 @@ fn reverting_debit_is_debit_failed_and_never_stalls_the_inbox() -> eyre::Result<
 #[test]
 fn inactive_forced_entries_are_not_activated_and_advance_the_inbox() -> eyre::Result<()> {
     let expected = [
-        (42, ForcedExitResult::Exited),
+        (42, ForcedExitResult::Exited { amount: 42 }),
         (0, ForcedExitResult::Empty),
         (42, ForcedExitResult::Rejected(Reason::InvalidPayload)),
     ];
@@ -1094,7 +1098,10 @@ fn mixed_batch_executes_forced_exits_in_queue_order() -> eyre::Result<()> {
     // The deposit funds the first exit; the bounce-back funds the second.
     assert_eq!(
         executed.results,
-        [ForcedExitResult::Exited, ForcedExitResult::Exited]
+        [
+            ForcedExitResult::Exited { amount: 900 },
+            ForcedExitResult::Exited { amount: 321 },
+        ]
     );
     let pending = h.pending_withdrawals()?;
     let amounts = pending.iter().map(|p| p.amount).collect::<Vec<_>>();
@@ -1112,7 +1119,7 @@ fn replay_is_rejected_across_batches_and_after_bounce_back() -> eyre::Result<()>
     let first = request(&mut h, 1, &payload(&auth(1)))?;
     assert_eq!(
         execute(&mut h, vec![first])?.results,
-        [ForcedExitResult::Exited]
+        [ForcedExitResult::Exited { amount: 42 }]
     );
     let fallback_nonce = h.pending_withdrawals()?[0].fallbackNonce;
 
@@ -1129,7 +1136,7 @@ fn replay_is_rejected_across_batches_and_after_bounce_back() -> eyre::Result<()>
         executed.results,
         [
             ForcedExitResult::Rejected(Reason::NonceAlreadyConsumed),
-            ForcedExitResult::Exited,
+            ForcedExitResult::Exited { amount: 42 },
         ]
     );
     let pending = h.pending_withdrawals()?;
@@ -1164,7 +1171,7 @@ fn malleated_root_signature_cannot_exit_twice() -> eyre::Result<()> {
         assert_eq!(
             executed.results,
             [
-                ForcedExitResult::Exited,
+                ForcedExitResult::Exited { amount: 42 },
                 ForcedExitResult::Rejected(Reason::NonceAlreadyConsumed),
             ]
         );
@@ -1221,7 +1228,10 @@ fn bad_plaintext_is_isolated(mutation: PlaintextMutation) -> eyre::Result<()> {
     if malleated {
         assert_eq!(
             executed.results,
-            [ForcedExitResult::Exited, ForcedExitResult::Empty]
+            [
+                ForcedExitResult::Exited { amount: 42 },
+                ForcedExitResult::Empty
+            ]
         );
     } else {
         assert!(
@@ -1234,7 +1244,7 @@ fn bad_plaintext_is_isolated(mutation: PlaintextMutation) -> eyre::Result<()> {
         );
         assert_eq!(
             executed.results[1],
-            ForcedExitResult::Exited,
+            ForcedExitResult::Exited { amount: 42 },
             "{mutation:?}"
         );
         assert!(!consumed(&mut h, 1)?, "{mutation:?}");
@@ -1320,7 +1330,11 @@ fn outer_mutation_reverts(mutation: OuterMutation) -> eyre::Result<()> {
         && crate::chaum_pedersen::recover_point(&secret, parity)
             == crate::chaum_pedersen::recover_point(&secret, original_parity)
     {
-        assert_eq!(executed.results, [ForcedExitResult::Exited], "{mutation:?}");
+        assert_eq!(
+            executed.results,
+            [ForcedExitResult::Exited { amount: 42 }],
+            "{mutation:?}"
+        );
         return Ok(());
     }
     assert!(executed.output.is_revert(), "{mutation:?} executed");

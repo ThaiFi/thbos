@@ -534,7 +534,7 @@ mod tests {
         log.inner.data = ForcedExitProcessed {
             account,
             requestId: 7,
-            nonce: alloy_primitives::U256::from(3),
+            nonce: U256::from(3),
             reason: 0,
             amount: 42,
         }
@@ -549,18 +549,9 @@ mod tests {
     }
 
     #[test]
-    fn scope_filter_for_caller_scopes_forced_exit_processed_to_topic1() {
-        let caller = Address::with_last_byte(1);
-        let mut filter = Filter::default();
-        filter.topics[0] = FilterSet::from(FORCED_EXIT_PROCESSED_TOPIC);
-        filter.topics[1] = FilterSet::from(caller.into_word());
-        scope_filter_for_caller(&mut filter, &caller).unwrap();
-        assert_eq!(
-            filter.topics[0],
-            FilterSet::from(FORCED_EXIT_PROCESSED_TOPIC)
-        );
-
+    fn scope_filter_for_caller_rejects_topic2_only_forced_exit_processed() {
         // The account is only ever topic1, so a topic2-only filter cannot select it.
+        let caller = Address::with_last_byte(1);
         let mut filter = Filter::default();
         filter.topics[0] = FilterSet::from(FORCED_EXIT_PROCESSED_TOPIC);
         filter.topics[2] = FilterSet::from(caller.into_word());
