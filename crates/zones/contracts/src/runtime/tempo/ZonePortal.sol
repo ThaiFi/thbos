@@ -164,8 +164,7 @@ contract ZonePortal is IZonePortal {
     /// @dev Tokens can never be removed from this list (non-custodial guarantee).
     address[] internal _enabledTokens;
 
-    /// @notice Refunds parked after a deposit bounce-back or forced-exit fee transfer
-    ///         fails on Tempo.
+    /// @notice Refunds parked after a deposit bounce-back transfer fails on Tempo.
     mapping(address token => mapping(address owner => uint128 amount)) public refunds;
 
     /// @notice Withdrawal queue (zone→Tempo): unbounded FIFO
@@ -260,6 +259,9 @@ contract ZonePortal is IZonePortal {
     /// @dev Forced-request prefix confirmed by settlement's shared deposit cursor.
     ///      Reuses forcedExitRequests to release weight without per-deposit checkpoints.
     uint64 private _lastProcessedForcedExitId;
+
+    /// @inheritdoc IZonePortal
+    mapping(address token => mapping(address admin => uint128 amount)) public pendingForcedExitFees;
 
     /*//////////////////////////////////////////////////////////////
                              INITIALIZATION
@@ -1082,9 +1084,9 @@ contract ZonePortal is IZonePortal {
         if (!authorized) revert ForcedExitFeeRejected();
         ITIP20(token).transferFrom(msg.sender, address(this), FORCED_EXIT_FEE);
         // The admin must not be able to block forced exits by refusing the fee, so a failed
-        // payout is parked for claimRefund instead of reverting admission.
+        // payout is parked for claimForcedExitFees instead of reverting admission.
         if (!_tryTransfer(token, admin, FORCED_EXIT_FEE)) {
-            refunds[token][admin] += FORCED_EXIT_FEE;
+            pendingForcedExitFees[token][admin] += FORCED_EXIT_FEE;
             emit ForcedExitFeePending(admin, token, FORCED_EXIT_FEE);
         }
 
@@ -1359,6 +1361,19 @@ contract ZonePortal is IZonePortal {
         if (!_tryTransfer(token, msg.sender, amount)) revert CallbackRejected();
 
         emit RefundClaimed(msg.sender, token, amount);
+    }
+
+    /// @inheritdoc IZonePortal
+    function claimForcedExitFees(address token) external returns (uint128 amount) {
+        // Fees stay with the admin credited at admission and pay only that address, so a former
+        // admin can claim and a TIP-403 block on it still holds. No Role.Account check: the admin
+        // need not be an allowed account, and AccessPolicy abdication would freeze it out.
+        amount = pendingForcedExitFees[token][msg.sender];
+        pendingForcedExitFees[token][msg.sender] = 0;
+
+        if (!_tryTransfer(token, msg.sender, amount)) revert CallbackRejected();
+
+        emit ForcedExitFeesClaimed(msg.sender, token, amount);
     }
 
     /// @notice Attempt a TIP-20 transfer without bubbling recipient/policy reverts.

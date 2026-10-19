@@ -159,6 +159,14 @@ impl VerifyPortalBacking {
             l1_snapshot,
         )
         .await?;
+        let portal_forced_exit_fees = portal_forced_exit_fee_liability(
+            &l1,
+            self.portal,
+            self.token,
+            self.l1_from_block,
+            l1_snapshot,
+        )
+        .await?;
         let inbox_refunds =
             inbox_refund_liability(&zone, self.token, self.zone_from_block, zone_snapshot).await?;
         let pending_deposits = pending_deposit_liability(
@@ -186,6 +194,7 @@ impl VerifyPortalBacking {
 
         let required_backing = zone_supply
             .checked_add(portal_refunds)
+            .and_then(|total| total.checked_add(portal_forced_exit_fees))
             .and_then(|total| total.checked_add(inbox_refunds))
             .and_then(|total| total.checked_add(pending_deposits))
             .and_then(|total| total.checked_add(pending_withdrawals))
@@ -213,6 +222,7 @@ impl VerifyPortalBacking {
         println!("  Pending deposit liability: {pending_deposits}");
         println!("  Pending withdrawal liability: {pending_withdrawals}");
         println!("  Portal refund liability: {portal_refunds}");
+        println!("  Parked forced-exit fees: {portal_forced_exit_fees}");
         println!("  Inbox refund liability:  {inbox_refunds}");
         println!("  Required backing:        {required_backing}");
 
@@ -449,15 +459,6 @@ async fn portal_refund_liability<P: Provider<TempoNetwork>>(
         .query()
         .await
         .wrap_err("failed scanning ZonePortal DepositBounceBackPending events")?;
-    let fee = portal
-        .ForcedExitFeePending_filter()
-        .from_block(from_block)
-        .to_block(to_block)
-        .chunked()
-        .chunk_size(LOG_QUERY_BLOCK_CHUNK)
-        .query()
-        .await
-        .wrap_err("failed scanning ZonePortal ForcedExitFeePending events")?;
     let claimed = portal
         .RefundClaimed_filter()
         .from_block(from_block)
@@ -476,15 +477,6 @@ async fn portal_refund_liability<P: Provider<TempoNetwork>>(
                 .checked_add(U256::from(event.amount))
                 .ok_or_else(|| eyre::eyre!("Portal pending refund total overflow"))
         })?;
-    // Parked forced-exit fees are claimed through the same refund balance.
-    let pending_total = fee
-        .into_iter()
-        .filter(|(event, _)| event.token == token)
-        .try_fold(pending_total, |total, (event, _)| {
-            total
-                .checked_add(U256::from(event.amount))
-                .ok_or_else(|| eyre::eyre!("Portal pending refund total overflow"))
-        })?;
     let claimed_total = claimed
         .into_iter()
         .filter(|(event, _)| event.token == token)
@@ -495,6 +487,54 @@ async fn portal_refund_liability<P: Provider<TempoNetwork>>(
         })?;
 
     outstanding_refunds("Portal", pending_total, claimed_total)
+}
+
+/// Forced-exit fees parked for admins, kept apart from user refunds in `pendingForcedExitFees`.
+async fn portal_forced_exit_fee_liability<P: Provider<TempoNetwork>>(
+    provider: &P,
+    portal: Address,
+    token: Address,
+    from_block: u64,
+    to_block: u64,
+) -> eyre::Result<U256> {
+    let portal = ZonePortal::new(portal, provider);
+    let pending = portal
+        .ForcedExitFeePending_filter()
+        .from_block(from_block)
+        .to_block(to_block)
+        .chunked()
+        .chunk_size(LOG_QUERY_BLOCK_CHUNK)
+        .query()
+        .await
+        .wrap_err("failed scanning ZonePortal ForcedExitFeePending events")?;
+    let claimed = portal
+        .ForcedExitFeesClaimed_filter()
+        .from_block(from_block)
+        .to_block(to_block)
+        .chunked()
+        .chunk_size(LOG_QUERY_BLOCK_CHUNK)
+        .query()
+        .await
+        .wrap_err("failed scanning ZonePortal ForcedExitFeesClaimed events")?;
+
+    let pending_total = pending
+        .into_iter()
+        .filter(|(event, _)| event.token == token)
+        .try_fold(U256::ZERO, |total, (event, _)| {
+            total
+                .checked_add(U256::from(event.amount))
+                .ok_or_else(|| eyre::eyre!("Portal parked fee total overflow"))
+        })?;
+    let claimed_total = claimed
+        .into_iter()
+        .filter(|(event, _)| event.token == token)
+        .try_fold(U256::ZERO, |total, (event, _)| {
+            total
+                .checked_add(U256::from(event.amount))
+                .ok_or_else(|| eyre::eyre!("Portal claimed fee total overflow"))
+        })?;
+
+    outstanding_refunds("Portal forced-exit fee", pending_total, claimed_total)
 }
 
 async fn inbox_refund_liability<P: Provider<TempoNetwork>>(

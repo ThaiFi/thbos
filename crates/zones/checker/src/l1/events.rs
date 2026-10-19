@@ -48,8 +48,13 @@ pub(crate) enum L1PortalEvent {
     ForcedExitsActivated,
     /// A forced exit admitted to the deposit queue. It escrows no principal.
     ForcedExitRequested,
-    /// Forced-exit fee the admin could not receive, parked as a claimable refund.
+    /// Forced-exit fee the admin could not receive, parked for `claimForcedExitFees`.
     ForcedExitFeePending {
+        token: Address,
+        amount: u128,
+    },
+    /// Parked forced-exit fees claimed by the admin credited at admission.
+    ForcedExitFeesClaimed {
         token: Address,
         amount: u128,
     },
@@ -158,6 +163,17 @@ fn decode_portal_event(log: &Log, block: u64) -> eyre::Result<Option<L1PortalEve
                 block,
             )?;
             L1PortalEvent::ForcedExitFeePending {
+                token: e.token,
+                amount: e.amount,
+            }
+        }
+        ZonePortal::ForcedExitFeesClaimed::SIGNATURE_HASH => {
+            let e = decode_event::<ZonePortal::ForcedExitFeesClaimed>(
+                log,
+                "ForcedExitFeesClaimed",
+                block,
+            )?;
+            L1PortalEvent::ForcedExitFeesClaimed {
                 token: e.token,
                 amount: e.amount,
             }
@@ -403,6 +419,14 @@ mod tests {
         }
         .encode_log_data())
     }
+    fn fees_claimed() -> alloy_rpc_types_eth::Log {
+        log(ZonePortal::ForcedExitFeesClaimed {
+            admin: Address::repeat_byte(19),
+            token: Address::repeat_byte(20),
+            amount: 100_000,
+        }
+        .encode_log_data())
+    }
     fn forced_exit() -> alloy_rpc_types_eth::Log {
         log(ZonePortal::ForcedExitRequested {
             depositNumber: 2,
@@ -457,11 +481,12 @@ mod tests {
                 deposit_bounce(),
                 pending(),
                 fee_pending(),
+                fees_claimed(),
                 refund(),
             ],
         )])
         .unwrap();
-        assert_eq!(events.len(), 10);
+        assert_eq!(events.len(), 11);
         assert!(matches!(
             events[0],
             L1PortalEvent::DepositMade {
@@ -494,6 +519,13 @@ mod tests {
         ));
         assert!(matches!(
             events[9],
+            L1PortalEvent::ForcedExitFeesClaimed {
+                amount: 100_000,
+                ..
+            }
+        ));
+        assert!(matches!(
+            events[10],
             L1PortalEvent::RefundClaimed { amount: 42, .. }
         ));
     }
