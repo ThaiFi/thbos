@@ -19,7 +19,8 @@ use tempo_node::rpc::TempoTransactionRequest;
 use tempo_primitives::{
     SignatureType, TempoTransaction, TempoTxEnvelope,
     transaction::{
-        KeyAuthorization, SignedKeyAuthorization, TEMPO_EXPIRING_NONCE_KEY, TokenLimit,
+        FEE_PAYER_SIGNATURE_MARKER, KeyAuthorization, SignedKeyAuthorization,
+        TEMPO_EXPIRING_NONCE_KEY, TokenLimit,
         tempo_transaction::Call,
         tt_signature::{PrimitiveSignature, TempoSignature},
     },
@@ -802,9 +803,7 @@ pub(super) async fn run_fill_transaction_matrix<E: TestEnv>(env: &mut E) -> eyre
             // From T14 a request marked as sponsored by a fee payer that has not signed yet is
             // filled and estimated with that fee payer's cold account access included.
             let sponsored_request = TempoTransactionRequest {
-                fee_payer_signature: Some(
-                    tempo_primitives::transaction::FEE_PAYER_SIGNATURE_MARKER,
-                ),
+                fee_payer_signature: Some(FEE_PAYER_SIGNATURE_MARKER),
                 ..request_context.request.clone()
             };
             let sponsored_tx = fill_request(env.provider(), &sponsored_request).await?;

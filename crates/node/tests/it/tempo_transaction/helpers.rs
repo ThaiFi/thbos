@@ -25,8 +25,8 @@ use tempo_precompiles::tip20::ITIP20::{self, transferCall};
 use tempo_primitives::{
     SignatureType, TempoTransaction,
     transaction::{
-        CallScope, KeyAuthorization, SelectorRule, SignedKeyAuthorization,
-        TEMPO_EXPIRING_NONCE_KEY, TokenLimit,
+        CallScope, FEE_PAYER_SIGNATURE_MARKER, KeyAuthorization, SelectorRule,
+        SignedKeyAuthorization, TEMPO_EXPIRING_NONCE_KEY, TokenLimit,
         tempo_transaction::Call,
         tt_signature::{
             KeychainSignature, P256SignatureWithPreHash, PrimitiveSignature, TempoSignature,
@@ -924,10 +924,10 @@ pub(crate) async fn assert_batch_recipient_balances(
 ///
 /// From T14 a fee payer signature costs one cold account access: the sponsor's account is read to
 /// check that its root key is still active. Callers that take their gas limit from the RPC send
-/// [`FEE_PAYER_SIGNATURE_MARKER`](tempo_primitives::transaction::FEE_PAYER_SIGNATURE_MARKER) with the request instead
+/// [`FEE_PAYER_SIGNATURE_MARKER`] with the request instead
 /// (see [`fill_sponsored_gas_limit`]), so the estimate includes that charge; this is for callers
 /// that set the limit by hand. Before T14 the extra limit only goes unused.
-pub(crate) fn add_fee_payer_access_gas(tx: &mut TempoTransaction) {
+fn add_fee_payer_access_gas(tx: &mut TempoTransaction) {
     tx.gas_limit += COLD_ACCOUNT_ACCESS_COST;
 }
 
@@ -1277,16 +1277,15 @@ pub(crate) async fn fill_request(
     provider: &impl Provider,
     request: &TempoTransactionRequest,
 ) -> eyre::Result<TempoTransaction> {
-    let filled: serde_json::Value =
-        legacy_compat::raw_request(provider, "eth_fillTransaction", request)
-            .await
-            .map_err(normalize_tempo_rpc_error)?;
+    let filled = legacy_compat::raw_request(provider, "eth_fillTransaction", request)
+        .await
+        .map_err(normalize_tempo_rpc_error)?;
     parse_filled_tx(&filled)
 }
 
 /// The gas limit `eth_fillTransaction` returns for `test_case` when a fee payer that has not
 /// signed yet sponsors it: the request carries
-/// [`FEE_PAYER_SIGNATURE_MARKER`](tempo_primitives::transaction::FEE_PAYER_SIGNATURE_MARKER), so the limit includes that fee payer's cold account
+/// [`FEE_PAYER_SIGNATURE_MARKER`], so the limit includes that fee payer's cold account
 /// access. Only T14 and later accept the marker.
 pub(crate) async fn fill_sponsored_gas_limit(
     provider: &impl Provider,
@@ -1303,7 +1302,7 @@ pub(crate) async fn fill_sponsored_gas_limit(
         max_expiry_secs,
     )
     .request;
-    request.fee_payer_signature = Some(tempo_primitives::transaction::FEE_PAYER_SIGNATURE_MARKER);
+    request.set_fee_payer_signature(FEE_PAYER_SIGNATURE_MARKER);
     Ok(fill_request(provider, &request).await?.gas_limit)
 }
 
