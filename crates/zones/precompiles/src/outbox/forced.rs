@@ -1,7 +1,7 @@
 //! Atomic debit and withdrawal construction for authenticated inbox requests.
 use super::*;
 use crate::error::ZonePrecompileError;
-use exithatch::ForcedExitReason as Reason;
+use exithatch::ForcedExitReason;
 use tempo_precompiles::{tip20::Recipient, tip403_registry::TIP403Registry};
 
 /// Upper bound on the gas of one forced-exit debit attempt (debit, token hooks, fallback mapping,
@@ -36,7 +36,7 @@ impl ZoneOutbox {
         l1: &L1State<P>,
         caller: Address,
         request: ForcedWithdrawalRequest,
-    ) -> ZoneResult<Result<(), Reason>> {
+    ) -> ZoneResult<Result<(), ForcedExitReason>> {
         if caller != ZONE_INBOX_ADDRESS {
             return Err(ZoneOutboxError::only_zone_inbox().into());
         }
@@ -50,15 +50,16 @@ impl ZoneOutbox {
         if account.is_zero() || recipient.is_zero() || amount == 0 {
             return Err(ZonePrecompileError::MalformedCalldata);
         }
-        // An error raised while evaluating a policy check is that check's result.
-        // Running out of gas here exhausts the advance itself, not a per-request allotment.
+        // An error raised while evaluating a policy check is that check's result. Running out of
+        // gas here exhausts the advance itself, so it aborts.
         match self.check_forced_withdrawal_policy(l1, token, account, recipient) {
             Ok(true) => {}
-            Err(error @ ZonePrecompileError::Tempo(TempoPrecompileError::OutOfGas)) => {
+            Err(error)
+                if aborts_advance(&error) || error == TempoPrecompileError::OutOfGas.into() =>
+            {
                 return Err(error);
             }
-            Err(error) if aborts_advance(&error) => return Err(error),
-            Ok(false) | Err(_) => return Ok(Err(Reason::PolicyRejected)),
+            Ok(false) | Err(_) => return Ok(Err(ForcedExitReason::PolicyRejected)),
         }
         // Balance was checked by the inbox immediately before this call. Drift is fatal.
         if TIP20Token::from_address(token)?.balance_of(ITIP20::balanceOfCall { account })?
@@ -84,10 +85,9 @@ impl ZoneOutbox {
         self.validate_recipient_policy(l1, recipient, 0)?;
         // L1 admission bounds this mandatory inbox workload. Do not apply or consume the
         // ordinary user-withdrawal cap: it could prevent an admitted anchor from executing.
+        // Enabled at the anchor implies initialized: the portal sets `enabled` with the
+        // token-enablement hash, which `advance_tempo` matched before applying `enable_tokens`.
         let token_contract = TIP20Token::from_address(token)?;
-        if !token_contract.is_initialized()? {
-            return Err(TempoPrecompileError::from(TIP20Error::uninitialized()).into());
-        }
         // Token pause policy is authenticated at the imported Tempo anchor.
         if l1.read_l1(&token_contract.paused)? {
             return Ok(false);
@@ -110,7 +110,7 @@ impl ZoneOutbox {
         &mut self,
         request: ForcedWithdrawalRequest,
         gas: u64,
-    ) -> ZoneResult<Result<(), Reason>> {
+    ) -> ZoneResult<Result<(), ForcedExitReason>> {
         let start = self.storage.gas_used();
         if self.storage.gas_limit() - start < gas {
             return Err(TempoPrecompileError::OutOfGas.into());
@@ -125,7 +125,7 @@ impl ZoneOutbox {
                 Ok(Ok(()))
             }
             Err(error) if aborts_advance(&error) => Err(error),
-            Ok(()) | Err(_) => Ok(Err(Reason::DebitFailed)),
+            Ok(()) | Err(_) => Ok(Err(ForcedExitReason::DebitFailed)),
         }
     }
 
