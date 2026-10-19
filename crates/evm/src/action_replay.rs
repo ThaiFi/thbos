@@ -598,10 +598,16 @@ impl ExpiringNonceReplayState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_utils::{TestExecutorBuilder, test_chainspec};
+    use alloy_consensus::{Signed, TxLegacy, transaction::Recovered};
+    use alloy_primitives::{Bytes, Signature};
     use revm::{
+        context::result::{Output, ResultGas, SuccessReason},
         database::{EmptyDB, InMemoryDB},
         state::AccountInfo,
     };
+    use tempo_primitives::TempoTxEnvelope;
+    use tempo_revm::TempoTxEnv;
 
     fn state_with_storage(address: Address, slot: U256, value: U256) -> State<EmptyDB> {
         let mut db = State::builder().with_database(EmptyDB::default()).build();
@@ -880,5 +886,71 @@ mod tests {
         assert_eq!(change.original, U256::from(11));
         assert_eq!(change.current, U256::from(14));
         assert!(change.written);
+    }
+
+    #[test]
+    fn failed_replay_discards_partial_writes_before_fallback() {
+        let address = Address::repeat_byte(0x42);
+        let slot = U256::from(7);
+        let original = U256::from(80);
+        let mut db = state_with_storage(address, slot, original);
+        let chainspec = test_chainspec();
+        let mut executor = TestExecutorBuilder::default().build(&mut db, &chainspec);
+        let tx = Recovered::new_unchecked(
+            TempoTxEnvelope::Legacy(Signed::new_unhashed(
+                TxLegacy::default(),
+                Signature::test_signature(),
+            )),
+            Address::ZERO,
+        );
+        let mut callbacks = 0;
+        let result = executor.execute_transaction_with_actions(
+            (TempoTxEnv::default(), &tx),
+            StorageActionReplay {
+                result: ExecutionResult::Success {
+                    reason: SuccessReason::Stop,
+                    logs: vec![],
+                    gas: ResultGas::default().with_total_gas_spent(21_000),
+                    output: Output::Call(Bytes::new()),
+                },
+                actions: vec![
+                    StorageAction::Sstore(address, slot, original, U256::from(90)),
+                    StorageAction::Sload(address, slot, original),
+                ],
+                expiring_nonce: Some(ExpiringNonceReplay {
+                    hash: B256::repeat_byte(0x12),
+                    valid_before: 1,
+                }),
+                validator_fee: U256::ZERO,
+            },
+            |_| callbacks += 1,
+        );
+
+        assert_eq!(
+            StorageActionReplayError::from_block_execution_error(&result.unwrap_err()),
+            Some(StorageActionReplayError::ActionConflict)
+        );
+        assert_eq!(callbacks, 0);
+        assert!(executor.receipts().is_empty());
+        assert!(executor.replay_state.tx_changes.is_empty());
+        assert_eq!(executor.replay_state.expiring_nonce.pending_ring_ptr, None);
+        assert_eq!(
+            executor.inner.evm.db_mut().storage(address, slot).unwrap(),
+            original
+        );
+        assert_eq!(
+            executor
+                .inner
+                .evm
+                .db_mut()
+                .storage(
+                    NONCE_PRECOMPILE_ADDRESS,
+                    NonceManager::new().expiring_nonce_ring_ptr.slot(),
+                )
+                .unwrap(),
+            U256::ZERO
+        );
+        executor.invalidate_expiring_nonce_cache();
+        assert_eq!(executor.replay_state.expiring_nonce.ring_ptr, None);
     }
 }

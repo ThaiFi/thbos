@@ -618,7 +618,7 @@ where
                 .then(|| format!("{:?}", tx.transaction))
                 .unwrap_or_default();
 
-            let result_closure = |result: &TempoTxResult| {
+            let mut result_closure = |result: &TempoTxResult| {
                 cumulative_gas_used += result.block_gas_used();
                 cumulative_state_gas_used += result.state_gas_used();
                 if !is_payment {
@@ -634,12 +634,34 @@ where
             };
 
             let execution_result = if let Some(replay) = pool_tx.replay.take() {
-                parallel_transactions_executed += 1;
-                executor.execute_transaction_with_actions(
+                let replay_result = executor.execute_transaction_with_actions(
                     tx.transaction.executable(),
                     *replay,
-                    result_closure,
-                )
+                    &mut result_closure,
+                );
+                if let Err(error) = &replay_result
+                    && let Some(reason) =
+                        StorageActionReplayError::from_block_execution_error(error)
+                {
+                    trace!(
+                        target: "payload_builder",
+                        tx_hash = ?tx.hash(),
+                        ?reason,
+                        "Re-executing transaction after speculative replay failed"
+                    );
+                    executor.invalidate_expiring_nonce_cache();
+                    executor
+                        .execute_transaction_with_result_closure(
+                            tx.transaction.executable(),
+                            result_closure,
+                        )
+                        .map(|_| ())
+                } else {
+                    if replay_result.is_ok() {
+                        parallel_transactions_executed += 1;
+                    }
+                    replay_result
+                }
             } else {
                 executor.invalidate_expiring_nonce_cache();
                 executor
@@ -675,29 +697,6 @@ where
                             self.metrics.inc_pool_tx_skipped("invalid_tx");
                         }
                         continue;
-                    }
-                    BlockExecutionError::Internal(err) => {
-                        if let Some(err) =
-                            StorageActionReplayError::from_internal_block_execution_error(&err)
-                        {
-                            invalid_pool_transaction_execution_attempts += 1;
-                            best_txs.mark_invalid(
-                                &pool_tx,
-                                InvalidPoolTransactionError::Consensus(
-                                    InvalidTransactionError::TxTypeNotSupported,
-                                ),
-                            );
-                            self.metrics.inc_pool_tx_skipped("invalid_replay");
-                            trace!(
-                                target: "payload_builder",
-                                tx_hash = ?tx.hash(),
-                                ?err,
-                                "Skipping invalid replay transaction"
-                            );
-                            continue;
-                        } else {
-                            return Err(PayloadBuilderError::evm(err));
-                        }
                     }
                     _ => return Err(PayloadBuilderError::evm(err)),
                 }
