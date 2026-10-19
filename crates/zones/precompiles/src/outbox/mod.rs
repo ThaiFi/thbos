@@ -2,7 +2,7 @@
 //!
 mod dispatch;
 mod forced;
-pub(crate) use forced::{ForcedWithdrawalError, ForcedWithdrawalRequest};
+pub(crate) use forced::ForcedWithdrawalRequest;
 
 #[cfg(test)]
 mod tests;

@@ -1,6 +1,6 @@
 //! Shared STF execution for encrypted forced exits. No decrypted fields are logged.
 use super::*;
-use crate::outbox::{ForcedWithdrawalError, ForcedWithdrawalRequest};
+use crate::outbox::ForcedWithdrawalRequest;
 use exithatch::ForcedExitReason as Reason;
 use zone_primitives::constants::decode_l1_chain_id;
 
@@ -112,25 +112,21 @@ impl ZoneInbox {
                     } else if balance.is_zero() {
                         Ok(ForcedExitResult::Empty)
                     } else {
-                        match outbox.request_forced_withdrawal(
-                            l1,
-                            self.address,
-                            ForcedWithdrawalRequest {
-                                private_request_hash: exithatch::private_request_hash(
-                                    &auth, &signature,
-                                ),
-                                token: entry.token,
-                                account: auth.account,
-                                recipient: auth.recipient,
-                                amount: balance.to::<u128>(),
+                        let request = ForcedWithdrawalRequest {
+                            private_request_hash: exithatch::private_request_hash(
+                                &auth, &signature,
+                            ),
+                            token: entry.token,
+                            account: auth.account,
+                            recipient: auth.recipient,
+                            amount: balance.to::<u128>(),
+                        };
+                        Ok(
+                            match outbox.request_forced_withdrawal(l1, self.address, request)? {
+                                Ok(()) => ForcedExitResult::Exited,
+                                Err(reason) => ForcedExitResult::Rejected(reason),
                             },
-                        ) {
-                            Ok(_) => Ok(ForcedExitResult::Exited),
-                            Err(ForcedWithdrawalError::PolicyRejected) => {
-                                Ok(ForcedExitResult::Rejected(Reason::PolicyRejected))
-                            }
-                            Err(ForcedWithdrawalError::Fatal(error)) => Err(error),
-                        }
+                        )
                     }
                 }
             }

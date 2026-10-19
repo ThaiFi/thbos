@@ -40,11 +40,13 @@ storage value starts at 0 and `requestForcedExit` reverts with
 `activateForcedExits()`, which irreversibly sets `forcedExitVersion` to 1 and emits
 `ForcedExitsActivated`.
 
-Zone execution accepts a forced request only when the Zone block runs under the
+Zone execution processes a forced request only when the Zone block runs under the
 forced-exit fork and the portal's `forcedExitVersion` is 1 at the imported Tempo
-block. The admin must activate only after the Zone node and prover are upgraded;
-an older node cannot track forced entries in the deposit queue and stalls on the
-first one.
+block. Otherwise the entry is consumed as `NotActivated`, with no decryption and
+no nonce or principal effect, so Zones should schedule T14 before their portal
+activates. The admin must activate only after the Zone node and prover are
+upgraded; an older node cannot track forced entries in the deposit queue and
+stalls on the first one.
 
 ## Status and usage
 

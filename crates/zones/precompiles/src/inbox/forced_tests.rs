@@ -872,11 +872,38 @@ fn admitted_forced_workload_preserves_ordinary_capacity() -> eyre::Result<()> {
     Ok(())
 }
 
-/// Forced entries require both the fork and `forcedExitVersion == 1` at the imported anchor.
-/// Otherwise the whole transition reverts before any request is classified, whatever the
-/// request would have done.
+/// A debit attempt that reverts is a terminal `DebitFailed`: the nonce is consumed, principal is
+/// unchanged, and later entries still execute.
 #[test]
-fn activation_gate_rejects_the_whole_transition() -> eyre::Result<()> {
+fn reverting_debit_is_debit_failed_and_never_stalls_the_inbox() -> eyre::Result<()> {
+    let mut h = active_harness()?;
+    fund(&mut h, 42)?;
+    // Fallback allocation runs after transfer and burn, so both must roll back.
+    with_zone(&mut h, || {
+        Ok(ZoneOutbox::new().last_fallback_nonce.write(u64::MAX)?)
+    })?;
+    let failed = request(&mut h, 1, &payload(&auth(1)))?;
+    let next = deposit(&mut h, BOB, 5)?;
+    let before = snapshot(&mut h)?;
+    let executed = execute(&mut h, vec![failed, next])?;
+    assert_eq!(
+        executed.results,
+        [ForcedExitResult::Rejected(Reason::DebitFailed)]
+    );
+    let after = snapshot(&mut h)?;
+    assert_eq!(after.root_balance, U256::from(42));
+    assert_eq!(after.supply, before.supply + U256::from(5));
+    assert_eq!(after.pending, 0);
+    assert!(consumed(&mut h, 1)?);
+    assert_eq!(h.balance(PATH_USD_ADDRESS, BOB)?, U256::from(5));
+    Ok(())
+}
+
+/// Forced entries execute only under T14 rules with `forcedExitVersion == 1` at the imported
+/// anchor. Otherwise each is consumed as `NotActivated` without using its decryption data,
+/// whatever the request would have done, and the inbox advances past it.
+#[test]
+fn inactive_forced_entries_are_not_activated_and_advance_the_inbox() -> eyre::Result<()> {
     let expected = [
         (42, ForcedExitResult::Exited),
         (0, ForcedExitResult::Empty),
@@ -905,10 +932,10 @@ fn activation_gate_rejects_the_whole_transition() -> eyre::Result<()> {
             let entry = request(&mut h, 1, &plaintext)?;
             set_spec(&mut h, spec);
             let before = snapshot(&mut h)?;
-            let executed = execute(&mut h, vec![entry.clone()])?;
+            let executed = execute(&mut h, vec![entry])?;
             let case = format!("{spec:?} version={version} {result:?}");
             let portal = ForcedExitPortalStorage::new(PORTAL);
-            // The fork check precedes anchoring, so a pre-fork transition reads nothing.
+            // Only T14 rules read the version, and only at the imported anchor.
             let t14 = spec.is_t14();
             assert_eq!(
                 h.l1.requested(1, &portal.forced_exit_version),
@@ -921,15 +948,46 @@ fn activation_gate_rejects_the_whole_transition() -> eyre::Result<()> {
                 assert_eq!(executed.results, [result], "{case}");
                 continue;
             }
-            assert!(executed.output.is_revert(), "{case}");
-            assert_eq!(snapshot(&mut h)?, before, "{case}");
-            if !t14 {
-                // The same entry executes as soon as the fork is active.
-                set_spec(&mut h, TempoHardfork::T14);
-                assert_eq!(execute(&mut h, vec![entry])?.results, [result], "{case}");
-            }
+            assert_eq!(
+                executed.results,
+                [ForcedExitResult::Rejected(Reason::NotActivated)],
+                "{case}"
+            );
+            let after = snapshot(&mut h)?;
+            assert_eq!(after.processed, before.processed + 1, "{case}");
+            assert_ne!(after.queue_hash, before.queue_hash, "{case}");
+            assert_eq!(after.root_balance, U256::from(balance), "{case}");
+            assert_eq!(after.supply, before.supply, "{case}");
+            assert_eq!(after.pending, 0, "{case}");
+            assert_eq!(after.nonces, before.nonces, "{case}");
+            assert_eq!(h.fallback_recipient(1)?, Address::ZERO, "{case}");
         }
     }
+    Ok(())
+}
+
+/// A `NotActivated` entry still takes exactly one decryption witness, but never verifies it.
+#[test]
+fn not_activated_entry_consumes_one_unverified_decryption() -> eyre::Result<()> {
+    let mut h = active_harness()?;
+    fund(&mut h, 42)?;
+    activate(&h, 1, 0)?;
+    let mut entry = request(&mut h, 1, &payload(&auth(1)))?;
+    entry.1.as_mut().unwrap().cpProof.s = B256::ZERO;
+    let next = deposit(&mut h, BOB, 5)?;
+    let executed = execute(&mut h, vec![entry, next])?;
+    assert_eq!(
+        executed.results,
+        [ForcedExitResult::Rejected(Reason::NotActivated)]
+    );
+    assert_eq!(h.balance(PATH_USD_ADDRESS, BOB)?, U256::from(5));
+    assert_eq!(root_balance(&mut h)?, 42);
+
+    let mut missing = request(&mut h, 2, &payload(&auth(2)))?;
+    missing.1 = None;
+    let before = snapshot(&mut h)?;
+    assert!(execute(&mut h, vec![missing])?.output.is_revert());
+    assert_eq!(snapshot(&mut h)?, before);
     Ok(())
 }
 

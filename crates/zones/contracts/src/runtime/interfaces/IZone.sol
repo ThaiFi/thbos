@@ -162,7 +162,9 @@ enum ForcedExitReason {
     InvalidAuthorization,
     NonceAlreadyConsumed,
     BalanceOverflow,
-    PolicyRejected
+    PolicyRejected,
+    DebitFailed,
+    NotActivated
 }
 
 /// @notice Admission identity authenticated by Zone inbox execution.
