@@ -4499,6 +4499,26 @@ fn root_keychain_signature(kind: SigKind, seed: u8, hash: B256) -> (Address, Byt
     keychain_signature(kind, seed, address, hash)
 }
 
+/// `owner`'s approval of `inner_digest` as the one-owner multisig `account`.
+fn multisig_approval(
+    account: Address,
+    owner: &PrivateKeySigner,
+    inner_digest: B256,
+) -> MultisigSignature {
+    let config = MultisigConfig {
+        salt: B256::ZERO,
+        version: 0,
+        threshold: 1,
+        owners: vec![MultisigOwner {
+            owner: owner.address(),
+            weight: 1,
+        }],
+    };
+    let digest = multisig_digest(inner_digest, account, config.version);
+    let approval = PrimitiveSignature::Secp256k1(owner.sign_hash_sync(&digest).unwrap());
+    MultisigSignature::try_new(account, config, vec![approval]).unwrap()
+}
+
 /// Grants `key` of `kind` to the fixture's account, signed by its root.
 fn grant_kind(f: &mut Fixture, nonce: u64, kind: SigKind, key: Address, admin: bool) {
     let signature_type = match kind {
@@ -4703,15 +4723,21 @@ fn retired_root_signatures_still_recover_and_keychain_format_is_unchanged() {
         .into(),
     };
     assert!(bool_query(&mut f, verify, None, "verify").0);
-    // A multisig signature is not a keychain one, retired key or not.
-    for function in [Verifier::Keychain, Verifier::KeychainAdmin] {
-        let call = function.call(account, hash, vec![0x05].into());
-        let result = send(&mut f, signer(9).address(), vec![call]);
-        assert_reverts_with(
-            &result,
-            ISignatureVerifier::InvalidFormat {},
-            &format!("{function:?}"),
-        );
+    // A V2 keychain signature whose inner signature is a multisig one is not a keychain one,
+    // retired key or not, whether the multisig names the parent account or another.
+    let signing_hash = KeychainSignature::signing_hash(hash, account);
+    for named in [account, signer(2).address()] {
+        let multisig = multisig_approval(named, &signer(3), signing_hash);
+        let signature = TempoSignature::Keychain(KeychainSignature::new(account, multisig));
+        for function in [Verifier::Keychain, Verifier::KeychainAdmin] {
+            let call = function.call(account, hash, signature.to_bytes());
+            let result = send(&mut f, signer(9).address(), vec![call]);
+            assert_reverts_with(
+                &result,
+                ISignatureVerifier::InvalidFormat {},
+                &format!("{function:?} naming {named}"),
+            );
+        }
     }
 }
 
