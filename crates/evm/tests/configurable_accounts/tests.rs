@@ -354,6 +354,34 @@ impl BlockGas {
     }
 }
 
+/// The sender of an `upgradeAccount` transaction.
+#[derive(Clone, Copy, Debug)]
+enum UpgradeSender {
+    /// No balance and nonce zero.
+    Empty,
+    /// A balance and nonce zero.
+    Funded,
+    /// The fixture's account at nonce 3, on the protocol lane.
+    Settled,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum Verdict {
+    Valid,
+    Invalid,
+    Reverts,
+}
+
+/// How the verified account is loaded.
+#[derive(Clone, Copy, Debug)]
+enum Access {
+    Cold,
+    /// In the access list of the transaction.
+    Listed,
+    /// An EVM precompile.
+    Warm,
+}
+
 #[test]
 fn native_commitment_only_account_evm_semantics() {
     let target = Address::repeat_byte(0x44);
@@ -2383,17 +2411,6 @@ fn eoa_migration_gas_schedule() {
             assert_eq!(result.tx_gas_used(), expected, "{count} owners, {kind:?}");
         }
     }
-}
-
-/// The sender of an `upgradeAccount` transaction.
-#[derive(Clone, Copy, Debug)]
-enum UpgradeSender {
-    /// No balance and nonce zero.
-    Empty,
-    /// A balance and nonce zero.
-    Funded,
-    /// The fixture's account at nonce 3, on the protocol lane.
-    Settled,
 }
 
 /// Gas of `upgradeAccount` from `sender` on `lane`, paid by the sender or by a fee sponsor, with
@@ -4846,23 +4863,6 @@ fn verify_multisig_call(account: Address, hash: B256, signature: &MultisigSignat
         hash,
         TempoSignature::Multisig(signature.clone()).to_bytes(),
     )
-}
-
-#[derive(Clone, Copy, Debug)]
-enum Verdict {
-    Valid,
-    Invalid,
-    Reverts,
-}
-
-/// How the verified account is loaded.
-#[derive(Clone, Copy, Debug)]
-enum Access {
-    Cold,
-    /// In the access list of the transaction.
-    Listed,
-    /// An EVM precompile.
-    Warm,
 }
 
 /// Checks what `verifyMultisig` returns for `signature` and the gas of the transaction: its
