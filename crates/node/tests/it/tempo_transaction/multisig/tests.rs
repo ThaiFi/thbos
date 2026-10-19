@@ -7,6 +7,7 @@ use alloy::{
     primitives::aliases::U96,
     rpc::types::state::StateOverridesBuilder,
     sol_types::{SolError, SolEvent},
+    transports::TransportError,
 };
 use alloy_eips::{BlockId, BlockNumberOrTag, Decodable2718, eip7702::Authorization};
 use eyre::OptionExt;
@@ -28,6 +29,7 @@ use tempo_primitives::{
     },
 };
 use tempo_revm::native_multisig::NativeMultisigError;
+use tokio::time::timeout;
 
 /// A voucher channel funds a deposit in the fee token and pays out a signed cumulative amount.
 const VOUCHER_DEPOSIT: u64 = 1_000;
@@ -95,7 +97,7 @@ impl RootRole {
             )?,
             Self::TwoDimensionalLaneSender => {
                 let mut tx = create_basic_aa_tx(chain_id, 0, vec![noop()], GAS_LIMIT);
-                tx.nonce_key = U256::from(1);
+                tx.nonce_key = U256::ONE;
                 root_signed(tx, root)?
             }
             Self::ExpiringNonceSender => root_signed(
@@ -118,7 +120,7 @@ impl RootRole {
             // transaction, so only the grant depends on `root`.
             Self::GrantSigner => {
                 let mut tx = create_basic_aa_tx(chain_id, 0, vec![noop()], GAS_LIMIT);
-                tx.nonce_key = U256::from(1);
+                tx.nonce_key = U256::ONE;
                 tx.key_authorization = Some(grant_signed(chain_id, other.address(), root)?);
                 key_signed(tx, account.address, other)?
             }
@@ -619,10 +621,7 @@ async fn native_rpc_maximum_mixed_quorums_and_validation_cost_order() -> eyre::R
 }
 
 /// Reads the revert data of a failed `eth_call` and requires it to be exactly `expected`.
-fn assert_call_reverts(
-    result: Result<Bytes, alloy::transports::RpcError<alloy::transports::TransportErrorKind>>,
-    expected: Vec<u8>,
-) {
+fn assert_call_reverts(result: Result<Bytes, TransportError>, expected: Vec<u8>) {
     let error = result.expect_err("call must revert");
     let data = error
         .as_error_resp()
@@ -845,7 +844,7 @@ async fn root_transaction_queued_behind_migration_is_not_included() -> eyre::Res
     let migrated = provider
         .get_transaction_receipt(hashes[0])
         .await?
-        .ok_or_else(|| eyre!("migration not included"))?;
+        .ok_or_eyre("migration not included")?;
     assert!(migrated.status(), "{migrated:?}");
     assert_eq!(
         commitment(&env, account.address).await?,
@@ -882,8 +881,8 @@ async fn root_transaction_queued_behind_migration_is_not_included() -> eyre::Res
 
 /// Signs `tx` as the sender with the primitive root key of its account.
 fn root_signed(tx: TempoTransaction, root: &PrivateKeySigner) -> eyre::Result<TempoTxEnvelope> {
-    let signature = PrimitiveSignature::Secp256k1(root.sign_hash_sync(&tx.signature_hash())?);
-    Ok(tx.into_signed(TempoSignature::Primitive(signature)).into())
+    let signature = TempoSignature::from(root.sign_hash_sync(&tx.signature_hash())?);
+    Ok(tx.into_signed(signature).into())
 }
 
 /// Signs `tx` for `account` with its access key `key`.
@@ -969,7 +968,7 @@ async fn mine_migration(
     let receipt = tempo_provider(env)
         .get_transaction_receipt(hash)
         .await?
-        .ok_or_else(|| eyre!("migration not included"))?;
+        .ok_or_eyre("migration not included")?;
     assert!(receipt.status(), "{receipt:?}");
     assert_eq!(
         commitment(env, account.address).await?,
@@ -985,8 +984,7 @@ async fn latest_block_hash(env: &Localnet) -> eyre::Result<B256> {
         .get_block_by_number(BlockNumberOrTag::Latest)
         .await?
         .ok_or_eyre("latest block missing")?
-        .header
-        .hash)
+        .hash())
 }
 
 /// Pending transactions that depend on a root key leave the pool when their account's migration
@@ -1008,7 +1006,7 @@ async fn retired_root_pending_transactions_evicted() -> eyre::Result<()> {
         let latest = provider
             .get_block_by_number(Default::default())
             .await?
-            .ok_or_else(|| eyre!("latest block missing"))?;
+            .ok_or_eyre("latest block missing")?;
         let valid_before =
             latest.header.timestamp() + env.setup.hardfork.expiring_nonce_max_expiry_secs();
 
@@ -1055,9 +1053,7 @@ async fn retired_root_leaves_unrelated_pending_transactions_valid() -> eyre::Res
     // Before the migration the account grants `key`, which is not committed.
     let mut tx = account.transaction(&env, vec![noop()]);
     tx.key_authorization = Some(grant_signed(chain_id, key.address(), &root)?);
-    let signature = TempoSignature::Primitive(PrimitiveSignature::Secp256k1(
-        root.sign_hash_sync(&tx.signature_hash())?,
-    ));
+    let signature = TempoSignature::from(root.sign_hash_sync(&tx.signature_hash())?);
     account.submit(&mut env, tx, signature, true).await?;
 
     let migrate = migration(&env, &account, &root)?;
@@ -1078,7 +1074,7 @@ async fn retired_root_leaves_unrelated_pending_transactions_valid() -> eyre::Res
         &bystanders[1],
     )?;
     let mut by_key = create_basic_aa_tx(chain_id, 0, vec![noop()], GAS_LIMIT);
-    by_key.nonce_key = U256::from(1);
+    by_key.nonce_key = U256::ONE;
     let by_key = key_signed(by_key, account.address, &key)?;
     let hashes = pend(&env, &[&with_entry, &bystander, &by_key, &migrate]).await?;
     mine_migration(&mut env, &account, hashes[3]).await?;
@@ -1135,9 +1131,7 @@ async fn retired_root_reorg_evicts_pending_transactions() -> eyre::Result<()> {
     // Before the migration the account grants `key`, whose grant outlives the commitment (R17).
     let mut tx = account.transaction(&env, vec![noop()]);
     tx.key_authorization = Some(grant_signed(chain_id, key.address(), &root)?);
-    let signature = TempoSignature::Primitive(PrimitiveSignature::Secp256k1(
-        root.sign_hash_sync(&tx.signature_hash())?,
-    ));
+    let signature = TempoSignature::from(root.sign_hash_sync(&tx.signature_hash())?);
     account.submit(&mut env, tx, signature, true).await?;
     let fork_point = latest_block_hash(&env).await?;
 
@@ -1232,7 +1226,7 @@ async fn retired_root_reorg_evicts_pending_transactions() -> eyre::Result<()> {
     let receipt = provider
         .get_transaction_receipt(migrate_hash)
         .await?
-        .ok_or_else(|| eyre!("migration not included"))?;
+        .ok_or_eyre("migration not included")?;
     assert_eq!(receipt.block_hash, Some(new_chain.block().hash()));
     assert!(receipt.status(), "{receipt:?}");
     assert!(provider.get_transaction_receipt(hashes[0]).await?.is_none());
@@ -1240,7 +1234,7 @@ async fn retired_root_reorg_evicts_pending_transactions() -> eyre::Result<()> {
     // The pool reports the eviction and every other removal of its batch while it holds the lock
     // of its listeners, which subscribing takes. So once the eviction is reported, a check that
     // subscribes sees every removal of a bystander's transaction.
-    let evicted = tokio::time::timeout(WAIT_TIMEOUT, async {
+    let evicted = timeout(WAIT_TIMEOUT, async {
         while let Some(event) = root_events.next().await {
             if event.is_final() {
                 return Some(event);
@@ -1359,11 +1353,11 @@ async fn parallel_builder_skips_root_payment_after_same_block_migration() -> eyr
             vec![create_transfer_call(
                 DEFAULT_FEE_TOKEN,
                 recipient,
-                U256::from(1),
+                U256::ONE,
             )],
             GAS_LIMIT,
         );
-        tx.nonce_key = U256::from(1);
+        tx.nonce_key = U256::ONE;
         if let Some(fee_payer) = fee_payer {
             sign_fee_payer(&mut tx, owner.address(), fee_payer)?;
         }
@@ -1395,7 +1389,7 @@ async fn parallel_builder_skips_root_payment_after_same_block_migration() -> eyr
     let migrated = provider
         .get_transaction_receipt(hashes[0])
         .await?
-        .ok_or_else(|| eyre!("migration not included"))?;
+        .ok_or_eyre("migration not included")?;
     assert!(migrated.status(), "{migrated:?}");
     assert_eq!(
         commitment(&env, account.address).await?,
@@ -1404,11 +1398,11 @@ async fn parallel_builder_skips_root_payment_after_same_block_migration() -> eyr
     let live = provider
         .get_transaction_receipt(hashes[3])
         .await?
-        .ok_or_else(|| eyre!("unmigrated account's payment not included"))?;
+        .ok_or_eyre("unmigrated account's payment not included")?;
     assert_eq!(live.block_number, migrated.block_number);
     assert!(live.status(), "{live:?}");
     let token = ITIP20::new(DEFAULT_FEE_TOKEN, env.provider());
-    assert_eq!(token.balanceOf(live_recipient).call().await?, U256::from(1));
+    assert_eq!(token.balanceOf(live_recipient).call().await?, U256::ONE);
     for (hash, recipient, role) in [
         (hashes[1], retired_recipient, "sender"),
         (hashes[2], sponsored_recipient, "fee payer"),
@@ -1487,14 +1481,14 @@ async fn parallel_builder_runs_voucher_redemption_after_same_block_migration(
         let receipt = provider
             .get_transaction_receipt(hash)
             .await?
-            .ok_or_else(|| eyre!("channel open not included"))?;
+            .ok_or_eyre("channel open not included")?;
         assert!(receipt.status(), "{receipt:?}");
         let opened = receipt
             .logs()
             .iter()
             .filter(|log| log.address() == TIP20_CHANNEL_RESERVE_ADDRESS)
             .find_map(|log| ITIP20ChannelReserve::ChannelOpened::decode_log(&log.inner).ok())
-            .ok_or_else(|| eyre!("channel open emitted no event"))?
+            .ok_or_eyre("channel open emitted no event")?
             .data;
         channels.push(VoucherChannel {
             id: opened.channelId,
@@ -1556,7 +1550,7 @@ async fn parallel_builder_runs_voucher_redemption_after_same_block_migration(
             }],
             GAS_LIMIT,
         );
-        tx.nonce_key = U256::from(1);
+        tx.nonce_key = U256::ONE;
         let signature = TempoSignature::Primitive(owner(payee).sign(tx.signature_hash())?);
         redemptions.push(TempoTxEnvelope::from(tx.into_signed(signature)));
     }
@@ -1574,7 +1568,7 @@ async fn parallel_builder_runs_voucher_redemption_after_same_block_migration(
     let migrated = provider
         .get_transaction_receipt(hashes[0])
         .await?
-        .ok_or_else(|| eyre!("migration not included"))?;
+        .ok_or_eyre("migration not included")?;
     assert!(migrated.status(), "{migrated:?}");
     assert_eq!(
         commitment(&env, account.address).await?,
