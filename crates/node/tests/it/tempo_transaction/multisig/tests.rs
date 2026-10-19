@@ -29,6 +29,115 @@ use tempo_primitives::{
 };
 use tempo_revm::native_multisig::NativeMultisigError;
 
+/// A voucher channel funds a deposit in the fee token and pays out a signed cumulative amount.
+const VOUCHER_DEPOSIT: u64 = 1_000;
+const VOUCHER_AMOUNT: u64 = 60;
+
+/// What a pending transaction needs from the root key of an account that migrates.
+#[derive(Clone, Copy, Debug)]
+enum RootRole {
+    LegacySender,
+    Eip1559Sender,
+    ProtocolLaneSender,
+    TwoDimensionalLaneSender,
+    ExpiringNonceSender,
+    FeePayer,
+    AccessKey,
+    GrantSigner,
+}
+
+impl RootRole {
+    const ALL: [Self; 8] = [
+        Self::LegacySender,
+        Self::Eip1559Sender,
+        Self::ProtocolLaneSender,
+        Self::TwoDimensionalLaneSender,
+        Self::ExpiringNonceSender,
+        Self::FeePayer,
+        Self::AccessKey,
+        Self::GrantSigner,
+    ];
+
+    /// A transaction that is valid until the migration of `account`, whose root key is `root`,
+    /// commits and depends on that key in this role. `other` is a second key: the key of a
+    /// bystander account for the fee payer and access key roles, and a fresh access key of
+    /// `account` for the grant signer role.
+    fn pending_transaction(
+        self,
+        chain_id: u64,
+        root: &PrivateKeySigner,
+        account: &NativeAccount,
+        other: &PrivateKeySigner,
+        valid_before: u64,
+    ) -> eyre::Result<TempoTxEnvelope> {
+        let target = noop().to;
+        // The migration takes the account's next nonce, so a protocol lane sender uses the one
+        // after it.
+        let queued = account.nonce + 1;
+        Ok(match self {
+            Self::LegacySender => legacy_signed(chain_id, queued, root)?,
+            Self::Eip1559Sender => {
+                let tx = TxEip1559 {
+                    chain_id,
+                    nonce: queued,
+                    gas_limit: 200_000,
+                    max_fee_per_gas: TEMPO_T1_BASE_FEE as u128,
+                    max_priority_fee_per_gas: TEMPO_T1_BASE_FEE as u128,
+                    to: target,
+                    ..Default::default()
+                };
+                let signature = root.sign_hash_sync(&tx.signature_hash())?;
+                TempoTxEnvelope::Eip1559(tx.into_signed(signature))
+            }
+            Self::ProtocolLaneSender => root_signed(
+                create_basic_aa_tx(chain_id, queued, vec![noop()], GAS_LIMIT),
+                root,
+            )?,
+            Self::TwoDimensionalLaneSender => {
+                let mut tx = create_basic_aa_tx(chain_id, 0, vec![noop()], GAS_LIMIT);
+                tx.nonce_key = U256::from(1);
+                root_signed(tx, root)?
+            }
+            Self::ExpiringNonceSender => root_signed(
+                create_expiring_nonce_tx(chain_id, valid_before, Address::repeat_byte(0x73)),
+                root,
+            )?,
+            // A bystander sends and `root` sponsors, so only the fee payer depends on it.
+            Self::FeePayer => {
+                let mut tx = create_basic_aa_tx(chain_id, 0, vec![noop()], GAS_LIMIT);
+                sign_fee_payer(&mut tx, other.address(), root)?;
+                root_signed(tx, other)?
+            }
+            // A bystander account grants `root` as its access key, and `root` signs for it.
+            Self::AccessKey => {
+                let mut tx = create_basic_aa_tx(chain_id, 0, vec![noop()], GAS_LIMIT);
+                tx.key_authorization = Some(grant_signed(chain_id, root.address(), other)?);
+                key_signed(tx, other.address(), root)?
+            }
+            // The account signs a grant of its fresh access key `other`, which sends the
+            // transaction, so only the grant depends on `root`.
+            Self::GrantSigner => {
+                let mut tx = create_basic_aa_tx(chain_id, 0, vec![noop()], GAS_LIMIT);
+                tx.nonce_key = U256::from(1);
+                tx.key_authorization = Some(grant_signed(chain_id, other.address(), root)?);
+                key_signed(tx, account.address, other)?
+            }
+        })
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+enum Redeem {
+    Settle,
+    Close,
+}
+
+/// A channel of `payer`, opened in the next block, and the descriptor that identifies it.
+struct VoucherChannel {
+    id: B256,
+    descriptor: ITIP20ChannelReserve::ChannelDescriptor,
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn native_rpc_registration_revert_retry_and_rotation() -> eyre::Result<()> {
     let mut env = environment().await?;
@@ -880,99 +989,6 @@ async fn latest_block_hash(env: &Localnet) -> eyre::Result<B256> {
         .hash)
 }
 
-/// What a pending transaction needs from the root key of an account that migrates.
-#[derive(Clone, Copy, Debug)]
-enum RootRole {
-    LegacySender,
-    Eip1559Sender,
-    ProtocolLaneSender,
-    TwoDimensionalLaneSender,
-    ExpiringNonceSender,
-    FeePayer,
-    AccessKey,
-    GrantSigner,
-}
-
-impl RootRole {
-    const ALL: [Self; 8] = [
-        Self::LegacySender,
-        Self::Eip1559Sender,
-        Self::ProtocolLaneSender,
-        Self::TwoDimensionalLaneSender,
-        Self::ExpiringNonceSender,
-        Self::FeePayer,
-        Self::AccessKey,
-        Self::GrantSigner,
-    ];
-
-    /// A transaction that is valid until the migration of `account`, whose root key is `root`,
-    /// commits and depends on that key in this role. `other` is a second key: the key of a
-    /// bystander account for the fee payer and access key roles, and a fresh access key of
-    /// `account` for the grant signer role.
-    fn pending_transaction(
-        self,
-        chain_id: u64,
-        root: &PrivateKeySigner,
-        account: &NativeAccount,
-        other: &PrivateKeySigner,
-        valid_before: u64,
-    ) -> eyre::Result<TempoTxEnvelope> {
-        let target = noop().to;
-        // The migration takes the account's next nonce, so a protocol lane sender uses the one
-        // after it.
-        let queued = account.nonce + 1;
-        Ok(match self {
-            Self::LegacySender => legacy_signed(chain_id, queued, root)?,
-            Self::Eip1559Sender => {
-                let tx = TxEip1559 {
-                    chain_id,
-                    nonce: queued,
-                    gas_limit: 200_000,
-                    max_fee_per_gas: TEMPO_T1_BASE_FEE as u128,
-                    max_priority_fee_per_gas: TEMPO_T1_BASE_FEE as u128,
-                    to: target,
-                    ..Default::default()
-                };
-                let signature = root.sign_hash_sync(&tx.signature_hash())?;
-                TempoTxEnvelope::Eip1559(tx.into_signed(signature))
-            }
-            Self::ProtocolLaneSender => root_signed(
-                create_basic_aa_tx(chain_id, queued, vec![noop()], GAS_LIMIT),
-                root,
-            )?,
-            Self::TwoDimensionalLaneSender => {
-                let mut tx = create_basic_aa_tx(chain_id, 0, vec![noop()], GAS_LIMIT);
-                tx.nonce_key = U256::from(1);
-                root_signed(tx, root)?
-            }
-            Self::ExpiringNonceSender => root_signed(
-                create_expiring_nonce_tx(chain_id, valid_before, Address::repeat_byte(0x73)),
-                root,
-            )?,
-            // A bystander sends and `root` sponsors, so only the fee payer depends on it.
-            Self::FeePayer => {
-                let mut tx = create_basic_aa_tx(chain_id, 0, vec![noop()], GAS_LIMIT);
-                sign_fee_payer(&mut tx, other.address(), root)?;
-                root_signed(tx, other)?
-            }
-            // A bystander account grants `root` as its access key, and `root` signs for it.
-            Self::AccessKey => {
-                let mut tx = create_basic_aa_tx(chain_id, 0, vec![noop()], GAS_LIMIT);
-                tx.key_authorization = Some(grant_signed(chain_id, root.address(), other)?);
-                key_signed(tx, other.address(), root)?
-            }
-            // The account signs a grant of its fresh access key `other`, which sends the
-            // transaction, so only the grant depends on `root`.
-            Self::GrantSigner => {
-                let mut tx = create_basic_aa_tx(chain_id, 0, vec![noop()], GAS_LIMIT);
-                tx.nonce_key = U256::from(1);
-                tx.key_authorization = Some(grant_signed(chain_id, other.address(), root)?);
-                key_signed(tx, account.address, other)?
-            }
-        })
-    }
-}
-
 /// Pending transactions that depend on a root key leave the pool when their account's migration
 /// commits, whether the key sends them or is their fee payer, access key or grant signer
 /// (TIP-1112). Each variant migrates a fresh account. The builder skips the dependent
@@ -1405,22 +1421,6 @@ async fn parallel_builder_skips_root_payment_after_same_block_migration() -> eyr
     }
     Ok(())
 }
-
-#[derive(Clone, Copy, Debug)]
-enum Redeem {
-    Settle,
-    Close,
-}
-
-/// A channel of `payer`, opened in the next block, and the descriptor that identifies it.
-struct VoucherChannel {
-    id: B256,
-    descriptor: ITIP20ChannelReserve::ChannelDescriptor,
-}
-
-/// A voucher channel funds a deposit in the fee token and pays out a signed cumulative amount.
-const VOUCHER_DEPOSIT: u64 = 1_000;
-const VOUCHER_AMOUNT: u64 = 60;
 
 /// The parallel builder replays only payments it can gate on the parent state. A channel `settle`
 /// or `close` carries a voucher whose signer's root key a same-block migration retires, so it must
