@@ -69,7 +69,7 @@ use tempo_primitives::{
 };
 use tempo_revm::{
     ExecutionContext, TempoInvalidTransaction, TempoTxEnv, error::RootKeyRole,
-    native_multisig::NativeMultisigError,
+    handler::EXPIRING_NONCE_GAS, native_multisig::NativeMultisigError,
 };
 
 /// A call target that touches `account`'s code size: its gas shows whether the account is warm.
@@ -308,8 +308,7 @@ enum KeychainCheck {
     IsAdminAccessKey { key_committed: bool },
 }
 
-/// The nonce lane of a registration transaction, which decides how TIP-1000 charges the sender's
-/// creation.
+/// The nonce lane of a transaction, which decides how TIP-1000 charges the sender's creation.
 #[derive(Clone, Copy, Debug)]
 enum NonceLane {
     Protocol,
@@ -916,6 +915,25 @@ fn block_gas(f: &mut Fixture, tx: &AASigned) -> BlockGas {
     }
 }
 
+/// An unsigned transaction on `lane` (at nonce zero, except on the simulated lane, which also
+/// disables the nonce check of `f`).
+fn lane_tx(f: &mut Fixture, lane: NonceLane, calls: Vec<Call>) -> TempoTransaction {
+    if matches!(lane, NonceLane::ProtocolSimulated) {
+        f.evm.ctx_mut().cfg.disable_nonce_check = true;
+    }
+    TempoTransaction {
+        nonce_key: match lane {
+            NonceLane::Protocol | NonceLane::ProtocolSimulated => U256::ZERO,
+            NonceLane::TwoD => U256::ONE,
+            NonceLane::Expiring => TEMPO_EXPIRING_NONCE_KEY,
+        },
+        valid_before: matches!(lane, NonceLane::Expiring).then_some(EXPIRING_VALID_BEFORE),
+        gas_limit: 5_000_000,
+        nonce: u64::from(matches!(lane, NonceLane::ProtocolSimulated)),
+        ..aa_tx(0, calls)
+    }
+}
+
 /// Gas of a first registration of the sender on `lane` (at transaction nonce zero, except on the
 /// simulated lane), whose only call is a `CREATE` when `create_first` and a read of the
 /// commitment otherwise.
@@ -932,20 +950,7 @@ fn sender_registration_gas(lane: NonceLane, create_first: bool, empty_sender: bo
     } else {
         f.getter()
     };
-    if matches!(lane, NonceLane::ProtocolSimulated) {
-        f.evm.ctx_mut().cfg.disable_nonce_check = true;
-    }
-    let tx = TempoTransaction {
-        nonce_key: match lane {
-            NonceLane::Protocol | NonceLane::ProtocolSimulated => U256::ZERO,
-            NonceLane::TwoD => U256::ONE,
-            NonceLane::Expiring => TEMPO_EXPIRING_NONCE_KEY,
-        },
-        valid_before: matches!(lane, NonceLane::Expiring).then_some(EXPIRING_VALID_BEFORE),
-        gas_limit: 5_000_000,
-        nonce: u64::from(matches!(lane, NonceLane::ProtocolSimulated)),
-        ..aa_tx(0, vec![call])
-    };
+    let tx = lane_tx(&mut f, lane, vec![call]);
     let tx = multisig_signed(&f, tx);
     block_gas(&mut f, &tx)
 }
@@ -2453,6 +2458,137 @@ fn eoa_migration_gas_schedule() {
                 "{count} owners, {kind:?}: component sum"
             );
             assert_eq!(result.tx_gas_used(), expected, "{count} owners, {kind:?}");
+        }
+    }
+}
+
+/// TIP-1016's split of the new-account cost: 25k regular and 225k state gas. T14's table keeps the
+/// split off, so the test that needs state gas applies it on top.
+const SPLIT_NEW_ACCOUNT_COST: [(GasId, u64); 2] = [
+    (GasId::new_account_cost(), 25_000),
+    (GasId::new_account_state_gas(), 225_000),
+];
+
+/// The sender of an `upgradeAccount` transaction.
+#[derive(Clone, Copy, Debug)]
+enum UpgradeSender {
+    /// No balance and nonce zero.
+    Empty,
+    /// A balance and nonce zero.
+    Funded,
+    /// The fixture's account at nonce 3, on the protocol lane.
+    Settled,
+}
+
+/// Gas of `upgradeAccount` from `sender` on `lane`, paid by the sender or by a fee sponsor, with
+/// TIP-1016's state gas split on or off.
+fn sender_upgrade_gas(
+    lane: NonceLane,
+    sender: UpgradeSender,
+    sponsored: bool,
+    state_gas_split: bool,
+) -> BlockGas {
+    let mut f = Fixture::with_parent(false);
+    let account = f.account;
+    match sender {
+        UpgradeSender::Empty => seed_account(&mut f, account, true),
+        UpgradeSender::Funded => seed_account(&mut f, account, false),
+        UpgradeSender::Settled => {}
+    }
+    if state_gas_split {
+        let cfg = &mut f.evm.ctx_mut().cfg;
+        cfg.enable_amsterdam_eip8037 = true;
+        cfg.gas_params.override_gas(SPLIT_NEW_ACCOUNT_COST);
+    }
+    let config = f.upgraded(1, owner_set(vec![signer(2).address()]));
+    let mut tx = lane_tx(&mut f, lane, vec![Fixture::upgrade(&config)]);
+    if matches!(sender, UpgradeSender::Settled) {
+        tx.nonce = 3;
+    }
+    if sponsored {
+        let sponsor = signer(9);
+        fund(&mut f, sponsor.address(), 50_000_000);
+        tx.max_fee_per_gas = 1;
+        tx.fee_token = Some(PATH_USD_ADDRESS);
+        tx.fee_payer_signature = Some(
+            sponsor
+                .sign_hash_sync(&tx.fee_payer_signature_hash(account))
+                .unwrap(),
+        );
+    }
+    let tx = f.sign_primitive(tx);
+    let gas = block_gas(&mut f, &tx);
+    assert_eq!(f.commitment(), config.commitment().unwrap());
+    gas
+}
+
+#[test]
+fn eoa_migration_charges_the_new_account_cost_once_for_every_nonce_type() {
+    for state_gas_split in [false, true] {
+        let new_account = if state_gas_split {
+            BlockGas {
+                regular: SPLIT_NEW_ACCOUNT_COST[0].1,
+                state: SPLIT_NEW_ACCOUNT_COST[1].1,
+            }
+        } else {
+            let params = tempo_gas_params(TempoHardfork::T14);
+            BlockGas {
+                regular: params.get(GasId::new_account_cost()),
+                state: params.new_account_state_gas(),
+            }
+        };
+        for lane in [
+            NonceLane::Protocol,
+            NonceLane::ProtocolSimulated,
+            NonceLane::TwoD,
+            NonceLane::Expiring,
+        ] {
+            for sponsored in [false, true] {
+                // The `nonce == 0` charge covers the protocol lane's sender, which the nonce
+                // write creates before the call, and the nonce-key slot of a 2D lane. The
+                // expiring lane pays its replay-protection storage instead. A simulated
+                // protocol lane has no such charge.
+                let lane_gas = match lane {
+                    NonceLane::Protocol | NonceLane::TwoD => new_account,
+                    NonceLane::ProtocolSimulated => BlockGas {
+                        regular: 0,
+                        state: 0,
+                    },
+                    NonceLane::Expiring => BlockGas {
+                        regular: EXPIRING_NONCE_GAS,
+                        state: 0,
+                    },
+                };
+                // Only the 2D and expiring lanes leave the sender empty when `upgradeAccount`
+                // commits, so only there does the upgrade pay the creation. The simulated
+                // protocol lane's nonce write creates the sender all the same. The precompile
+                // has no state gas reservoir, so its state gas spills into regular gas.
+                let upgrade_gas = match lane {
+                    NonceLane::Protocol | NonceLane::ProtocolSimulated => BlockGas {
+                        regular: 0,
+                        state: 0,
+                    },
+                    NonceLane::TwoD | NonceLane::Expiring => BlockGas {
+                        regular: new_account.regular + new_account.state,
+                        state: 0,
+                    },
+                };
+                let label =
+                    format!("{lane:?}, sponsored: {sponsored}, state gas split: {state_gas_split}");
+                // A sender at nonce 3 pays no lane charge and has no creation to pay.
+                let settled = sender_upgrade_gas(
+                    NonceLane::Protocol,
+                    UpgradeSender::Settled,
+                    sponsored,
+                    state_gas_split,
+                );
+                let funded =
+                    sender_upgrade_gas(lane, UpgradeSender::Funded, sponsored, state_gas_split);
+                assert_eq!(funded, settled.plus(lane_gas), "funded sender, {label}");
+                let empty =
+                    sender_upgrade_gas(lane, UpgradeSender::Empty, sponsored, state_gas_split);
+                assert_eq!(empty, funded.plus(upgrade_gas), "empty sender, {label}");
+            }
         }
     }
 }
