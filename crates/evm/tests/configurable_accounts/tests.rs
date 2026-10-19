@@ -78,7 +78,42 @@ const KEY_KINDS: [SigKind; 3] = [SigKind::P256, SigKind::WebAuthn, SigKind::Secp
 
 /// Settled amount, deposit and close request of the channel, with the balances of its payee and
 /// payer and of the precompile that holds the deposit.
-type ChannelSnapshot = (U96, U96, u32, U256, U256, U256);
+#[derive(Debug, PartialEq, Eq)]
+struct ChannelSnapshot {
+    settled: U96,
+    deposit: U96,
+    close_requested_at: u32,
+    payee_balance: U256,
+    payer_balance: U256,
+    reserve_balance: U256,
+}
+
+/// The nonce, the 7702 delegation target (`None` without code) and whether the account's
+/// configuration commitment is set.
+#[derive(Debug, PartialEq, Eq)]
+struct AccountState {
+    nonce: u64,
+    delegation: Option<Address>,
+    retired: bool,
+}
+
+/// The path-USD balance and allowance, the keychain keys and the 2D nonce of an account.
+#[derive(Debug, PartialEq, Eq)]
+struct AccountSnapshot {
+    balance: U256,
+    allowance: U256,
+    keys: Vec<IAccountKeychain::KeyInfo>,
+    nonce: u64,
+}
+
+/// An account seeded with `nonce` and `delegation`, and the `entries` that precede the fresh
+/// authority in the list.
+struct ListVariant {
+    name: &'static str,
+    nonce: u64,
+    delegation: Option<Address>,
+    entries: Vec<Entry>,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum GrantOutcome {
@@ -1244,49 +1279,46 @@ fn native_signed_parent_delegate_case(outcome: GrantOutcome, gas_price: u128) {
             }
             f.evm.db_mut().commit(output.state);
             let assert_grant = |f: &mut Fixture, fees: u64, transferred: u64, nonce: u64| {
-                let (key, limit, scopes, balance, recipient_balance) =
-                    StorageCtx::enter_ctx(f.evm.ctx_mut(), StorageActions::disabled(), || {
-                        let keychain = AccountKeychain::new();
-                        Ok::<_, TempoPrecompileError>((
-                            keychain.get_key(IAccountKeychain::getKeyCall {
-                                account: parent,
-                                keyId: delegate,
-                            })?,
-                            keychain.get_remaining_limit(
-                                IAccountKeychain::getRemainingLimitCall {
-                                    account: parent,
-                                    keyId: delegate,
-                                    token: PATH_USD_ADDRESS,
-                                },
-                            )?,
-                            keychain.get_allowed_calls(IAccountKeychain::getAllowedCallsCall {
-                                account: parent,
-                                keyId: delegate,
-                            })?,
-                            TIP20Token::from_address(PATH_USD_ADDRESS)?
-                                .balance_of(ITIP20::balanceOfCall { account: parent })?,
-                            TIP20Token::from_address(PATH_USD_ADDRESS)?.balance_of(
-                                ITIP20::balanceOfCall {
-                                    account: Address::repeat_byte(0x66),
-                                },
-                            )?,
-                        ))
-                    })
-                    .unwrap();
-                assert_eq!(key.keyId, delegate);
-                assert_eq!(key.expiry, 1000);
-                assert!(key.enforceLimits);
-                assert!(!key.isRevoked);
-                assert_eq!(key.signatureType as u8, if delegate_native { 3 } else { 0 });
-                assert_eq!(limit, U256::from(initial_limit - fees - transferred));
-                assert_eq!(balance, U256::from(initial_balance - fees - transferred));
-                assert_eq!(recipient_balance, U256::from(transferred));
-                assert!(scopes.isScoped);
-                assert_eq!(scopes.scopes.len(), targets.len());
-                for scope in scopes.scopes {
-                    assert!(targets.contains(&scope.target));
-                    assert_eq!(scope.selectorRules, Vec::new());
-                }
+                StorageCtx::enter_ctx(f.evm.ctx_mut(), StorageActions::disabled(), || {
+                    let keychain = AccountKeychain::new();
+                    let key = keychain.get_key(IAccountKeychain::getKeyCall {
+                        account: parent,
+                        keyId: delegate,
+                    })?;
+                    let limit =
+                        keychain.get_remaining_limit(IAccountKeychain::getRemainingLimitCall {
+                            account: parent,
+                            keyId: delegate,
+                            token: PATH_USD_ADDRESS,
+                        })?;
+                    let scopes =
+                        keychain.get_allowed_calls(IAccountKeychain::getAllowedCallsCall {
+                            account: parent,
+                            keyId: delegate,
+                        })?;
+                    let balance = TIP20Token::from_address(PATH_USD_ADDRESS)?
+                        .balance_of(ITIP20::balanceOfCall { account: parent })?;
+                    let recipient_balance = TIP20Token::from_address(PATH_USD_ADDRESS)?
+                        .balance_of(ITIP20::balanceOfCall {
+                            account: Address::repeat_byte(0x66),
+                        })?;
+                    assert_eq!(key.keyId, delegate);
+                    assert_eq!(key.expiry, 1000);
+                    assert!(key.enforceLimits);
+                    assert!(!key.isRevoked);
+                    assert_eq!(key.signatureType as u8, if delegate_native { 3 } else { 0 });
+                    assert_eq!(limit, U256::from(initial_limit - fees - transferred));
+                    assert_eq!(balance, U256::from(initial_balance - fees - transferred));
+                    assert_eq!(recipient_balance, U256::from(transferred));
+                    assert!(scopes.isScoped);
+                    assert_eq!(scopes.scopes.len(), targets.len());
+                    for scope in scopes.scopes {
+                        assert!(targets.contains(&scope.target));
+                        assert_eq!(scope.selectorRules, Vec::new());
+                    }
+                    Ok::<_, TempoPrecompileError>(())
+                })
+                .unwrap();
                 f.evm.ctx_mut().journaled_state.finalize();
                 assert_eq!(f.evm.db_mut().basic(parent).unwrap().unwrap().nonce, nonce);
             };
@@ -2161,18 +2193,18 @@ fn eoa_migration_failure_keeps_fee_and_nonce() {
         threshold: 0,
         ..base.clone()
     };
-    for (label, batch, error) in [
-        (
-            "invalid configuration",
-            false,
-            INativeMultisig::InvalidConfig {}.abi_encode(),
-        ),
-        (
-            "batch",
-            true,
-            INativeMultisig::UpgradeMustBeOnlyCall {}.abi_encode(),
-        ),
-    ] {
+    for batch in [false, true] {
+        let (label, error) = if batch {
+            (
+                "batch",
+                INativeMultisig::UpgradeMustBeOnlyCall {}.abi_encode(),
+            )
+        } else {
+            (
+                "invalid configuration",
+                INativeMultisig::InvalidConfig {}.abi_encode(),
+            )
+        };
         let mut f = Fixture::with_parent(false);
         let account = f.account;
         fund(&mut f, account, 50_000_000);
@@ -2315,13 +2347,14 @@ fn eoa_migration_preserves_account_state() {
         StorageCtx::enter_ctx(f.evm.ctx_mut(), StorageActions::disabled(), || {
             let token = TIP20Token::from_address(PATH_USD_ADDRESS)?;
             let keychain = AccountKeychain::new();
-            Ok::<_, TempoPrecompileError>((
-                token.balance_of(ITIP20::balanceOfCall { account })?,
-                token.allowance(ITIP20::allowanceCall {
+            Ok::<_, TempoPrecompileError>(AccountSnapshot {
+                balance: token.balance_of(ITIP20::balanceOfCall { account })?,
+                allowance: token.allowance(ITIP20::allowanceCall {
                     owner: account,
                     spender,
                 })?,
-                keys.iter()
+                keys: keys
+                    .iter()
                     .map(|key| {
                         keychain.get_key(IAccountKeychain::getKeyCall {
                             account,
@@ -2329,22 +2362,19 @@ fn eoa_migration_preserves_account_state() {
                         })
                     })
                     .collect::<Result<Vec<_>, _>>()?,
-                NonceManager::new().get_nonce(INonce::getNonceCall {
+                nonce: NonceManager::new().get_nonce(INonce::getNonceCall {
                     account,
                     nonceKey: lane,
                 })?,
-            ))
+            })
         })
         .unwrap()
     };
     let before = snapshot(&mut f);
-    assert_eq!(before.1, U256::from(77));
-    assert_eq!(before.3, 1);
+    assert_eq!(before.allowance, U256::from(77));
+    assert_eq!(before.nonce, 1);
 
-    let config = f.upgraded(1, owner_set(vec![signer(2).address()]));
-    let tx = f.primitive(9, vec![Fixture::upgrade(&config)]);
-    let result = f.run(&tx);
-    assert_upgraded(&mut f, &result, &config);
+    let config = migrate(&mut f, 9, signer(2).address());
     assert_eq!(snapshot(&mut f), before);
     assert_eq!(f.evm.db_mut().basic(account).unwrap().unwrap().nonce, 10);
 
@@ -2353,22 +2383,21 @@ fn eoa_migration_preserves_account_state() {
         version: 2,
         ..config.clone()
     };
-    for (nonce, call, error) in [
-        (
-            10,
-            Fixture::rotation(&config, &next),
-            INativeMultisig::UnauthorizedMultisigCaller {}.abi_encode(),
-        ),
-        (
-            11,
-            Fixture::upgrade(&config),
-            INativeMultisig::PrimitiveRootRequired {}.abi_encode(),
-        ),
-    ] {
+    let mut rejected = |nonce, call, error: Vec<u8>| {
         let tx = keychain_tx(&f, &keys[1], nonce, vec![call]);
         let result = f.run(&tx);
-        assert_eq!(result.output().unwrap().as_ref(), error);
-    }
+        assert_eq!(result.output().unwrap(), &error);
+    };
+    rejected(
+        10,
+        Fixture::rotation(&config, &next),
+        INativeMultisig::UnauthorizedMultisigCaller {}.abi_encode(),
+    );
+    rejected(
+        11,
+        Fixture::upgrade(&config),
+        INativeMultisig::PrimitiveRootRequired {}.abi_encode(),
+    );
     assert_eq!(f.commitment(), config.commitment().unwrap());
 }
 
@@ -3193,9 +3222,7 @@ fn seed_eoa(f: &mut Fixture, address: Address, nonce: u64) {
     );
 }
 
-/// The nonce, the 7702 delegation target (`None` without code) and whether the account's
-/// configuration commitment is set.
-fn account_state(f: &mut Fixture, address: Address) -> (u64, Option<Address>, bool) {
+fn account_state(f: &mut Fixture, address: Address) -> AccountState {
     let info = f
         .evm
         .db_mut()
@@ -3214,7 +3241,11 @@ fn account_state(f: &mut Fixture, address: Address) -> (u64, Option<Address>, bo
     let retired = !decode_config_commitment(&info.extension, true)
         .unwrap()
         .is_zero();
-    (info.nonce, delegation, retired)
+    AccountState {
+        nonce: info.nonce,
+        delegation,
+        retired,
+    }
 }
 
 fn probe(f: &mut Fixture, account: Address) {
@@ -3259,17 +3290,29 @@ fn retired_root_authorization_list_entries_skipped() {
         // The retired authority is untouched, the other entries applied.
         assert_eq!(
             account_state(&mut f, x.address()),
-            (5, None, true),
+            AccountState {
+                nonce: 5,
+                delegation: None,
+                retired: true
+            },
             "{label}"
         );
         assert_eq!(
             account_state(&mut f, existing.address()),
-            (3, Some(target), false),
+            AccountState {
+                nonce: 3,
+                delegation: Some(target),
+                retired: false
+            },
             "{label}"
         );
         assert_eq!(
             account_state(&mut f, fresh.address()),
-            (1, Some(target), false),
+            AccountState {
+                nonce: 1,
+                delegation: Some(target),
+                retired: false
+            },
             "{label}"
         );
 
@@ -3277,7 +3320,11 @@ fn retired_root_authorization_list_entries_skipped() {
         let (mut control, mismatched_gas) = run(mismatched, false);
         assert_eq!(
             account_state(&mut control, x.address()),
-            (5, None, false),
+            AccountState {
+                nonce: 5,
+                delegation: None,
+                retired: false
+            },
             "{label}"
         );
         assert_eq!(skipped_gas, mismatched_gas, "{label}");
@@ -3287,7 +3334,11 @@ fn retired_root_authorization_list_entries_skipped() {
         let (mut applied, applied_gas) = run(x, false);
         assert_eq!(
             account_state(&mut applied, x.address()),
-            (6, Some(target), false),
+            AccountState {
+                nonce: 6,
+                delegation: Some(target),
+                retired: false
+            },
             "{label}"
         );
         assert_eq!(applied_gas, skipped_gas, "{label}");
@@ -3312,10 +3363,22 @@ fn retired_root_authorization_list_entries_skipped_after_a_same_block_migration(
 
         let result = f.run_as(sender.address(), &tx);
         assert!(result.is_success(), "aa {aa}: {result:?}");
-        assert_eq!(account_state(&mut f, account), (4, None, true), "aa {aa}");
+        assert_eq!(
+            account_state(&mut f, account),
+            AccountState {
+                nonce: 4,
+                delegation: None,
+                retired: true
+            },
+            "aa {aa}"
+        );
         assert_eq!(
             account_state(&mut f, fresh.address()),
-            (1, Some(target), false),
+            AccountState {
+                nonce: 1,
+                delegation: Some(target),
+                retired: false
+            },
             "aa {aa}"
         );
     }
@@ -3330,38 +3393,53 @@ fn retired_root_authorization_list_variants() {
     let x = Entry::new(SigKind::Secp256k1, 9, target, 5);
     let address = x.address();
 
-    // (name, the account's seeded nonce and delegation, the entries before `fresh`).
-    let rows: Vec<(&str, u64, Option<Address>, Vec<Entry>)> = vec![
+    let rows = [
         // A wildcard chain id is loaded by revm like a matching one.
-        ("chain id 0", 5, None, vec![Entry { chain_id: 0, ..x }]),
+        ListVariant {
+            name: "chain id 0",
+            nonce: 5,
+            delegation: None,
+            entries: vec![Entry { chain_id: 0, ..x }],
+        },
         // An EOA migrated on a 2D nonce lane keeps protocol nonce 0, where its entry would apply.
-        ("nonce 0", 0, None, vec![Entry { nonce: 0, ..x }]),
+        ListVariant {
+            name: "nonce 0",
+            nonce: 0,
+            delegation: None,
+            entries: vec![Entry { nonce: 0, ..x }],
+        },
         // Neither an authorization to clear nor one to replace removes the delegation.
-        (
-            "clear delegation",
-            5,
-            Some(old_target),
-            vec![Entry {
+        ListVariant {
+            name: "clear delegation",
+            nonce: 5,
+            delegation: Some(old_target),
+            entries: vec![Entry {
                 target: Address::ZERO,
                 ..x
             }],
-        ),
-        (
-            "replace delegation",
-            5,
-            Some(old_target),
-            vec![Entry { target, ..x }],
-        ),
+        },
+        ListVariant {
+            name: "replace delegation",
+            nonce: 5,
+            delegation: Some(old_target),
+            entries: vec![Entry { target, ..x }],
+        },
         // Every entry of the authority is skipped, whatever its nonce.
-        (
-            "repeated",
-            5,
-            None,
-            vec![x, Entry { nonce: 6, ..x }, Entry { nonce: 5, ..x }],
-        ),
+        ListVariant {
+            name: "repeated",
+            nonce: 5,
+            delegation: None,
+            entries: vec![x, Entry { nonce: 6, ..x }, Entry { nonce: 5, ..x }],
+        },
     ];
     for aa in [false, true] {
-        for (name, nonce, delegation, entries) in &rows {
+        for ListVariant {
+            name,
+            nonce,
+            delegation,
+            entries,
+        } in &rows
+        {
             let label = format!("aa {aa}, {name}");
             let mut f = Fixture::with_parent(false);
             let mut info = AccountInfo {
@@ -3380,12 +3458,20 @@ fn retired_root_authorization_list_variants() {
             assert!(result.is_success(), "{label}: {result:?}");
             assert_eq!(
                 account_state(&mut f, address),
-                (*nonce, *delegation, true),
+                AccountState {
+                    nonce: *nonce,
+                    delegation: *delegation,
+                    retired: true
+                },
                 "{label}"
             );
             assert_eq!(
                 account_state(&mut f, fresh.address()),
-                (1, Some(target), false),
+                AccountState {
+                    nonce: 1,
+                    delegation: Some(target),
+                    retired: false
+                },
                 "{label}"
             );
         }
@@ -3407,10 +3493,22 @@ fn retired_root_address_remains_a_delegation_target() {
         assert!(result.is_success(), "aa {aa}: {result:?}");
         assert_eq!(
             account_state(&mut f, other.address()),
-            (1, Some(x), false),
+            AccountState {
+                nonce: 1,
+                delegation: Some(x),
+                retired: false
+            },
             "aa {aa}"
         );
-        assert_eq!(account_state(&mut f, x), (5, None, true), "aa {aa}");
+        assert_eq!(
+            account_state(&mut f, x),
+            AccountState {
+                nonce: 5,
+                delegation: None,
+                retired: true
+            },
+            "aa {aa}"
+        );
     }
 }
 
@@ -3428,7 +3526,11 @@ fn retired_root_authorization_list_entries_apply_before_t14() {
         assert!(result.is_success(), "aa {aa}: {result:?}");
         assert_eq!(
             account_state(&mut f, x.address()),
-            (6, Some(target), true),
+            AccountState {
+                nonce: 6,
+                delegation: Some(target),
+                retired: true
+            },
             "aa {aa}"
         );
     }
@@ -3496,7 +3598,11 @@ fn keychain_authorization_list_entries_stay_skipped() {
             assert!(result.is_success(), "{label}: {result:?}");
             assert_eq!(
                 account_state(&mut f, x.address()),
-                (5, None, retired),
+                AccountState {
+                    nonce: 5,
+                    delegation: None,
+                    retired
+                },
                 "{label}"
             );
             result.tx_gas_used()
@@ -3821,14 +3927,14 @@ fn channel_snapshot(f: &mut Fixture, channel: &Opened) -> ChannelSnapshot {
         })
     })
     .unwrap();
-    (
-        state.settled,
-        state.deposit,
-        state.closeRequestedAt,
-        balance(f, channel.descriptor.payee),
-        balance(f, channel.descriptor.payer),
-        balance(f, TIP20_CHANNEL_RESERVE_ADDRESS),
-    )
+    ChannelSnapshot {
+        settled: state.settled,
+        deposit: state.deposit,
+        close_requested_at: state.closeRequestedAt,
+        payee_balance: balance(f, channel.descriptor.payee),
+        payer_balance: balance(f, channel.descriptor.payer),
+        reserve_balance: balance(f, TIP20_CHANNEL_RESERVE_ADDRESS),
+    }
 }
 
 /// A channel from `payer` to a fresh payee, one voucher of `payer`'s key for 60 units, and the
@@ -3904,7 +4010,11 @@ fn retired_root_channel_voucher_stays_allowed() {
         let result = send(&mut f, payee, vec![call]);
         assert!(result.is_success(), "{redeem:?}: {result:?}");
         let after = channel_snapshot(&mut f, &channel);
-        assert_eq!(after.3, before.3 + U256::from(60), "{redeem:?}: payee");
+        assert_eq!(
+            after.payee_balance,
+            before.payee_balance + U256::from(60),
+            "{redeem:?}: payee"
+        );
         assert_ne!(after, before, "{redeem:?}");
     }
 }
@@ -3933,8 +4043,12 @@ fn retired_root_channel_close_without_capture_stays_allowed() {
     let result = send(&mut f, payee, vec![call]);
     assert!(result.is_success(), "{result:?}");
     let after = channel_snapshot(&mut f, &channel);
-    assert_eq!(after.3, before.3, "payee");
-    assert_eq!(after.4, before.4 + U256::from(100), "payer refund");
+    assert_eq!(after.payee_balance, before.payee_balance, "payee");
+    assert_eq!(
+        after.payer_balance,
+        before.payer_balance + U256::from(100),
+        "payer refund"
+    );
 }
 
 #[test]
@@ -3974,8 +4088,8 @@ fn retired_root_channel_voucher_inactive_before_t14() {
         let result = send(&mut f, payee, vec![call]);
         assert!(result.is_success(), "{redeem:?}: {result:?}");
         assert_eq!(
-            channel_snapshot(&mut f, &channel).3,
-            before.3 + U256::from(60)
+            channel_snapshot(&mut f, &channel).payee_balance,
+            before.payee_balance + U256::from(60)
         );
     }
 }
@@ -4185,11 +4299,9 @@ fn retired_root_keychain_verifiers_reject() {
             let admin = matches!(function, Verifier::KeychainAdmin);
             // An access key granted by the account: a committed key ID is rejected, an uncommitted
             // one under a committed account is not.
-            for (key_committed, account_committed, expected) in [
-                (false, false, true),
-                (true, false, false),
-                (false, true, true),
-            ] {
+            for (key_committed, account_committed) in [(false, false), (true, false), (false, true)]
+            {
+                let expected = !key_committed;
                 let label = format!(
                     "{kind:?} {function:?} key committed {key_committed}, account committed \
                      {account_committed}"
