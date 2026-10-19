@@ -2421,17 +2421,17 @@ fn sender_upgrade_gas(
     sponsored: bool,
     state_gas_split: bool,
 ) -> BlockGas {
-    let mut f = Fixture::with_parent(false);
+    let mut f = Fixture::with_cfg(false, TempoHardfork::T14, |cfg| {
+        if state_gas_split {
+            cfg.enable_amsterdam_eip8037 = true;
+            cfg.gas_params.override_gas(SPLIT_NEW_ACCOUNT_COST);
+        }
+    });
     let account = f.account;
     match sender {
         UpgradeSender::Empty => seed_account(&mut f, account, true),
         UpgradeSender::Funded => seed_account(&mut f, account, false),
         UpgradeSender::Settled => {}
-    }
-    if state_gas_split {
-        let cfg = &mut f.evm.ctx_mut().cfg;
-        cfg.enable_amsterdam_eip8037 = true;
-        cfg.gas_params.override_gas(SPLIT_NEW_ACCOUNT_COST);
     }
     let config = f.upgraded(1, owner_set(vec![signer(2).address()]));
     let mut tx = lane_tx(&mut f, lane, vec![Fixture::upgrade(&config)]);
@@ -2494,17 +2494,14 @@ fn eoa_migration_charges_the_new_account_cost_once_for_every_nonce_type() {
                 };
                 // Only the 2D and expiring lanes leave the sender empty when `upgradeAccount`
                 // commits, so only there does the upgrade pay the creation. The simulated
-                // protocol lane's nonce write creates the sender all the same. The precompile
-                // has no state gas reservoir, so its state gas spills into regular gas.
+                // protocol lane's nonce write creates the sender all the same. As for
+                // registration, the state part counts as block state gas.
                 let upgrade_gas = match lane {
                     NonceLane::Protocol | NonceLane::ProtocolSimulated => BlockGas {
                         regular: 0,
                         state: 0,
                     },
-                    NonceLane::TwoD | NonceLane::Expiring => BlockGas {
-                        regular: new_account.regular + new_account.state,
-                        state: 0,
-                    },
+                    NonceLane::TwoD | NonceLane::Expiring => new_account,
                 };
                 let label =
                     format!("{lane:?}, sponsored: {sponsored}, state gas split: {state_gas_split}");

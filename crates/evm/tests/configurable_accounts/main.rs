@@ -53,6 +53,16 @@ impl Fixture {
     }
 
     fn with_spec(configurable: bool, spec: TempoHardfork) -> Self {
+        Self::with_cfg(configurable, spec, |_| {})
+    }
+
+    /// A fixture at `spec` whose configuration `configure` adjusts before the EVM is built, so
+    /// that the precompiles, which read it when the EVM is built, see the change too.
+    fn with_cfg(
+        configurable: bool,
+        spec: TempoHardfork,
+        configure: impl FnOnce(&mut CfgEnv<TempoHardfork>),
+    ) -> Self {
         let owner = signer(1);
         let factory = Address::repeat_byte(0x71);
         let config = MultisigConfig {
@@ -74,7 +84,8 @@ impl Fixture {
         seed.info.set_nonce(3).set_balance(U256::from(42));
         seed.mark_touch();
         db.commit(std::iter::once((account, seed)).collect());
-        let cfg = CfgEnv::new_with_spec_and_gas_params(spec, tempo_gas_params(spec));
+        let mut cfg = CfgEnv::new_with_spec_and_gas_params(spec, tempo_gas_params(spec));
+        configure(&mut cfg);
         let mut evm = TempoEvm::new(
             db,
             EvmEnv::new(
