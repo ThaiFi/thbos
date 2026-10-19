@@ -1355,25 +1355,30 @@ contract ZonePortal is IZonePortal {
 
     function claimRefund(address token) external returns (uint128 amount) {
         _requireAllowed(msg.sender);
-        amount = refunds[token][msg.sender];
-        refunds[token][msg.sender] = 0;
-
-        if (!_tryTransfer(token, msg.sender, amount)) revert CallbackRejected();
-
+        amount = _payClaim(refunds, token);
         emit RefundClaimed(msg.sender, token, amount);
     }
 
     /// @inheritdoc IZonePortal
     function claimForcedExitFees(address token) external returns (uint128 amount) {
-        // Fees stay with the admin credited at admission and pay only that address, so a former
-        // admin can claim and a TIP-403 block on it still holds. No Role.Account check: the admin
-        // need not be an allowed account, and AccessPolicy abdication would freeze it out.
-        amount = pendingForcedExitFees[token][msg.sender];
-        pendingForcedExitFees[token][msg.sender] = 0;
+        // No _requireAllowed: the admin need not hold Role.Account, and cannot after AccessPolicy abdication.
+        amount = _payClaim(pendingForcedExitFees, token);
+        emit ForcedExitFeesClaimed(msg.sender, token, amount);
+    }
+
+    /// @dev Zeroes the caller's balance in `pool` and pays it to the caller, reverting with
+    ///      `CallbackRejected` (balance unchanged) if the transfer fails.
+    function _payClaim(
+        mapping(address => mapping(address => uint128)) storage pool,
+        address token
+    )
+        internal
+        returns (uint128 amount)
+    {
+        amount = pool[token][msg.sender];
+        pool[token][msg.sender] = 0;
 
         if (!_tryTransfer(token, msg.sender, amount)) revert CallbackRejected();
-
-        emit ForcedExitFeesClaimed(msg.sender, token, amount);
     }
 
     /// @notice Attempt a TIP-20 transfer without bubbling recipient/policy reverts.
