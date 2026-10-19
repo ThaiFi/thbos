@@ -63,9 +63,9 @@ use tempo_primitives::{
     Block as TempoBlock, SignatureType, TempoHeader, TempoTxEnvelope,
     account::encode_config_commitment,
     transaction::{
-        AccountSignature, CallScope, KeyAuthorization, KeychainSignature, MULTISIG_CONFIG_DOMAIN,
-        SignedKeyAuthorization, TEMPO_EXPIRING_NONCE_KEY, TempoSignedAuthorization, TokenLimit,
-        calc_gas_balance_spending, derive_p256_address,
+        AccountSignature, CallScope, KeyAuthorization, KeychainSignature, KeychainVersion,
+        MULTISIG_CONFIG_DOMAIN, SignedKeyAuthorization, TEMPO_EXPIRING_NONCE_KEY,
+        TempoSignedAuthorization, TokenLimit, calc_gas_balance_spending, derive_p256_address,
         tt_signature::{P256SignatureWithPreHash, WebAuthnSignature, normalize_p256_s},
     },
 };
@@ -5384,4 +5384,39 @@ fn key_type_3_authorization_calls_revert_as_before_t14() {
         assert_ne!(active, run(TempoHardfork::T14, calldata, 4));
         assert_ne!(active, multisig);
     }
+}
+
+#[test]
+fn multisig_is_rejected_where_it_cannot_sign() {
+    let context =
+        TempoInvalidTransaction::NativeMultisig(NativeMultisigError::InvalidSignatureContext);
+    // An authorization-list entry signed by a multisig, whatever the hardfork.
+    for spec in [TempoHardfork::T13, TempoHardfork::T14] {
+        let mut f = Fixture::with_spec(true, spec);
+        let account = f.account;
+        let authorization = Authorization {
+            chain_id: U256::ONE,
+            address: Address::ZERO,
+            nonce: 0,
+        };
+        let approval =
+            multisig_approval(account, &f.config, &f.owner, authorization.signature_hash());
+        let tx = f.sign_primitive(TempoTransaction {
+            tempo_authorization_list: vec![TempoSignedAuthorization::new_unchecked(
+                authorization,
+                TempoSignature::Multisig(approval),
+            )],
+            ..aa_tx(3, vec![f.getter()])
+        });
+        assert_eq!(rejection(&mut f, &tx, account), context, "{spec:?}");
+    }
+    // A legacy (V1) keychain signature wrapping a multisig can only be built in memory.
+    let mut f = Fixture::with_spec(true, TempoHardfork::T1B);
+    let account = f.account;
+    let tx = aa_tx(3, vec![f.getter()]);
+    let approval = multisig_approval(account, &f.config, &f.owner, tx.signature_hash());
+    let mut keychain = KeychainSignature::new(account, approval);
+    keychain.version = KeychainVersion::V1;
+    let tx = tx.into_signed(TempoSignature::Keychain(keychain));
+    assert_eq!(rejection(&mut f, &tx, account), context);
 }
