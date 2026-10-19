@@ -1283,17 +1283,14 @@ pub(crate) async fn fill_request(
     parse_filled_tx(&filled)
 }
 
-/// The gas limit `eth_fillTransaction` returns for `test_case` when a fee payer that has not
-/// signed yet sponsors it: the request carries
-/// [`FEE_PAYER_SIGNATURE_MARKER`], so the limit includes that fee payer's cold account
-/// access. Only T14 and later accept the marker.
-pub(crate) async fn fill_sponsored_gas_limit(
-    provider: &impl Provider,
+/// The request for `test_case` when a fee payer that has not signed yet sponsors it: it carries
+/// [`FEE_PAYER_SIGNATURE_MARKER`]. Only T14 and later accept the marker.
+pub(crate) fn sponsored_fill_request(
     test_case: &FillTestCase,
     signer_addr: Address,
     current_timestamp: u64,
     max_expiry_secs: u64,
-) -> eyre::Result<u64> {
+) -> TempoTransactionRequest {
     let mut request = build_fill_request_context(
         test_case,
         signer_addr,
@@ -1303,6 +1300,20 @@ pub(crate) async fn fill_sponsored_gas_limit(
     )
     .request;
     request.set_fee_payer_signature(FEE_PAYER_SIGNATURE_MARKER);
+    request
+}
+
+/// The gas limit `eth_fillTransaction` returns for the sponsored request of `test_case`, which
+/// includes the fee payer's cold account access.
+pub(crate) async fn fill_sponsored_gas_limit(
+    provider: &impl Provider,
+    test_case: &FillTestCase,
+    signer_addr: Address,
+    current_timestamp: u64,
+    max_expiry_secs: u64,
+) -> eyre::Result<u64> {
+    let request =
+        sponsored_fill_request(test_case, signer_addr, current_timestamp, max_expiry_secs);
     Ok(fill_request(provider, &request).await?.gas_limit)
 }
 
