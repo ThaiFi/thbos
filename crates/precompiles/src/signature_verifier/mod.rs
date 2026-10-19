@@ -49,14 +49,13 @@ impl SignatureVerifier {
     /// From T14, `false` when the recovered key ID has a nonzero account commitment (TIP-1112):
     /// its bare root authority is retired, whichever grant it is used under.
     pub fn verify_keychain(&self, account: Address, hash: B256, signature: Bytes) -> Result<bool> {
-        let (embedded_account, key_id, signature_type) =
-            self.recover_keychain_key(hash, signature)?;
-        if embedded_account != account || self.is_retired_root(key_id)? {
+        let key = self.recover_keychain_key(hash, signature)?;
+        if key.account != account || self.is_retired_root(key.key_id)? {
             return Ok(false);
         }
 
         Ok(self
-            .registered_key(account, key_id, signature_type)?
+            .registered_key(account, key.key_id, key.signature_type)?
             .is_some())
     }
 
@@ -71,18 +70,17 @@ impl SignatureVerifier {
         hash: B256,
         signature: Bytes,
     ) -> Result<bool> {
-        let (embedded_account, key_id, signature_type) =
-            self.recover_keychain_key(hash, signature)?;
-        if embedded_account != account || self.is_retired_root(key_id)? {
+        let key = self.recover_keychain_key(hash, signature)?;
+        if key.account != account || self.is_retired_root(key.key_id)? {
             return Ok(false);
         }
 
         // The root is implicitly admin without a stored access-key grant.
-        if key_id == account {
+        if key.key_id == account {
             return Ok(true);
         }
         Ok(self
-            .registered_key(account, key_id, signature_type)?
+            .registered_key(account, key.key_id, key.signature_type)?
             .is_some_and(|key| key.is_admin))
     }
 
@@ -157,7 +155,7 @@ impl SignatureVerifier {
         }
     }
 
-    fn recover_keychain_key(&self, hash: B256, signature: Bytes) -> Result<(Address, Address, u8)> {
+    fn recover_keychain_key(&self, hash: B256, signature: Bytes) -> Result<RecoveredKeychainKey> {
         let sig = TempoSignature::from_bytes(&signature)
             .map_err(|_| SignatureVerifierError::invalid_format())?;
         let keychain_sig = sig
@@ -173,12 +171,21 @@ impl SignatureVerifier {
 
         let signing_hash = KeychainSignature::signing_hash(hash, keychain_sig.user_address);
         let key_id = self.recover(signing_hash, signature.to_bytes())?;
-        Ok((
-            keychain_sig.user_address,
+        Ok(RecoveredKeychainKey {
+            account: keychain_sig.user_address,
             key_id,
-            signature.signature_type().into(),
-        ))
+            signature_type: signature.signature_type().into(),
+        })
     }
+}
+
+/// The access key a keychain signature was made with, and the account it claims to act for.
+struct RecoveredKeychainKey {
+    /// Account embedded in the keychain signature.
+    account: Address,
+    key_id: Address,
+    /// Signature type byte of the inner primitive signature.
+    signature_type: u8,
 }
 
 /// Full multisig verification cost for a registered account, before account access.

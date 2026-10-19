@@ -11,6 +11,14 @@ use tempo_primitives::{
     },
 };
 
+/// A deterministic P256 owner key with its public coordinates and derived address.
+struct OwnerKey {
+    address: Address,
+    key: SigningKey,
+    x: B256,
+    y: B256,
+}
+
 struct MaximumQuorums {
     roles: [(B256, MultisigSignature); 2],
     invalid_final: MultisigSignature,
@@ -27,10 +35,15 @@ impl MaximumQuorums {
                 let point = key.verifying_key().to_encoded_point(false);
                 let x = B256::from_slice(point.x().unwrap());
                 let y = B256::from_slice(point.y().unwrap());
-                (derive_p256_address(&x, &y), key, x, y)
+                OwnerKey {
+                    address: derive_p256_address(&x, &y),
+                    key,
+                    x,
+                    y,
+                }
             })
             .collect::<Vec<_>>();
-        keys.sort_by_key(|key| key.0);
+        keys.sort_by_key(|key| key.address);
         let roles = [0x31, 0x32].map(|role| {
             let config = MultisigConfig {
                 salt: B256::repeat_byte(role),
@@ -39,7 +52,7 @@ impl MaximumQuorums {
                 owners: keys
                     .iter()
                     .map(|key| MultisigOwner {
-                        owner: key.0,
+                        owner: key.address,
                         weight: 1,
                     })
                     .collect(),
@@ -49,7 +62,7 @@ impl MaximumQuorums {
             let digest = multisig_digest(inner, account, 0);
             let approvals = keys[40..]
                 .iter()
-                .map(|(_, key, x, y)| Self::max_webauthn(key, *x, *y, digest))
+                .map(|owner| Self::max_webauthn(&owner.key, owner.x, owner.y, digest))
                 .collect();
             (
                 inner,
@@ -62,7 +75,7 @@ impl MaximumQuorums {
         };
         // Valid low-s scalars from the same key, but the wrong prehash: parsing
         // succeeds and rejection requires the final P256 verification itself.
-        let wrong: Signature = keys[47].1.sign_prehash(&[0x99; 32]).unwrap();
+        let wrong: Signature = keys[47].key.sign_prehash(&[0x99; 32]).unwrap();
         let (r, s) = wrong.split_bytes();
         last.r = B256::from_slice(&r);
         last.s = normalize_p256_s(&s).unwrap();

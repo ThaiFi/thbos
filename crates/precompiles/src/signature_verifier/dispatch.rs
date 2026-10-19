@@ -104,7 +104,7 @@ mod tests {
         Precompile,
         account_keychain::{AccountKeychain, KeyRestrictions, SignatureType},
         expect_precompile_revert,
-        signature_verifier::tests::random_p256_key,
+        signature_verifier::tests::{P256Key, random_p256_key},
         storage::{StorageCtx, hashmap::HashMapStorageProvider},
         test_util::{assert_full_coverage, check_selector_coverage},
     };
@@ -428,7 +428,12 @@ mod tests {
     fn test_verify_keychain_stored_type_check_starts_at_t14() -> eyre::Result<()> {
         let account = Address::random();
         let hash = B256::repeat_byte(0x69);
-        let (signing_key, pub_key_x, pub_key_y, key_id) = random_p256_key()?;
+        let P256Key {
+            signing_key,
+            pub_key_x,
+            pub_key_y,
+            address: key_id,
+        } = random_p256_key()?;
         let signing_hash = KeychainSignature::signing_hash(hash, account);
         let (signature, _) = signing_key.sign_prehash_recoverable(signing_hash.as_slice())?;
         let signature = signature.normalize_s().unwrap_or(signature);
@@ -446,12 +451,41 @@ mod tests {
         .to_vec();
 
         // P256 and WebAuthn derive the same key address from the same public key.
-        for (spec, stored_type, expected) in [
-            (TempoHardfork::T13, SignatureType::P256, true),
-            (TempoHardfork::T13, SignatureType::WebAuthn, true),
-            (TempoHardfork::T14, SignatureType::P256, true),
-            (TempoHardfork::T14, SignatureType::WebAuthn, false),
-            (TempoHardfork::T14, SignatureType::Multisig, false),
+        struct Case {
+            spec: TempoHardfork,
+            stored_type: SignatureType,
+            expected: bool,
+        }
+        for Case {
+            spec,
+            stored_type,
+            expected,
+        } in [
+            Case {
+                spec: TempoHardfork::T13,
+                stored_type: SignatureType::P256,
+                expected: true,
+            },
+            Case {
+                spec: TempoHardfork::T13,
+                stored_type: SignatureType::WebAuthn,
+                expected: true,
+            },
+            Case {
+                spec: TempoHardfork::T14,
+                stored_type: SignatureType::P256,
+                expected: true,
+            },
+            Case {
+                spec: TempoHardfork::T14,
+                stored_type: SignatureType::WebAuthn,
+                expected: false,
+            },
+            Case {
+                spec: TempoHardfork::T14,
+                stored_type: SignatureType::Multisig,
+                expected: false,
+            },
         ] {
             let mut storage = HashMapStorageProvider::new_with_spec(1, spec);
             StorageCtx::enter(&mut storage, || -> eyre::Result<()> {

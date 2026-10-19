@@ -21,6 +21,14 @@ use tempo_primitives::transaction::{
     },
 };
 
+/// Random P256 key with its public coordinates and the address derived from them.
+pub(super) struct P256Key {
+    pub(super) signing_key: SigningKey,
+    pub(super) pub_key_x: B256,
+    pub(super) pub_key_y: B256,
+    pub(super) address: Address,
+}
+
 /// A single-owner multisig whose owner holds all of `threshold`, with that owner's signature over `hash`.
 struct MultisigFixture {
     factory: Address,
@@ -30,14 +38,18 @@ struct MultisigFixture {
     signature: Vec<u8>,
 }
 
-/// Random P256 key with its public coordinates and the address derived from them.
-pub(super) fn random_p256_key() -> eyre::Result<(SigningKey, B256, B256, Address)> {
+pub(super) fn random_p256_key() -> eyre::Result<P256Key> {
     let signing_key = SigningKey::random(&mut OsRng);
     let point = signing_key.verifying_key().to_encoded_point(false);
     let pub_key_x = B256::from_slice(point.x().ok_or_eyre("missing x coord")?);
     let pub_key_y = B256::from_slice(point.y().ok_or_eyre("missing y coord")?);
     let address = derive_p256_address(&pub_key_x, &pub_key_y);
-    Ok((signing_key, pub_key_x, pub_key_y, address))
+    Ok(P256Key {
+        signing_key,
+        pub_key_x,
+        pub_key_y,
+        address,
+    })
 }
 
 fn sign_recover(hash: B256, signature: Vec<u8>) -> Result<Address> {
@@ -100,7 +112,12 @@ fn test_verify_secp256k1_valid() -> eyre::Result<()> {
 fn test_verify_p256_valid() -> eyre::Result<()> {
     let mut storage = HashMapStorageProvider::new_with_spec(1, TempoHardfork::T3);
     StorageCtx::enter(&mut storage, || {
-        let (signing_key, pub_key_x, pub_key_y, expected_address) = random_p256_key()?;
+        let P256Key {
+            signing_key,
+            pub_key_x,
+            pub_key_y,
+            address: expected_address,
+        } = random_p256_key()?;
 
         let hash = B256::repeat_byte(0xBB);
         let (signature, _) = signing_key.sign_prehash_recoverable(hash.as_slice())?;

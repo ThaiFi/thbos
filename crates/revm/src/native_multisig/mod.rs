@@ -69,6 +69,14 @@ impl NativeAuthorization<'_> {
     }
 }
 
+/// What [`validate_native_roles`] charges and loads for the native roles of a transaction.
+struct NativeRoles {
+    extra_gas: u64,
+    state_gas: u64,
+    /// Native role accounts already loaded, in role order.
+    accounts: Vec<Address>,
+}
+
 /// Outer (direct or delegated) role, then inline grant role; either slot may be absent.
 pub fn authorizations(tx: &TempoTxEnv) -> [Option<NativeAuthorization<'_>>; 2] {
     let Some(aa) = tx.tempo_tx_env.as_ref() else {
@@ -121,8 +129,11 @@ pub fn validate_state<J: JournalTr>(
     spec: TempoHardfork,
     gas: &GasParams,
 ) -> NativeValidationResult<(u64, u64), <J::Database as Database>::Error> {
-    let (mut extra_gas, state_gas, mut accounts) =
-        validate_native_roles(journal, tx, block, spec, gas)?;
+    let NativeRoles {
+        mut extra_gas,
+        state_gas,
+        mut accounts,
+    } = validate_native_roles(journal, tx, block, spec, gas)?;
     if spec.is_t14() {
         extra_gas += validate_root_keys(journal, tx, gas, &mut accounts)?;
     }
@@ -261,10 +272,14 @@ fn validate_native_roles<J: JournalTr>(
     block: &TempoBlockEnv,
     spec: TempoHardfork,
     gas: &GasParams,
-) -> NativeValidationResult<(u64, u64, Vec<Address>), <J::Database as Database>::Error> {
+) -> NativeValidationResult<NativeRoles, <J::Database as Database>::Error> {
     // Non-AA transactions have no native roles or grant delegate.
     let Some(aa) = tx.tempo_tx_env.as_ref() else {
-        return Ok((0, 0, Vec::new()));
+        return Ok(NativeRoles {
+            extra_gas: 0,
+            state_gas: 0,
+            accounts: Vec::new(),
+        });
     };
     let roles = authorizations(tx);
     let invalid = |error| EVMError::Transaction(TempoInvalidTransaction::NativeMultisig(error));
@@ -289,7 +304,11 @@ fn validate_native_roles<J: JournalTr>(
         }
     }
     if roles.iter().all(Option::is_none) {
-        return Ok((0, 0, Vec::new()));
+        return Ok(NativeRoles {
+            extra_gas: 0,
+            state_gas: 0,
+            accounts: Vec::new(),
+        });
     }
     // Grant signers may be admin access keys; later checks bind them to the caller.
     if let Some(signature) = aa.signature.as_multisig()
@@ -350,7 +369,11 @@ fn validate_native_roles<J: JournalTr>(
             }
         }
     }
-    Ok((extra_gas, state_gas, accounts))
+    Ok(NativeRoles {
+        extra_gas,
+        state_gas,
+        accounts,
+    })
 }
 
 /// Rejects bare primitive authority of accounts with a nonzero commitment (TIP-1112).

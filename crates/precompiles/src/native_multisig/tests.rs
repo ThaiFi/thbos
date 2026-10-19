@@ -92,49 +92,60 @@ fn native_config_error_precedence_through_abi() {
     let mut storage = HashMapStorageProvider::new_with_spec(1, TempoHardfork::T14)
         .with_multisig_recovery_factory(Address::repeat_byte(0x71));
     StorageCtx::enter(&mut storage, || {
-        for (case, threshold, owners, expected) in [
-            (
-                "empty before threshold",
-                0,
-                vec![],
-                NativeMultisigError::invalid_multisig_owner(),
-            ),
-            (
-                "count before threshold",
-                0,
-                vec![(0, 0); 49],
-                NativeMultisigError::too_many_owners(),
-            ),
-            (
-                "threshold before address",
-                0,
-                vec![(0, 0)],
-                NativeMultisigError::invalid_threshold(),
-            ),
-            (
-                "address before weight",
-                1,
-                vec![(0x11, 0), (0, 1)],
-                NativeMultisigError::invalid_multisig_owner(),
-            ),
-            (
-                "weight before duplicate",
-                1,
-                vec![(0x11, 1), (0x11, 1), (0x22, 0)],
-                NativeMultisigError::invalid_weight(),
-            ),
-            (
-                "nonadjacent duplicate before order",
-                1,
-                vec![(0x22, 1), (0x11, 1), (0x22, 1)],
-                NativeMultisigError::duplicate_owner(),
-            ),
-            (
-                "order before total weight",
-                1,
-                vec![(0x22, 128), (0x11, 128)],
-                NativeMultisigError::invalid_owner_order(),
-            ),
+        struct Case {
+            name: &'static str,
+            threshold: u8,
+            owners: Vec<(u8, u8)>,
+            expected: NativeMultisigError,
+        }
+        for Case {
+            name: case,
+            threshold,
+            owners,
+            expected,
+        } in [
+            Case {
+                name: "empty before threshold",
+                threshold: 0,
+                owners: vec![],
+                expected: NativeMultisigError::invalid_multisig_owner(),
+            },
+            Case {
+                name: "count before threshold",
+                threshold: 0,
+                owners: vec![(0, 0); 49],
+                expected: NativeMultisigError::too_many_owners(),
+            },
+            Case {
+                name: "threshold before address",
+                threshold: 0,
+                owners: vec![(0, 0)],
+                expected: NativeMultisigError::invalid_threshold(),
+            },
+            Case {
+                name: "address before weight",
+                threshold: 1,
+                owners: vec![(0x11, 0), (0, 1)],
+                expected: NativeMultisigError::invalid_multisig_owner(),
+            },
+            Case {
+                name: "weight before duplicate",
+                threshold: 1,
+                owners: vec![(0x11, 1), (0x11, 1), (0x22, 0)],
+                expected: NativeMultisigError::invalid_weight(),
+            },
+            Case {
+                name: "nonadjacent duplicate before order",
+                threshold: 1,
+                owners: vec![(0x22, 1), (0x11, 1), (0x22, 1)],
+                expected: NativeMultisigError::duplicate_owner(),
+            },
+            Case {
+                name: "order before total weight",
+                threshold: 1,
+                owners: vec![(0x22, 128), (0x11, 128)],
+                expected: NativeMultisigError::invalid_owner_order(),
+            },
         ] {
             let call = INativeMultisig::deriveAccountCall {
                 salt: B256::ZERO,
