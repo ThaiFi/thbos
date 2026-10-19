@@ -166,7 +166,7 @@ fn run_node(mut cli: Cli<ZoneChainSpecParser, ZoneArgs>) -> eyre::Result<()> {
             node = node.with_deposit_decryption_keys(additional_decryption_keys);
         }
 
-        let data_dir = builder.config().datadir().data_dir();
+        let data_dir = builder.config().datadir().data_dir().to_path_buf();
         node = configure_sequencing(&args, zone_id, &data_dir, node).await?;
 
         // Install or skip the checker ExEx based on the configured mode.
