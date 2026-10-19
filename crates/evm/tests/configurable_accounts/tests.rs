@@ -355,70 +355,6 @@ impl BlockGas {
 }
 
 #[test]
-fn native_factory_activation_preserves_state() {
-    let factory = Address::repeat_byte(0x71);
-    let config = activation_config();
-    for nonce in [0, 7] {
-        for code in [bytes!(""), bytes!("600000")] {
-            let mut db = State::builder().with_bundle_update().build();
-            let bytecode = Bytecode::new_legacy(code.clone());
-            db.insert_account_with_storage(
-                factory,
-                AccountInfo::new(U256::from(42), nonce, bytecode.hash_slow(), bytecode),
-                std::iter::once((U256::from(3), U256::from(9))).collect(),
-            );
-            for (number, timestamp) in [(1, 9), (2, 10), (3, 11)] {
-                let block = TempoBlock::uncle(TempoHeader {
-                    inner: Header {
-                        number,
-                        timestamp,
-                        gas_limit: 30_000_000,
-                        base_fee_per_gas: Some(0),
-                        parent_beacon_block_root: Some(B256::ZERO),
-                        ..Default::default()
-                    },
-                    general_gas_limit: 30_000_000,
-                    ..Default::default()
-                })
-                .seal_slow();
-                let mut executor = config.executor_for_block(&mut db, &block).unwrap();
-                assert_eq!(
-                    executor.evm().cfg_env().spec,
-                    if timestamp < 10 {
-                        TempoHardfork::T13
-                    } else {
-                        TempoHardfork::T14
-                    }
-                );
-                executor.apply_pre_execution_changes().unwrap();
-                executor.finish().unwrap();
-                let info = db.basic(factory).unwrap().unwrap();
-                assert_eq!(
-                    info.nonce,
-                    if timestamp < 10 { nonce } else { nonce.max(1) }
-                );
-                assert_eq!(info.balance, U256::from(42));
-                assert_eq!(
-                    info.code.unwrap().original_bytes(),
-                    if timestamp < 10 {
-                        code.clone()
-                    } else {
-                        bytes!("ef")
-                    }
-                );
-                assert_eq!(db.storage(factory, U256::from(3)).unwrap(), U256::from(9));
-                let marker = db
-                    .basic(NATIVE_MULTISIG_ADDRESS)
-                    .unwrap()
-                    .unwrap_or_default();
-                assert_eq!(marker.is_empty_code_hash(), timestamp < 10);
-                db.merge_transitions(BundleRetention::Reverts);
-            }
-        }
-    }
-}
-
-#[test]
 fn native_commitment_only_account_evm_semantics() {
     let target = Address::repeat_byte(0x44);
     let commitment = B256::repeat_byte(0x99);
@@ -5364,4 +5300,68 @@ fn multisig_is_rejected_where_it_cannot_sign() {
     keychain.version = KeychainVersion::V1;
     let tx = tx.into_signed(TempoSignature::Keychain(keychain));
     assert_eq!(rejection(&mut f, &tx, account), context);
+}
+
+#[test]
+fn native_factory_activation_preserves_state() {
+    let factory = Address::repeat_byte(0x71);
+    let config = activation_config();
+    for nonce in [0, 7] {
+        for code in [bytes!(""), bytes!("600000")] {
+            let mut db = State::builder().with_bundle_update().build();
+            let bytecode = Bytecode::new_legacy(code.clone());
+            db.insert_account_with_storage(
+                factory,
+                AccountInfo::new(U256::from(42), nonce, bytecode.hash_slow(), bytecode),
+                std::iter::once((U256::from(3), U256::from(9))).collect(),
+            );
+            for (number, timestamp) in [(1, 9), (2, 10), (3, 11)] {
+                let block = TempoBlock::uncle(TempoHeader {
+                    inner: Header {
+                        number,
+                        timestamp,
+                        gas_limit: 30_000_000,
+                        base_fee_per_gas: Some(0),
+                        parent_beacon_block_root: Some(B256::ZERO),
+                        ..Default::default()
+                    },
+                    general_gas_limit: 30_000_000,
+                    ..Default::default()
+                })
+                .seal_slow();
+                let mut executor = config.executor_for_block(&mut db, &block).unwrap();
+                assert_eq!(
+                    executor.evm().cfg_env().spec,
+                    if timestamp < 10 {
+                        TempoHardfork::T13
+                    } else {
+                        TempoHardfork::T14
+                    }
+                );
+                executor.apply_pre_execution_changes().unwrap();
+                executor.finish().unwrap();
+                let info = db.basic(factory).unwrap().unwrap();
+                assert_eq!(
+                    info.nonce,
+                    if timestamp < 10 { nonce } else { nonce.max(1) }
+                );
+                assert_eq!(info.balance, U256::from(42));
+                assert_eq!(
+                    info.code.unwrap().original_bytes(),
+                    if timestamp < 10 {
+                        code.clone()
+                    } else {
+                        bytes!("ef")
+                    }
+                );
+                assert_eq!(db.storage(factory, U256::from(3)).unwrap(), U256::from(9));
+                let marker = db
+                    .basic(NATIVE_MULTISIG_ADDRESS)
+                    .unwrap()
+                    .unwrap_or_default();
+                assert_eq!(marker.is_empty_code_hash(), timestamp < 10);
+                db.merge_transitions(BundleRetention::Reverts);
+            }
+        }
+    }
 }
