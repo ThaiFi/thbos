@@ -70,11 +70,202 @@ use tempo_revm::{
     native_multisig::NativeMultisigError,
 };
 
+/// A call target that touches `account`'s code size: its gas shows whether the account is warm.
+const PROBE: Address = Address::repeat_byte(0x99);
+
+/// The key kinds a keychain signature can carry: its inner signature is a primitive one.
+const KEY_KINDS: [SigKind; 3] = [SigKind::P256, SigKind::WebAuthn, SigKind::Secp256k1];
+
+/// Settled amount, deposit and close request of the channel, with the balances of its payee and
+/// payer and of the precompile that holds the deposit.
+type ChannelSnapshot = (U96, U96, u32, U256, U256, U256);
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum GrantOutcome {
     Success,
     RevertAndRetry,
     ScopeRejectionAndRetry,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum RootTx {
+    Legacy,
+    Eip2930,
+    Eip1559,
+    Aa,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum SigKind {
+    Secp256k1,
+    P256,
+    WebAuthn,
+    /// The secp256k1 key signing as an access key of its own address, which it names as the
+    /// authority.
+    Keychain,
+}
+
+/// One authorization-list entry: the authority is derived from `kind` and `seed`.
+#[derive(Clone, Copy, Debug)]
+struct Entry {
+    kind: SigKind,
+    seed: u8,
+    chain_id: u64,
+    target: Address,
+    nonce: u64,
+}
+
+impl Entry {
+    fn new(kind: SigKind, seed: u8, target: Address, nonce: u64) -> Self {
+        Self {
+            kind,
+            seed,
+            chain_id: 1,
+            target,
+            nonce,
+        }
+    }
+
+    fn authorization(&self) -> Authorization {
+        Authorization {
+            chain_id: U256::from(self.chain_id),
+            address: self.target,
+            nonce: self.nonce,
+        }
+    }
+
+    fn address(&self) -> Address {
+        self.sign().0
+    }
+
+    /// The authority and the entry signed by it with its own key type.
+    fn sign(&self) -> (Address, TempoSignedAuthorization) {
+        let authorization = self.authorization();
+        let hash = authorization.signature_hash();
+        let (address, signature) = match self.kind {
+            SigKind::Secp256k1 => {
+                let key = signer(self.seed);
+                let signature = key.sign_hash_sync(&hash).unwrap();
+                (key.address(), TempoSignature::from(signature))
+            }
+            SigKind::Keychain => {
+                let key = signer(self.seed);
+                let signature = key
+                    .sign_hash_sync(&KeychainSignature::signing_hash(hash, key.address()))
+                    .unwrap();
+                (
+                    key.address(),
+                    TempoSignature::Keychain(KeychainSignature::new(
+                        key.address(),
+                        PrimitiveSignature::Secp256k1(signature),
+                    )),
+                )
+            }
+            SigKind::P256 | SigKind::WebAuthn => {
+                let (address, primitive) = p256_primitive(self.kind, self.seed, hash);
+                (address, TempoSignature::Primitive(primitive))
+            }
+        };
+        (
+            address,
+            TempoSignedAuthorization::new_unchecked(authorization, signature),
+        )
+    }
+
+    /// The entry as an EIP-7702 authorization, which only a secp256k1 authority can sign.
+    fn legacy(&self) -> SignedAuthorization {
+        assert!(matches!(self.kind, SigKind::Secp256k1), "{self:?}");
+        let authorization = self.authorization();
+        let signature = signer(self.seed)
+            .sign_hash_sync(&authorization.signature_hash())
+            .unwrap();
+        authorization.into_signed(signature)
+    }
+}
+
+/// An open path USD channel and its identity.
+struct Opened {
+    id: B256,
+    descriptor: ITIP20ChannelReserve::ChannelDescriptor,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum Redeem {
+    Settle,
+    Close,
+}
+
+impl Redeem {
+    /// The payee's call redeeming `amount` of the channel with `signature`.
+    fn call(self, channel: &Opened, amount: u64, signature: Bytes) -> Call {
+        let descriptor = channel.descriptor.clone();
+        let cumulative_amount = U96::from(amount);
+        let input = match self {
+            Self::Settle => ITIP20ChannelReserve::settleCall {
+                descriptor,
+                cumulativeAmount: cumulative_amount,
+                signature,
+            }
+            .abi_encode(),
+            Self::Close => ITIP20ChannelReserve::closeCall {
+                descriptor,
+                cumulativeAmount: cumulative_amount,
+                captureAmount: cumulative_amount,
+                signature,
+            }
+            .abi_encode(),
+        };
+        Call {
+            to: TxKind::Call(TIP20_CHANNEL_RESERVE_ADDRESS),
+            value: U256::ZERO,
+            input: input.into(),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+enum SignedAction {
+    Permit,
+    Redeem(Redeem),
+}
+
+#[derive(Clone, Copy, Debug)]
+enum Verifier {
+    Keychain,
+    KeychainAdmin,
+}
+
+impl Verifier {
+    fn call(self, account: Address, hash: B256, signature: Bytes) -> Call {
+        let input = match self {
+            Self::Keychain => ISignatureVerifier::verifyKeychainCall {
+                account,
+                hash,
+                signature,
+            }
+            .abi_encode(),
+            Self::KeychainAdmin => ISignatureVerifier::verifyKeychainAdminCall {
+                account,
+                hash,
+                signature,
+            }
+            .abi_encode(),
+        };
+        Call {
+            to: TxKind::Call(SIGNATURE_VERIFIER_ADDRESS),
+            value: U256::ZERO,
+            input: input.into(),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+enum KeychainCheck {
+    VerifyAccessKey,
+    VerifyAdminAccessKey,
+    VerifyAdminRoot,
+    IsAdminRoot,
+    IsAdminAccessKey { key_committed: bool },
 }
 
 #[test]
@@ -1383,14 +1574,6 @@ fn native_batch_rotation_failure(registered: bool, halt: bool) {
     assert_eq!(output.result.logs().len(), 2);
     f.evm.db_mut().commit(output.state);
     assert_eq!(f.commitment(), v2.commitment().unwrap());
-}
-
-#[derive(Clone, Copy, Debug)]
-enum RootTx {
-    Legacy,
-    Eip2930,
-    Eip1559,
-    Aa,
 }
 
 fn signer(seed: u8) -> PrivateKeySigner {
@@ -2918,26 +3101,6 @@ fn retired_root_error_order_and_access_gas() {
     );
 }
 
-#[derive(Clone, Copy, Debug)]
-enum SigKind {
-    Secp256k1,
-    P256,
-    WebAuthn,
-    /// The secp256k1 key signing as an access key of its own address, which it names as the
-    /// authority.
-    Keychain,
-}
-
-/// One authorization-list entry: the authority is derived from `kind` and `seed`.
-#[derive(Clone, Copy, Debug)]
-struct Entry {
-    kind: SigKind,
-    seed: u8,
-    chain_id: u64,
-    target: Address,
-    nonce: u64,
-}
-
 /// The P256 or WebAuthn signature of the key seeded by `seed` over `hash`, and the key's address.
 fn p256_primitive(kind: SigKind, seed: u8, hash: B256) -> (Address, PrimitiveSignature) {
     let key = SigningKey::from_slice(&[seed; 32]).unwrap();
@@ -2977,74 +3140,6 @@ fn p256_primitive(kind: SigKind, seed: u8, hash: B256) -> (Address, PrimitiveSig
         })
     };
     (derive_p256_address(&pub_key_x, &pub_key_y), primitive)
-}
-
-impl Entry {
-    fn new(kind: SigKind, seed: u8, target: Address, nonce: u64) -> Self {
-        Self {
-            kind,
-            seed,
-            chain_id: 1,
-            target,
-            nonce,
-        }
-    }
-
-    fn authorization(&self) -> Authorization {
-        Authorization {
-            chain_id: U256::from(self.chain_id),
-            address: self.target,
-            nonce: self.nonce,
-        }
-    }
-
-    fn address(&self) -> Address {
-        self.sign().0
-    }
-
-    /// The authority and the entry signed by it with its own key type.
-    fn sign(&self) -> (Address, TempoSignedAuthorization) {
-        let authorization = self.authorization();
-        let hash = authorization.signature_hash();
-        let (address, signature) = match self.kind {
-            SigKind::Secp256k1 => {
-                let key = signer(self.seed);
-                let signature = key.sign_hash_sync(&hash).unwrap();
-                (key.address(), TempoSignature::from(signature))
-            }
-            SigKind::Keychain => {
-                let key = signer(self.seed);
-                let signature = key
-                    .sign_hash_sync(&KeychainSignature::signing_hash(hash, key.address()))
-                    .unwrap();
-                (
-                    key.address(),
-                    TempoSignature::Keychain(KeychainSignature::new(
-                        key.address(),
-                        PrimitiveSignature::Secp256k1(signature),
-                    )),
-                )
-            }
-            SigKind::P256 | SigKind::WebAuthn => {
-                let (address, primitive) = p256_primitive(self.kind, self.seed, hash);
-                (address, TempoSignature::Primitive(primitive))
-            }
-        };
-        (
-            address,
-            TempoSignedAuthorization::new_unchecked(authorization, signature),
-        )
-    }
-
-    /// The entry as an EIP-7702 authorization, which only a secp256k1 authority can sign.
-    fn legacy(&self) -> SignedAuthorization {
-        assert!(matches!(self.kind, SigKind::Secp256k1), "{self:?}");
-        let authorization = self.authorization();
-        let signature = signer(self.seed)
-            .sign_hash_sync(&authorization.signature_hash())
-            .unwrap();
-        authorization.into_signed(signature)
-    }
 }
 
 /// A transaction sent by `sender` (nonce 0) that calls `to` and carries `entries`, as an
@@ -3121,9 +3216,6 @@ fn account_state(f: &mut Fixture, address: Address) -> (u64, Option<Address>, bo
         .is_zero();
     (info.nonce, delegation, retired)
 }
-
-/// A call target that touches `account`'s code size: its gas shows whether the account is warm.
-const PROBE: Address = Address::repeat_byte(0x99);
 
 fn probe(f: &mut Fixture, account: Address) {
     f.install_contract(
@@ -3651,46 +3743,6 @@ fn nonce_of(f: &mut Fixture, account: Address) -> u64 {
         .map_or(0, |info| info.nonce)
 }
 
-/// An open path USD channel and its identity.
-struct Opened {
-    id: B256,
-    descriptor: ITIP20ChannelReserve::ChannelDescriptor,
-}
-
-#[derive(Clone, Copy, Debug)]
-enum Redeem {
-    Settle,
-    Close,
-}
-
-impl Redeem {
-    /// The payee's call redeeming `amount` of the channel with `signature`.
-    fn call(self, channel: &Opened, amount: u64, signature: Bytes) -> Call {
-        let descriptor = channel.descriptor.clone();
-        let cumulative_amount = U96::from(amount);
-        let input = match self {
-            Self::Settle => ITIP20ChannelReserve::settleCall {
-                descriptor,
-                cumulativeAmount: cumulative_amount,
-                signature,
-            }
-            .abi_encode(),
-            Self::Close => ITIP20ChannelReserve::closeCall {
-                descriptor,
-                cumulativeAmount: cumulative_amount,
-                captureAmount: cumulative_amount,
-                signature,
-            }
-            .abi_encode(),
-        };
-        Call {
-            to: TxKind::Call(TIP20_CHANNEL_RESERVE_ADDRESS),
-            value: U256::ZERO,
-            input: input.into(),
-        }
-    }
-}
-
 /// Funds `payer` with `deposit` and opens a channel to `payee` with the given voucher signer.
 fn open_channel(
     f: &mut Fixture,
@@ -3761,10 +3813,6 @@ fn voucher(f: &mut Fixture, channel: &Opened, key: &PrivateKeySigner, amount: u6
     .unwrap();
     Bytes::from(key.sign_hash_sync(&digest).unwrap().as_bytes())
 }
-
-/// Settled amount, deposit and close request of the channel, with the balances of its payee and
-/// payer and of the precompile that holds the deposit.
-type ChannelSnapshot = (U96, U96, u32, U256, U256, U256);
 
 fn channel_snapshot(f: &mut Fixture, channel: &Opened) -> ChannelSnapshot {
     let state = StorageCtx::enter_ctx(f.evm.ctx_mut(), StorageActions::disabled(), || {
@@ -3991,12 +4039,6 @@ fn channel_settle_and_close_replay_only_from_t14() {
     ));
 }
 
-#[derive(Clone, Copy, Debug)]
-enum SignedAction {
-    Permit,
-    Redeem(Redeem),
-}
-
 /// Gas of one `action` verifying the signature of an uncommitted key, with that key's account
 /// listed in the access list (warm) or not (cold).
 fn signature_gas(spec: TempoHardfork, action: SignedAction, warm: bool) -> u64 {
@@ -4044,9 +4086,6 @@ fn retired_root_signature_checks_cost_the_commitment_read() {
     }
 }
 
-/// The key kinds a keychain signature can carry: its inner signature is a primitive one.
-const KEY_KINDS: [SigKind; 3] = [SigKind::P256, SigKind::WebAuthn, SigKind::Secp256k1];
-
 /// A keychain signature naming `account`, made by the key of `kind` seeded by `seed` over `hash`,
 /// with that key's address.
 fn keychain_signature(kind: SigKind, seed: u8, account: Address, hash: B256) -> (Address, Bytes) {
@@ -4089,36 +4128,6 @@ fn grant_kind(f: &mut Fixture, nonce: u64, kind: SigKind, key: Address, admin: b
     });
     let result = f.run(&tx);
     assert!(result.is_success(), "{kind:?} {key}: {result:?}");
-}
-
-#[derive(Clone, Copy, Debug)]
-enum Verifier {
-    Keychain,
-    KeychainAdmin,
-}
-
-impl Verifier {
-    fn call(self, account: Address, hash: B256, signature: Bytes) -> Call {
-        let input = match self {
-            Self::Keychain => ISignatureVerifier::verifyKeychainCall {
-                account,
-                hash,
-                signature,
-            }
-            .abi_encode(),
-            Self::KeychainAdmin => ISignatureVerifier::verifyKeychainAdminCall {
-                account,
-                hash,
-                signature,
-            }
-            .abi_encode(),
-        };
-        Call {
-            to: TxKind::Call(SIGNATURE_VERIFIER_ADDRESS),
-            value: U256::ZERO,
-            input: input.into(),
-        }
-    }
 }
 
 fn is_admin_key_call(account: Address, key_id: Address) -> Call {
@@ -4351,15 +4360,6 @@ fn retired_root_keychain_checks_are_unchanged_before_t14() {
     assert!(bool_query(&mut f, call, None, "root verifier").0);
     let call = is_admin_key_call(account, account);
     assert!(bool_query(&mut f, call, None, "isAdminKey").0);
-}
-
-#[derive(Clone, Copy, Debug)]
-enum KeychainCheck {
-    VerifyAccessKey,
-    VerifyAdminAccessKey,
-    VerifyAdminRoot,
-    IsAdminRoot,
-    IsAdminAccessKey { key_committed: bool },
 }
 
 /// Gas of one `check` at `spec` with the queried account (or the access key's, for the
