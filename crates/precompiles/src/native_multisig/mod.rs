@@ -28,21 +28,6 @@ pub struct NativeMultisig {
     upgrade_eligibility: UpgradeEligibility,
 }
 
-/// What the transaction allows `upgradeAccount` to do, as decided by the handler before execution.
-///
-/// Variants are ordered from the most to the least restrictive, so the zero value of an unseeded
-/// context rejects every migration.
-#[repr(u8)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Storable)]
-pub enum UpgradeEligibility {
-    /// The transaction is not a lone, direct call to this precompile without authorizations.
-    NotSoleCall,
-    /// The transaction is a sole call, but its outer signature is not a primitive root signature.
-    NotPrimitiveRoot,
-    /// The transaction is a sole call signed by a primitive root key.
-    PrimitiveRoot,
-}
-
 impl NativeMultisig {
     /// Seeds only the direct outer owner-quorum authority, never a delegate or sponsor, and
     /// whether the transaction may migrate its sender.
@@ -190,6 +175,21 @@ impl NativeMultisig {
             .with_block_env(TempoBlockEnv::configured_multisig_recovery_factory)
             .ok_or_else(|| NativeMultisigError::invalid_config().into())
     }
+}
+
+/// What the transaction allows `upgradeAccount` to do, as decided by the handler before execution.
+///
+/// Variants are ordered from the most to the least restrictive, so the zero value of an unseeded
+/// context rejects every migration.
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Storable)]
+pub enum UpgradeEligibility {
+    /// The transaction is not a lone, direct call to this precompile without authorizations.
+    NotSoleCall,
+    /// The transaction is a sole call, but its outer signature is not a primitive root signature.
+    NotPrimitiveRoot,
+    /// The transaction is a sole call signed by a primitive root key.
+    PrimitiveRoot,
 }
 
 pub const fn keccak_cost(bytes: usize) -> u64 {

@@ -132,6 +132,123 @@ pub fn validate_state<J: JournalTr>(
     ))
 }
 
+/// Applies an authorization list through revm's [`apply_auth_list`] and returns the number of
+/// refunded accounts.
+///
+/// From T14, entries whose authority has a nonzero configuration commitment are skipped
+/// (TIP-1112): they install no delegation, remove none, bump no nonce and earn no refund.
+/// Other entries behave exactly as in revm.
+///
+/// Only entries revm would load are checked: chain id 0 or `chain_id`, nonce below
+/// `u64::MAX` and a recoverable authority (`apply_auth_list` skips the rest before loading
+/// anything). The checked authority is loaded, as revm does for an entry it skips on code or
+/// nonce, so warmth and refunds stay identical to the same entry with a mismatched nonce.
+/// The commitment is read once, before any entry applies: delegation never changes it.
+pub(crate) fn apply_authorizations<J: JournalTr, A: AuthorizationTr>(
+    journal: &mut J,
+    chain_id: u64,
+    spec: TempoHardfork,
+    authorizations: impl Iterator<Item = A>,
+) -> NativeValidationResult<u64, <J::Database as Database>::Error> {
+    if !spec.is_t14() {
+        return apply_auth_list(chain_id, authorizations, journal);
+    }
+    let mut active = Vec::new();
+    for authorization in authorizations {
+        let chain = authorization.chain_id();
+        let loaded_by_revm =
+            (chain.is_zero() || chain == U256::from(chain_id)) && authorization.nonce() != u64::MAX;
+        if loaded_by_revm && let Some(authority) = authorization.authority() {
+            let loaded = journal.load_account(authority)?;
+            if !config_commitment(&loaded.data.info)?.is_zero() {
+                continue;
+            }
+        }
+        active.push(authorization);
+    }
+    apply_auth_list(chain_id, active.into_iter(), journal)
+}
+
+/// Whether account loads need transaction warmth installed first.
+///
+/// Includes a separately named grant recipient, which need not sign this transaction. From T14
+/// it also covers every non-caller account a root-key check can load: fee payer, access key
+/// and key authorization signer.
+pub(crate) fn has_account_access(tx: &TempoTxEnv, spec: TempoHardfork) -> bool {
+    tx.tempo_tx_env.as_ref().is_some_and(|aa| {
+        // A direct or keychain-wrapped native quorum has no primitive signature type.
+        aa.signature.primitive_signature_type().is_none()
+            || aa.key_authorization.as_ref().is_some_and(|auth| {
+                auth.signature.as_multisig().is_some() || auth.key_type == SignatureType::Multisig
+            })
+            || (spec.is_t14()
+                && (tx.has_fee_payer_signature()
+                    || aa.signature.is_keychain()
+                    || aa.key_authorization.is_some()))
+    })
+}
+
+/// Verifies each signed role separately. RPC simulation must validate the claimed owner quorum
+/// before constructing its mock witness; this function skips quorum recovery only in that mode.
+pub(crate) fn verify(tx: &TempoTxEnv) -> Result<(), TempoInvalidTransaction> {
+    let roles = authorizations(tx);
+    if roles.iter().all(Option::is_none) {
+        return Ok(());
+    }
+    match tx.execution_context() {
+        ExecutionContext::Transaction { .. } => {
+            for role in roles.into_iter().flatten() {
+                role.verify()?;
+            }
+        }
+        ExecutionContext::Simulation => {}
+        ExecutionContext::Unspecified => return Err(NativeMultisigError::UnsupportedContext.into()),
+    }
+    let aa = tx.tempo_tx_env.as_ref().expect("native roles require AA");
+    if let Some(auth) = &aa.key_authorization {
+        let signer = auth
+            .recover_account()
+            .map_err(|_| TempoInvalidTransaction::KeyAuthorizationSignatureRecoveryFailed)?;
+        let reject = |reason: &str| TempoInvalidTransaction::KeychainValidationFailed {
+            reason: reason.to_owned(),
+        };
+        let keychain = aa.signature.as_keychain();
+        let key_id = keychain
+            .map(|key| {
+                if matches!(tx.execution_context(), ExecutionContext::Simulation)
+                    && let Some(key_id) = aa.override_key_id
+                {
+                    return Ok(key_id);
+                }
+                key.key_id(&aa.signature_hash)
+                    .map_err(|_| TempoInvalidTransaction::AccessKeyRecoveryFailed)
+            })
+            .transpose()?;
+        if signer == tx.caller {
+            if keychain.is_some() && key_id != Some(auth.key_id) {
+                return Err(reject(
+                    "root-signed key authorization must use root transaction signature",
+                ));
+            }
+        } else if auth.account.is_none()
+            || key_id != Some(signer)
+            || keychain.is_none_or(|key| key.signature.key_type() != auth.signature.key_type())
+        {
+            return Err(reject(
+                "admin-signed key authorization must match transaction key and parent account",
+            ));
+        }
+        if key_id == Some(auth.key_id)
+            && keychain.is_some_and(|key| key.signature.key_type() != auth.key_type)
+        {
+            return Err(reject(
+                "key authorization key_type does not match the keychain signature type",
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn config_commitment<DbError>(info: &AccountInfo) -> NativeValidationResult<B256, DbError> {
     decode_config_commitment(&info.extension, true)
         .map_err(|error| EVMError::Custom(error.to_string()))
@@ -297,123 +414,6 @@ fn validate_root_keys<J: JournalTr>(
         check(journal, key_id, RootKeyRole::AccessKey)?;
     }
     Ok(extra_gas)
-}
-
-/// Applies an authorization list through revm's [`apply_auth_list`] and returns the number of
-/// refunded accounts.
-///
-/// From T14, entries whose authority has a nonzero configuration commitment are skipped
-/// (TIP-1112): they install no delegation, remove none, bump no nonce and earn no refund.
-/// Other entries behave exactly as in revm.
-///
-/// Only entries revm would load are checked: chain id 0 or `chain_id`, nonce below
-/// `u64::MAX` and a recoverable authority (`apply_auth_list` skips the rest before loading
-/// anything). The checked authority is loaded, as revm does for an entry it skips on code or
-/// nonce, so warmth and refunds stay identical to the same entry with a mismatched nonce.
-/// The commitment is read once, before any entry applies: delegation never changes it.
-pub(crate) fn apply_authorizations<J: JournalTr, A: AuthorizationTr>(
-    journal: &mut J,
-    chain_id: u64,
-    spec: TempoHardfork,
-    authorizations: impl Iterator<Item = A>,
-) -> NativeValidationResult<u64, <J::Database as Database>::Error> {
-    if !spec.is_t14() {
-        return apply_auth_list(chain_id, authorizations, journal);
-    }
-    let mut active = Vec::new();
-    for authorization in authorizations {
-        let chain = authorization.chain_id();
-        let loaded_by_revm =
-            (chain.is_zero() || chain == U256::from(chain_id)) && authorization.nonce() != u64::MAX;
-        if loaded_by_revm && let Some(authority) = authorization.authority() {
-            let loaded = journal.load_account(authority)?;
-            if !config_commitment(&loaded.data.info)?.is_zero() {
-                continue;
-            }
-        }
-        active.push(authorization);
-    }
-    apply_auth_list(chain_id, active.into_iter(), journal)
-}
-
-/// Whether account loads need transaction warmth installed first.
-///
-/// Includes a separately named grant recipient, which need not sign this transaction. From T14
-/// it also covers every non-caller account a root-key check can load: fee payer, access key
-/// and key authorization signer.
-pub(crate) fn has_account_access(tx: &TempoTxEnv, spec: TempoHardfork) -> bool {
-    tx.tempo_tx_env.as_ref().is_some_and(|aa| {
-        // A direct or keychain-wrapped native quorum has no primitive signature type.
-        aa.signature.primitive_signature_type().is_none()
-            || aa.key_authorization.as_ref().is_some_and(|auth| {
-                auth.signature.as_multisig().is_some() || auth.key_type == SignatureType::Multisig
-            })
-            || (spec.is_t14()
-                && (tx.has_fee_payer_signature()
-                    || aa.signature.is_keychain()
-                    || aa.key_authorization.is_some()))
-    })
-}
-
-/// Verifies each signed role separately. RPC simulation must validate the claimed owner quorum
-/// before constructing its mock witness; this function skips quorum recovery only in that mode.
-pub(crate) fn verify(tx: &TempoTxEnv) -> Result<(), TempoInvalidTransaction> {
-    let roles = authorizations(tx);
-    if roles.iter().all(Option::is_none) {
-        return Ok(());
-    }
-    match tx.execution_context() {
-        ExecutionContext::Transaction { .. } => {
-            for role in roles.into_iter().flatten() {
-                role.verify()?;
-            }
-        }
-        ExecutionContext::Simulation => {}
-        ExecutionContext::Unspecified => return Err(NativeMultisigError::UnsupportedContext.into()),
-    }
-    let aa = tx.tempo_tx_env.as_ref().expect("native roles require AA");
-    if let Some(auth) = &aa.key_authorization {
-        let signer = auth
-            .recover_account()
-            .map_err(|_| TempoInvalidTransaction::KeyAuthorizationSignatureRecoveryFailed)?;
-        let reject = |reason: &str| TempoInvalidTransaction::KeychainValidationFailed {
-            reason: reason.to_owned(),
-        };
-        let keychain = aa.signature.as_keychain();
-        let key_id = keychain
-            .map(|key| {
-                if matches!(tx.execution_context(), ExecutionContext::Simulation)
-                    && let Some(key_id) = aa.override_key_id
-                {
-                    return Ok(key_id);
-                }
-                key.key_id(&aa.signature_hash)
-                    .map_err(|_| TempoInvalidTransaction::AccessKeyRecoveryFailed)
-            })
-            .transpose()?;
-        if signer == tx.caller {
-            if keychain.is_some() && key_id != Some(auth.key_id) {
-                return Err(reject(
-                    "root-signed key authorization must use root transaction signature",
-                ));
-            }
-        } else if auth.account.is_none()
-            || key_id != Some(signer)
-            || keychain.is_none_or(|key| key.signature.key_type() != auth.signature.key_type())
-        {
-            return Err(reject(
-                "admin-signed key authorization must match transaction key and parent account",
-            ));
-        }
-        if key_id == Some(auth.key_id)
-            && keychain.is_some_and(|key| key.signature.key_type() != auth.key_type)
-        {
-            return Err(reject(
-                "key authorization key_type does not match the keychain signature type",
-            ));
-        }
-    }
-    Ok(())
 }
 
 fn grant_delegate(tx: &TempoTxEnv) -> Option<Address> {
