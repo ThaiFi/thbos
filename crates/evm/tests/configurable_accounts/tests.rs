@@ -503,20 +503,12 @@ fn native_rotation_rejects_access_keys_and_callbacks() {
             if admin {
                 authorization = authorization.into_admin(f.account);
             }
-            let approval = MultisigSignature::try_new(
+            let approval = multisig_approval(
                 f.account,
-                f.config.clone(),
-                vec![PrimitiveSignature::Secp256k1(
-                    f.owner
-                        .sign_hash_sync(&multisig_digest(
-                            authorization.signature_hash(),
-                            f.account,
-                            0,
-                        ))
-                        .unwrap(),
-                )],
-            )
-            .unwrap();
+                &f.config,
+                &f.owner,
+                authorization.signature_hash(),
+            );
             let tx = TempoTransaction {
                 chain_id: 1,
                 nonce: 3,
@@ -993,15 +985,7 @@ fn delegate_registration_gas(empty_delegate: bool) -> BlockGas {
         ..aa_tx(0, vec![f.getter()])
     };
     let digest = KeychainSignature::signing_hash(tx.signature_hash(), parent);
-    let signature = MultisigSignature::try_new(
-        delegate,
-        config,
-        vec![PrimitiveSignature::Secp256k1(
-            key.sign_hash_sync(&multisig_digest(digest, delegate, 0))
-                .unwrap(),
-        )],
-    )
-    .unwrap();
+    let signature = multisig_approval(delegate, &config, &key, digest);
     let tx = tx.into_signed(TempoSignature::Keychain(KeychainSignature::new(
         parent,
         AccountSignature::Multisig(signature),
@@ -1347,22 +1331,12 @@ fn native_signed_parent_delegate_case(outcome: GrantOutcome, gas_price: u128) {
                     .collect(),
             );
             let grant_signature = if parent_native {
-                AccountSignature::Multisig(
-                    MultisigSignature::try_new(
-                        f.account,
-                        f.config.clone(),
-                        vec![PrimitiveSignature::Secp256k1(
-                            f.owner
-                                .sign_hash_sync(&multisig_digest(
-                                    authorization.signature_hash(),
-                                    f.account,
-                                    0,
-                                ))
-                                .unwrap(),
-                        )],
-                    )
-                    .unwrap(),
-                )
+                AccountSignature::Multisig(multisig_approval(
+                    f.account,
+                    &f.config,
+                    &f.owner,
+                    authorization.signature_hash(),
+                ))
             } else {
                 AccountSignature::from(
                     f.owner
@@ -1397,18 +1371,9 @@ fn native_signed_parent_delegate_case(outcome: GrantOutcome, gas_price: u128) {
             let sign = |tx: &TempoTransaction| {
                 let digest = KeychainSignature::signing_hash(tx.signature_hash(), parent);
                 let signature = if delegate_native {
-                    AccountSignature::Multisig(
-                        MultisigSignature::try_new(
-                            delegate,
-                            config.clone(),
-                            vec![PrimitiveSignature::Secp256k1(
-                                signer
-                                    .sign_hash_sync(&multisig_digest(digest, delegate, 0))
-                                    .unwrap(),
-                            )],
-                        )
-                        .unwrap(),
-                    )
+                    AccountSignature::Multisig(multisig_approval(
+                        delegate, &config, &signer, digest,
+                    ))
                 } else {
                     AccountSignature::from(signer.sign_hash_sync(&digest).unwrap())
                 };
@@ -3163,22 +3128,12 @@ fn retired_root_keeps_owner_parent_and_sender_authority() {
 
     // A multisig-signed grant is accepted: the grant's signature is not a primitive root.
     let grant = KeyAuthorization::unrestricted(1, SignatureType::Secp256k1, signer(8).address());
-    let grant_signature = AccountSignature::Multisig(
-        MultisigSignature::try_new(
-            account,
-            f.config.clone(),
-            vec![PrimitiveSignature::Secp256k1(
-                f.owner
-                    .sign_hash_sync(&multisig_digest(
-                        grant.signature_hash(),
-                        account,
-                        f.config.version,
-                    ))
-                    .unwrap(),
-            )],
-        )
-        .unwrap(),
-    );
+    let grant_signature = AccountSignature::Multisig(multisig_approval(
+        account,
+        &f.config,
+        &f.owner,
+        grant.signature_hash(),
+    ));
     let tx = multisig_signed(
         &f,
         TempoTransaction {
@@ -3280,15 +3235,12 @@ fn retired_root_error_order_and_access_gas() {
         key_authorization: Some(root_grant),
         ..aa_tx(3, vec![f.getter()])
     };
-    let digest = multisig_digest(native_tx.signature_hash(), account, witness_config.version);
-    let witness = MultisigSignature::try_new(
+    let witness = multisig_approval(
         account,
-        witness_config,
-        vec![PrimitiveSignature::Secp256k1(
-            witness_owner.sign_hash_sync(&digest).unwrap(),
-        )],
-    )
-    .unwrap();
+        &witness_config,
+        &witness_owner,
+        native_tx.signature_hash(),
+    );
     let tx = native_tx.into_signed(TempoSignature::Multisig(witness));
     assert!(matches!(
         rejection(&mut f, &tx, account),

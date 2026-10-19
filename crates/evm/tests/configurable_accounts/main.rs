@@ -244,15 +244,7 @@ fn signer(seed: u8) -> PrivateKeySigner {
 
 /// Signs `tx` as the account's native multisig, with the fixture's current configuration.
 fn multisig_signed(f: &Fixture, tx: TempoTransaction) -> AASigned {
-    let digest = multisig_digest(tx.signature_hash(), f.account, f.config.version);
-    let signature = MultisigSignature::try_new(
-        f.account,
-        f.config.clone(),
-        vec![PrimitiveSignature::Secp256k1(
-            f.owner.sign_hash_sync(&digest).unwrap(),
-        )],
-    )
-    .unwrap();
+    let signature = multisig_approval(f.account, &f.config, &f.owner, tx.signature_hash());
     tx.into_signed(TempoSignature::Multisig(signature))
 }
 
