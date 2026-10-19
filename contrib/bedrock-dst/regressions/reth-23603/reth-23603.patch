@@ -1,0 +1,12 @@
+diff --git a/crates/storage/provider/src/providers/rocksdb/provider.rs b/crates/storage/provider/src/providers/rocksdb/provider.rs
+--- a/crates/storage/provider/src/providers/rocksdb/provider.rs
++++ b/crates/storage/provider/src/providers/rocksdb/provider.rs
+@@ -42,6 +42,6 @@ use tracing::instrument;
+ /// Returns [`WriteOptions`] with WAL sync enabled for crash durability.
+ fn synced_write_options() -> WriteOptions {
+     let mut opts = WriteOptions::default();
+-    opts.set_sync(true);
++    opts.set_sync(false);
+     opts
+ }
+

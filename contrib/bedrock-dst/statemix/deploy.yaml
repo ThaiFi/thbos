@@ -1,0 +1,47 @@
+# Deploys Mutator from dev account 0 at nonce 0, i.e. at
+# 0x5FbDB2315678afecb367f032d93F642f64180aa3, before the warm checkpoint
+# (`tempo-dst deploy`). txgen needs a sequence; this one writes zero to an
+# empty slot (op 0), which leaves the contract's storage trie empty.
+
+chain_id: 1337
+
+accounts:
+  mix:
+    mnemonic: "test test test test test test test test test test test junk"
+    range: [0, 1]
+
+artifacts:
+  Mutator:
+    abi: mutator.json
+    bytecode: mutator.json
+
+setup:
+  steps:
+    - id: deploy
+      deploy:
+        type: eip1559
+        from: { pool: mix, select: { index: 0 } }
+        artifact: Mutator
+        gas_limit: 3000000
+        constructor_args: []
+
+templates:
+  exec:
+    type: tempo
+    from: { pool: mix, select: { index: 0 } }
+    gas_limit: 2000000
+    max_fee_per_gas: 100000000000
+    max_priority_fee_per_gas: 1000000000
+    fee_token: "0x20c0000000000000000000000000000000000000"
+    call:
+      abi: Mutator
+      function: exec
+      args: []
+
+sequences:
+  noop:
+    steps:
+      - { name: zero, template: exec, with: { call: { to: { var: setup.deploy.address }, args: [0, 1099511627776, 0] } } }
+
+mix:
+  - { sequence: noop, weight: 1 }

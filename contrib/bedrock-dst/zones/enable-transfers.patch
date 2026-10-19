@@ -1,0 +1,24 @@
+diff --git a/crates/precompiles/src/ztip20/mod.rs b/crates/precompiles/src/ztip20/mod.rs
+index 5c766dab..e2f86af6 100644
+--- a/crates/precompiles/src/ztip20/mod.rs
++++ b/crates/precompiles/src/ztip20/mod.rs
+@@ -67,14 +67,14 @@ impl CallRules for TIP20Rules {
+                 ITIP20::ITIP20Calls::nonces(call) => {
+                     check_caller(caller, &[call.owner])
+                 }
+-                // Transfers are disabled during the initial permissioned Zone phase.
+-                // Private asset movement is limited to the protocol-managed inbox and outbox paths.
++                // bedrock: user transfers enabled so the DST harness can exercise
++                // TIP-403 policy enforcement and balance conservation on the zone
++                // (upstream TIP20Token then enforces the L1-inherited policy). The
++                // production build keeps these disabled during the permissioned phase.
+                 ITIP20::ITIP20Calls::transferFrom(_)
+                 | ITIP20::ITIP20Calls::transfer(_)
+                 | ITIP20::ITIP20Calls::transferWithMemo(_)
+-                | ITIP20::ITIP20Calls::transferFromWithMemo(_) => {
+-                    CallCheck::Revert(Unauthorized {}.abi_encode().into())
+-                }
++                | ITIP20::ITIP20Calls::transferFromWithMemo(_) => CallCheck::Continue,
+                 // Inbox/outbox call TIP20 internally; public mint/burn entry points stay disabled.
+                 ITIP20::ITIP20Calls::mint(_)
+                 | ITIP20::ITIP20Calls::mintWithMemo(_)

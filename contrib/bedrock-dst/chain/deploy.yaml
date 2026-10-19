@@ -1,0 +1,47 @@
+# Deploys ChainOfBlocks from dev account 9 at nonce 0, i.e. at
+# 0x700b6A60ce7EaaEA56F065753d8dcB9653dbAD35, before the warm checkpoint
+# (`tempo-dst deploy`). txgen needs a sequence; this one appends entry 0
+# (payload zero), which the oracle reads back from its receipt like any other.
+
+chain_id: 1337
+
+accounts:
+  chain:
+    mnemonic: "test test test test test test test test test test test junk"
+    range: [9, 10]
+
+artifacts:
+  ChainOfBlocks:
+    abi: chain-of-blocks.json
+    bytecode: chain-of-blocks.json
+
+setup:
+  steps:
+    - id: chain
+      deploy:
+        type: eip1559
+        from: { pool: chain, select: { index: 0 } }
+        artifact: ChainOfBlocks
+        gas_limit: 5000000
+        constructor_args: []
+
+templates:
+  append:
+    type: tempo
+    from: { pool: chain, select: { index: 0 } }
+    gas_limit: 5000000
+    max_fee_per_gas: 100000000000
+    max_priority_fee_per_gas: 1000000000
+    fee_token: "0x20c0000000000000000000000000000000000000"
+    call:
+      abi: ChainOfBlocks
+      function: append
+      args: []
+
+sequences:
+  genesis:
+    steps:
+      - { name: genesis, template: append, with: { call: { to: { var: setup.chain.address }, args: ["0x0000000000000000000000000000000000000000000000000000000000000000"] } } }
+
+mix:
+  - { sequence: genesis, weight: 1 }

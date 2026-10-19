@@ -1,0 +1,24 @@
+chain_id: 1337
+accounts:
+  users:
+    mnemonic: "test test test test test test test test test test test junk"
+    range: [0, 10]
+artifacts:
+  TIP20: /workload/tip20.abi.json
+templates:
+  pathusd_transfer:
+    type: tempo
+    from: {pool: users, select: random}
+    gas_limit: 300000
+    max_fee_per_gas: 100000000000
+    max_priority_fee_per_gas: 1000000000
+    fee_token: "0x20c0000000000000000000000000000000000000"
+    call:
+      to: "0x20c0000000000000000000000000000000000000"
+      abi: TIP20
+      function: transfer
+      args:
+        - {pool: {pool: users, select: random}}
+        - 1
+mix:
+  - {template: pathusd_transfer, weight: 100}

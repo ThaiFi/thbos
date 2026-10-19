@@ -1,0 +1,12 @@
+compose-run.yaml
+inputs.sha256
+images.tar
+images.path
+/bedrock-dst
+/tempo-dst
+/build-info.env
+dst-out/
+ready/libvmcall.h
+ready/ready.c
+initrd.gz
+gcroot-*

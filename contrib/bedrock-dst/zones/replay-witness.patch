@@ -1,0 +1,55 @@
+diff --git a/bin/prover/utils/src/main.rs b/bin/prover/utils/src/main.rs
+index dbc90dd6..8973fc7f 100644
+--- a/bin/prover/utils/src/main.rs
++++ b/bin/prover/utils/src/main.rs
+@@ -73,6 +73,22 @@ enum Command {
+     Prove(ProveArgs),
+     /// Verify a saved proof against the native L1 verifier using eth_call.
+     Verify(verify::VerifyArgs),
++    /// Offline SPF replay of a saved witness JSON: no RPC, no settlement.
++    /// Prints one line, `REPLAY <nextBlockHash>` on success or `REPLAY-ERR
++    /// <message>` when the SPF rejects the witness. For soundness testing of
++    /// a possibly-mutated witness; it never submits anything.
++    ReplayWitness(ReplayWitnessArgs),
++}
++
++#[derive(Debug, clap::Args)]
++struct ReplayWitnessArgs {
++    /// Batch witness JSON (generate-input --output), possibly modified.
++    #[arg(long, short, value_name = "PATH")]
++    input: PathBuf,
++
++    /// The Zone genesis JSON: a local path, inline JSON, or an HTTP(S) URL.
++    #[arg(long, value_name = "CHAIN_OR_PATH_OR_URL")]
++    chain: String,
+ }
+ 
+ #[derive(Debug, clap::Args)]
+@@ -203,7 +219,27 @@ async fn main() -> Result<()> {
+         Command::GenerateInput(args) => generate_input(args).await,
+         Command::Prove(args) => prove(args).await,
+         Command::Verify(args) => verify::run(args).await,
++        Command::ReplayWitness(args) => replay_witness(args).await,
++    }
++}
++
++/// Offline SPF replay of a saved witness. Reads no RPC and submits nothing;
++/// it only re-executes the batch the witness describes, so a witness that
++/// describes an invalid state transition is rejected by the SPF here exactly
++/// as the enclave would reject it. Prints `REPLAY <nextBlockHash>` or
++/// `REPLAY-ERR <message>` and never fails the process on an SPF rejection.
++async fn replay_witness(args: ReplayWitnessArgs) -> Result<()> {
++    let bytes = std::fs::read(&args.input)
++        .wrap_err_with(|| format!("read witness {}", args.input.display()))?;
++    let witness: BatchWitness =
++        serde_json::from_slice(&bytes).context("decode batch witness JSON")?;
++    let chain = load_chain(&args.chain).await?;
++    let spf_config = SpfConfig::new(chain);
++    match prove_zone_batch(&spf_config, witness) {
++        Ok(output) => println!("REPLAY {}", output.block_transition.nextBlockHash),
++        Err(error) => println!("REPLAY-ERR {error:#}"),
+     }
++    Ok(())
+ }
+ 
+ fn init_tracing(filter: &str) -> Result<()> {

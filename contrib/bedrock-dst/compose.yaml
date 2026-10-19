@@ -1,0 +1,474 @@
+# Tempo dev node for DST campaigns (see README.md). Runs `tempo node` directly
+# (the localnet wrapper's bare mode, without the wrapper) so variant flags and
+# thread-fuzz apply to the node process itself. thread-fuzz is bind-mounted into
+# every container by the initrd's containers.conf and puts the node under the
+# sched_ext concurrency-fuzz scheduler; its schedule comes from Bedrock's
+# controlled getrandom stream. run.sh appends variant flags to `command`.
+#
+# Lines between `# >>> reference` and `# <<< reference` are the E7 reference
+# node (README "Reference node"); run.sh drops them unless `--workload-arg reference=true`.
+# Lines between `# >>> zones` and `# <<< zones` are the zones load's L1
+# WebSocket and zone services (README "Zones load"); run.sh drops them unless
+# `--workload-arg load=zones`.
+# `# >>> single` blocks are the dev-mode node, `# >>> validators` blocks the
+# consensus cluster; run.sh keeps one of them (`validators=2..20`, or
+# `validators=1 consensus=true`).
+services:
+  # >>> single
+  tempo:
+    image: bedrock/tempo-runtime:latest
+    pull_policy: never
+    container_name: tempo
+    network_mode: host
+    privileged: true  # thread-fuzz sets SCHED_EXT (CAP_SYS_NICE)
+    entrypoint: ["/usr/local/bin/thread-fuzz", "/usr/local/bin/tempo"]
+    command:
+      - node
+      - --dev
+      - --dev.block-time
+      - 200ms
+      - --datadir
+      - /data
+      - --tempo.bootnodes-endpoint
+      - none
+      - --disable-discovery
+      - --no-persist-peers
+      - --http
+      - --http.addr
+      - 127.0.0.1
+      - --http.port
+      - "8545"
+      - --http.api
+      - all
+      - --builder.gaslimit
+      - "3000000000"
+      # Differential oracle: compare sparse-trie task updates against the
+      # regular state root and log "Difference in ... trie updates".
+      - --engine.state-root-task-compare-updates
+      # E5/E6 read proofs up to 128 blocks behind the tip (historical
+      # proofs come from the persisted trie with a reverted overlay).
+      - --rpc.eth-proof-window
+      - "256"
+      - --color
+      - never
+      # >>> zones
+      # The zone node subscribes to L1 blocks over WebSocket.
+      - --ws
+      - --ws.addr
+      - 127.0.0.1
+      - --ws.port
+      - "8546"
+      - --ws.api
+      - all
+      # <<< zones
+      # >>> reference
+      # Fixed p2p identity, so tempo-ref can name the primary as a trusted
+      # peer and download blocks it missed (e.g. while the primary was down).
+      - --p2p-secret-key-hex
+      - e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7
+      # <<< reference
+    environment:
+      # engine::persistence=debug emits "Saved range of blocks", which the
+      # durability oracle uses as the persisted-block watermark.
+      RUST_LOG: info,engine::persistence=debug,reth::engine::tree=debug
+      BEDROCK_ASSERTIONS_PATH: /bedrock/assertions/tempo.jsonl
+    volumes:
+      - tempo-data:/data
+
+  # <<< single
+  # >>> validators
+  # The consensus cluster (`validators=1..20`, README "Validators"):
+  # commonware validators from the genesis and keys validators/build.sh bakes
+  # into the image at /net, one fixed IP each (the genesis names them),
+  # each under thread-fuzz with its own data volume. run.sh replaces each
+  # `# validator variant flags` line with the cooldown/timeouts variant's
+  # flags (`--workload-arg cooldown=1s|default`, `timeouts=tuned|prod`) and
+  # each `# validator engine flags` line with that validator's engine flags:
+  # `--engine.state-root-task-compare-updates` (today's default) for every
+  # validator, or — with `--workload-arg validator_engine_diff=true` — the
+  # per-validator EngineProfile flags (bin/tempo-dst/src/cluster.rs).
+  v1:
+    image: bedrock/tempo-validators:pinned
+    pull_policy: never
+    container_name: v1
+    networks:
+      validators:
+        ipv4_address: 10.89.77.11
+    privileged: true  # thread-fuzz sets SCHED_EXT (CAP_SYS_NICE)
+    entrypoint: ["/usr/local/bin/thread-fuzz", "/usr/local/bin/tempo"]
+    command:
+      - node
+      - --chain
+      - /net/genesis.json
+      - --datadir
+      - /data
+      - --consensus.signing-key
+      - /net/10.89.77.11:8000/signing.key.hex
+      - --consensus.signing-share
+      - /net/10.89.77.11:8000/signing.share
+      - --consensus.listen-address
+      - 0.0.0.0:8000
+      - --consensus.metrics-address
+      - 0.0.0.0:8002
+      - --consensus.allow-private-ips
+      # validator variant flags
+      - --trusted-peers
+      - enode://1ea7f6c7a924a1e722c09301a826cfd95b21b23a294cec5da3c0b5908e62e0c798bd2feddfb16ca36912d1f25b741e823b1edd50ed1ef4b9ac22c2a89584b9d2@10.89.77.11:8001,enode://7059c6edad7d930f0ba2d2e490367050dacaece7220470d4c92cbffa792cd719265d388e82510bf97d0a89d61bfbfada3dc567f493366af870c5f7771c7f7dc8@10.89.77.12:8001,enode://68b20e366dc165f2ea47cd2afa2b882caed47eca09b56666b653de224509ad3ec7d74fe1c98384b5356c00503545e46cbc75629bd853f5a748ce5a44ac0a791a@10.89.77.13:8001,enode://1f0bd43f5f1c65626dea1736459bbd2341fe49aa5d7adcdaba6a3535c3aa3870c88749ea9a3278c9fa7e28a6590f2ee133cfdba300ba054018d0d333e230da29@10.89.77.14:8001
+      - --port
+      - "8001"
+      - --discovery.port
+      - "8001"
+      - --disable-discovery
+      - --tempo.bootnodes-endpoint
+      - none
+      - --no-persist-peers
+      - --p2p-secret-key
+      - /net/10.89.77.11:8000/enode.key
+      - --authrpc.port
+      - "8003"
+      - --http
+      - --http.addr
+      - 0.0.0.0
+      - --http.port
+      - "8545"
+      - --http.api
+      - all
+      - --builder.gaslimit
+      - "3000000000"
+      - --ws
+      - --ws.addr
+      - 0.0.0.0
+      - --ws.port
+      - "8546"
+      - --ws.api
+      - all
+      # validator engine flags
+      - --rpc.eth-proof-window
+      - "256"
+      - --color
+      - never
+    environment:
+      RUST_LOG: info,engine::persistence=debug
+      BEDROCK_ASSERTIONS_PATH: /bedrock/assertions/v1.jsonl
+    volumes:
+      - v1-data:/data
+
+  # <<< validators
+  # >>> zones-follower
+  # Zones always consume a certified L1 follower of the generated validator
+  # network. Its independent volume is restored by the snapshot nemesis.
+  tempo:
+    image: bedrock/tempo-validators:pinned
+    pull_policy: never
+    container_name: tempo
+    network_mode: host
+    privileged: true
+    entrypoint: ["/usr/local/bin/thread-fuzz", "/usr/local/bin/tempo"]
+    command:
+      - node
+      - --chain
+      - /net/genesis.json
+      - --datadir
+      - /data
+      - --follow
+      - ws://10.89.77.11:8546
+      - --engine.persistence-threshold
+      - "3"
+      # masking (1) + memory-block-buffer-target (0) must be <
+      # persistence-threshold (3); reth refuses to start otherwise. 1 block of
+      # masking still drives catch-up across the persistence frontier.
+      - --engine.num-state-masking-blocks
+      - "1"
+      - --engine.memory-block-buffer-target
+      - "0"
+      - --consensus.listen-address
+      - 127.0.0.1:8100
+      - --consensus.metrics-address
+      - 127.0.0.1:8102
+      - --consensus.allow-private-ips
+      - --tempo.bootnodes-endpoint
+      - none
+      - --disable-discovery
+      - --no-persist-peers
+      # follower trusted peers
+      - --http
+      - --http.addr
+      - 127.0.0.1
+      - --http.port
+      - "8545"
+      - --http.api
+      - all
+      - --ws
+      - --ws.addr
+      - 127.0.0.1
+      - --ws.port
+      - "8546"
+      - --ws.api
+      - all
+      - --rpc.eth-proof-window
+      - "4096"
+      - --engine.state-root-task-compare-updates
+      - --color
+      - never
+    environment:
+      RUST_LOG: info,engine::persistence=debug,engine::tree=debug,tempo_consensus::follow::executor=debug
+      BEDROCK_ASSERTIONS_PATH: /bedrock/assertions/tempo.jsonl
+    volumes:
+      - tempo-data:/data
+  # <<< zones-follower
+
+  # >>> reference
+  # E7 reference node: follows the primary through its RPC and re-executes
+  # every block on reth's simplest engine paths. Plain `tempo` (no
+  # thread-fuzz), never killed by the nemesis. `--follow URL
+  # --follow.nocertify` is Tempo's way to set reth's
+  # `--debug.rpc-consensus-url` without starting the commonware consensus
+  # stack (which, outside `--dev`, demands a validator signing key).
+  tempo-ref:
+    image: bedrock/tempo-runtime:latest
+    pull_policy: never
+    container_name: tempo-ref
+    network_mode: host
+    entrypoint: ["/usr/local/bin/tempo"]
+    command:
+      - node
+      # The chain spec `--dev` selects.
+      - --chain
+      - dev
+      - --datadir
+      - /data
+      - --tempo.bootnodes-endpoint
+      - none
+      - --disable-discovery
+      - --no-persist-peers
+      - --port
+      - "30304"
+      # The primary, by the public key of its --p2p-secret-key-hex. The RPC
+      # follower only sees blocks produced while it polls; blocks from before
+      # it started, or rebuilt while the primary was down, come over p2p.
+      - --trusted-peers
+      - enode://237d4293b7bacfbf580ea0beddc988668d6f5bfec8467bb21f272d2a569befd0c9c23acbe114320734bc9d92e0875a0fe72247f4ca2653ded1dfe3130e3dc51c@127.0.0.1:30303
+      - --disable-tx-gossip
+      - --ipcdisable
+      - --http
+      - --http.addr
+      - 127.0.0.1
+      - --http.port
+      - "8547"
+      - --http.api
+      - all
+      - --ws.port
+      - "8548"
+      - --authrpc.port
+      - "8552"
+      - --follow
+      - http://127.0.0.1:8545
+      - --follow.nocertify
+      # Simple baseline paths: no prewarming, precompile or state caches, the
+      # synchronous state root (no sparse-trie task), no state masking.
+      - --engine.disable-prewarming
+      - --engine.disable-precompile-cache
+      - --engine.state-root-fallback
+      - --engine.disable-state-cache
+      - --engine.num-state-masking-blocks
+      - "0"
+      - --engine.persistence-threshold
+      - "3"
+      - --rpc.eth-proof-window
+      - "256"
+      - --color
+      - never
+    environment:
+      RUST_LOG: info
+      BEDROCK_ASSERTIONS_PATH: /bedrock/assertions/tempo-ref.jsonl
+    volumes:
+      - tempo-ref-data:/data
+
+  # <<< reference
+  # >>> zones
+  # >>> zones-single
+  # Zone sequencer (zones/zone.sh): provisions zone 1 against the node on its
+  # first start (during warmup, before the warm checkpoint), then builds a
+  # zone block per finalized L1 block and submits a signed batch to the
+  # portal every 25 blocks (sooner with deposits or withdrawals).
+  zone:
+    image: bedrock/tempo-dst-zones:latest
+    pull_policy: never
+    container_name: zone
+    network_mode: host
+    environment:
+      ZONE_BATCH_INTERVAL_BLOCKS: "25"
+      RUST_LOG: info
+    volumes:
+      - zone-data:/data
+
+  # <<< zones-single
+  # >>> zones-multi
+  # Within the zones blocks, `# >>> zones-single` blocks are the single
+  # sequencer and `# >>> zones-multi` blocks the multi-sequencer cluster;
+  # run.sh keeps one flavour (`--workload-arg zone_sequencers=3` selects
+  # multi) and strips the kept flavour's markers.
+  #
+  # Multi-sequencer zone (`zone_sequencers=3`): three `tempo-zone node`s in
+  # multi-sequencer mode (zones/zone-multi.sh), each in its own network
+  # namespace on network `zseq` at fixed IPs (the network nemesis faults them
+  # there). They talk P2P directly and reach the host-network L1 through
+  # `l1-forward` on the gateway, one port each. They wait for the warmup hook
+  # to provision the zone (zones/zone-provision.sh writes the shared volume).
+  # Keep in sync with zones_cluster.rs `topology()`.
+  l1-forward:
+    image: bedrock/tempo-dst-zones:latest
+    pull_policy: never
+    container_name: l1-forward
+    network_mode: host
+    entrypoint: ["/usr/local/bin/tempo-dst", "tcp-forward",
+                 "0.0.0.0:18600=127.0.0.1:8546", "0.0.0.0:18601=127.0.0.1:8546",
+                 "0.0.0.0:18602=127.0.0.1:8546"]
+
+  zone-0:
+    image: bedrock/tempo-dst-zones:latest
+    pull_policy: never
+    container_name: zone-0
+    entrypoint: ["/bin/sh", "/usr/local/bin/zone-multi.sh", "0"]
+    environment:
+      ZONE_BATCH_INTERVAL_BLOCKS: "25"
+      RUST_LOG: info
+    networks:
+      zseq:
+        ipv4_address: 10.90.10.11
+    volumes:
+      - zone-0-data:/data
+      - zone-shared:/shared
+    depends_on:
+      - l1-forward
+
+  zone-1:
+    image: bedrock/tempo-dst-zones:latest
+    pull_policy: never
+    container_name: zone-1
+    entrypoint: ["/bin/sh", "/usr/local/bin/zone-multi.sh", "1"]
+    environment:
+      ZONE_BATCH_INTERVAL_BLOCKS: "25"
+      RUST_LOG: info
+    networks:
+      zseq:
+        ipv4_address: 10.90.10.12
+    volumes:
+      - zone-1-data:/data
+      - zone-shared:/shared
+    depends_on:
+      - l1-forward
+
+  zone-2:
+    image: bedrock/tempo-dst-zones:latest
+    pull_policy: never
+    container_name: zone-2
+    entrypoint: ["/bin/sh", "/usr/local/bin/zone-multi.sh", "2"]
+    environment:
+      ZONE_BATCH_INTERVAL_BLOCKS: "25"
+      RUST_LOG: info
+    networks:
+      zseq:
+        ipv4_address: 10.90.10.13
+    volumes:
+      - zone-2-data:/data
+      - zone-shared:/shared
+    depends_on:
+      - l1-forward
+
+  # <<< zones-multi
+  # Batch prover (`tempo-dst zone-prover`, packaged in the zones image):
+  # replays every submitted batch through the zone's stateless proof function.
+  zone-prover:
+    image: bedrock/tempo-dst-zones:latest
+    pull_policy: never
+    container_name: zone-prover
+    network_mode: host
+    entrypoint: ["/usr/local/bin/tempo-dst", "zone-prover"]
+    # >>> zones-multi
+    # Replays against cluster node 0, with the genesis from the shared volume.
+    environment:
+      TEMPO_DST_ZONE_CLUSTER: "1"
+    # <<< zones-multi
+    volumes:
+      # >>> zones-single
+      - zone-data:/data:ro
+      # <<< zones-single
+      # >>> zones-multi
+      - zone-shared:/shared:ro
+      # <<< zones-multi
+      # The branch's config.json (written after the warm checkpoint), for
+      # the witness-fault family flag.
+      - /bedrock/in:/bedrock/in:ro
+
+  # <<< zones
+  # The host driver invokes guest hooks through this controller container.
+  tempo-dst:
+    image: bedrock/tempo-dst:latest
+    pull_policy: never
+    container_name: tempo-dst
+    network_mode: host
+    pid: host
+    privileged: true
+    environment:
+      TEMPO_DST_HOST_NS: "1"
+
+  # Signals bedrock ready once the node produces blocks (the lab's initial
+  # checkpoint), then idles; same pattern as workloads/integration-tests.
+  ready:
+    image: bedrock/tempo-dst-ready:latest
+    pull_policy: never
+    container_name: ready
+    network_mode: host
+    privileged: true  # Required for VMCALL
+    depends_on:
+      - tempo-dst
+    # >>> validators
+    # No node on the host's 127.0.0.1:8545 here: wait for v1's first block.
+    entrypoint:
+      - /bin/sh
+      - -c
+      - >-
+        until wget -qO- --header 'Content-Type: application/json'
+        --post-data '{"jsonrpc":"2.0","id":1,"method":"eth_blockNumber","params":[]}'
+        http://10.89.77.11:8545 2>/dev/null | grep -q '"result":"0x[1-9a-f]'; do sleep 1; done;
+        echo 'tempo-dst: validators producing blocks, signaling ready';
+        /usr/local/bin/bedrock-ready; exec sleep infinity
+    # <<< validators
+
+networks:
+# >>> validators
+  validators:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 10.89.77.0/24
+          gateway: 10.89.77.1
+# <<< validators
+# >>> zones-multi
+  zseq:
+    ipam:
+      config:
+        - subnet: 10.90.10.0/24
+          gateway: 10.90.10.1
+# <<< zones-multi
+
+volumes:
+  tempo-data:
+  # >>> validators
+  v1-data:
+  # <<< validators
+  # >>> reference
+  tempo-ref-data:
+  # <<< reference
+  # >>> zones
+  # >>> zones-single
+  zone-data:
+  # <<< zones-single
+  # >>> zones-multi
+  zone-shared:
+  zone-0-data:
+  zone-1-data:
+  zone-2-data:
+  # <<< zones-multi
+  # <<< zones

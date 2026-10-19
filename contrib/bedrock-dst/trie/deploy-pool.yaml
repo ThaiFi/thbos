@@ -1,0 +1,77 @@
+# Multi-contract trie load (`trie_contracts=auto`): deploys the pool of 16
+# RawStorage contracts before the warm checkpoint (`tempo-dst warmup` with trie_contracts=auto).
+# Each seed writes the first N of them from S writers (bin/tempo-dst/src/
+# trie_gen.rs, `plan`). Writer 0 is dev account 0 (the single-contract load's
+# sender); writers 1-7 are dev accounts 10-16, outside every other load's
+# accounts (transfers 0-9, TIP-20 1-9, chain 9). Only dev accounts 0-9 hold
+# pathUSD in the dev genesis, so dev account 0 funds writers 1-7 first.
+#
+# Contract c is writer (c mod 8)'s CREATE at nonce (c div 8): dev account 0
+# deploys contracts 0 and 8 (nonces 0 and 1; contract 0 is the single-contract
+# load's 0x5FbDB2315678afecb367f032d93F642f64180aa3) before it funds anyone.
+# Keep in sync with trie_gen::{WRITERS, pool_address}.
+
+chain_id: 1337
+
+accounts:
+  trie:
+    mnemonic: "test test test test test test test test test test test junk"
+    range: [0, 1]
+  writers:
+    mnemonic: "test test test test test test test test test test test junk"
+    range: [10, 17]
+
+artifacts:
+  RawStorage:
+    abi: raw-storage.json
+    bytecode: raw-storage.json
+  TIP20: tip20.abi.json
+
+setup:
+  steps:
+    - { id: c0, deploy: { type: eip1559, from: { pool: trie, select: { index: 0 } }, artifact: RawStorage, gas_limit: 1000000, constructor_args: [] } }
+    - { id: c8, deploy: { type: eip1559, from: { pool: trie, select: { index: 0 } }, artifact: RawStorage, gas_limit: 1000000, constructor_args: [] } }
+    - { id: fund1, tx: { type: eip1559, from: { pool: trie, select: { index: 0 } }, gas_limit: 1000000, call: { to: "0x20c0000000000000000000000000000000000000", abi: TIP20, function: transfer, args: [{ pool: { pool: writers, select: { index: 0 } } }, "1000000000000000"] } } }
+    - { id: fund2, tx: { type: eip1559, from: { pool: trie, select: { index: 0 } }, gas_limit: 1000000, call: { to: "0x20c0000000000000000000000000000000000000", abi: TIP20, function: transfer, args: [{ pool: { pool: writers, select: { index: 1 } } }, "1000000000000000"] } } }
+    - { id: fund3, tx: { type: eip1559, from: { pool: trie, select: { index: 0 } }, gas_limit: 1000000, call: { to: "0x20c0000000000000000000000000000000000000", abi: TIP20, function: transfer, args: [{ pool: { pool: writers, select: { index: 2 } } }, "1000000000000000"] } } }
+    - { id: fund4, tx: { type: eip1559, from: { pool: trie, select: { index: 0 } }, gas_limit: 1000000, call: { to: "0x20c0000000000000000000000000000000000000", abi: TIP20, function: transfer, args: [{ pool: { pool: writers, select: { index: 3 } } }, "1000000000000000"] } } }
+    - { id: fund5, tx: { type: eip1559, from: { pool: trie, select: { index: 0 } }, gas_limit: 1000000, call: { to: "0x20c0000000000000000000000000000000000000", abi: TIP20, function: transfer, args: [{ pool: { pool: writers, select: { index: 4 } } }, "1000000000000000"] } } }
+    - { id: fund6, tx: { type: eip1559, from: { pool: trie, select: { index: 0 } }, gas_limit: 1000000, call: { to: "0x20c0000000000000000000000000000000000000", abi: TIP20, function: transfer, args: [{ pool: { pool: writers, select: { index: 5 } } }, "1000000000000000"] } } }
+    - { id: fund7, tx: { type: eip1559, from: { pool: trie, select: { index: 0 } }, gas_limit: 1000000, call: { to: "0x20c0000000000000000000000000000000000000", abi: TIP20, function: transfer, args: [{ pool: { pool: writers, select: { index: 6 } } }, "1000000000000000"] } } }
+    - { id: c1, depends_on: [fund1], deploy: { type: eip1559, from: { pool: writers, select: { index: 0 } }, artifact: RawStorage, gas_limit: 1000000, constructor_args: [] } }
+    - { id: c9, depends_on: [fund1], deploy: { type: eip1559, from: { pool: writers, select: { index: 0 } }, artifact: RawStorage, gas_limit: 1000000, constructor_args: [] } }
+    - { id: c2, depends_on: [fund2], deploy: { type: eip1559, from: { pool: writers, select: { index: 1 } }, artifact: RawStorage, gas_limit: 1000000, constructor_args: [] } }
+    - { id: c10, depends_on: [fund2], deploy: { type: eip1559, from: { pool: writers, select: { index: 1 } }, artifact: RawStorage, gas_limit: 1000000, constructor_args: [] } }
+    - { id: c3, depends_on: [fund3], deploy: { type: eip1559, from: { pool: writers, select: { index: 2 } }, artifact: RawStorage, gas_limit: 1000000, constructor_args: [] } }
+    - { id: c11, depends_on: [fund3], deploy: { type: eip1559, from: { pool: writers, select: { index: 2 } }, artifact: RawStorage, gas_limit: 1000000, constructor_args: [] } }
+    - { id: c4, depends_on: [fund4], deploy: { type: eip1559, from: { pool: writers, select: { index: 3 } }, artifact: RawStorage, gas_limit: 1000000, constructor_args: [] } }
+    - { id: c12, depends_on: [fund4], deploy: { type: eip1559, from: { pool: writers, select: { index: 3 } }, artifact: RawStorage, gas_limit: 1000000, constructor_args: [] } }
+    - { id: c5, depends_on: [fund5], deploy: { type: eip1559, from: { pool: writers, select: { index: 4 } }, artifact: RawStorage, gas_limit: 1000000, constructor_args: [] } }
+    - { id: c13, depends_on: [fund5], deploy: { type: eip1559, from: { pool: writers, select: { index: 4 } }, artifact: RawStorage, gas_limit: 1000000, constructor_args: [] } }
+    - { id: c6, depends_on: [fund6], deploy: { type: eip1559, from: { pool: writers, select: { index: 5 } }, artifact: RawStorage, gas_limit: 1000000, constructor_args: [] } }
+    - { id: c14, depends_on: [fund6], deploy: { type: eip1559, from: { pool: writers, select: { index: 5 } }, artifact: RawStorage, gas_limit: 1000000, constructor_args: [] } }
+    - { id: c7, depends_on: [fund7], deploy: { type: eip1559, from: { pool: writers, select: { index: 6 } }, artifact: RawStorage, gas_limit: 1000000, constructor_args: [] } }
+    - { id: c15, depends_on: [fund7], deploy: { type: eip1559, from: { pool: writers, select: { index: 6 } }, artifact: RawStorage, gas_limit: 1000000, constructor_args: [] } }
+
+templates:
+  set_slot:
+    type: tempo
+    from: { pool: trie, select: { index: 0 } }
+    gas_limit: 1000000
+    max_fee_per_gas: 100000000000
+    max_priority_fee_per_gas: 1000000000
+    fee_token: "0x20c0000000000000000000000000000000000000"
+    call:
+      abi: RawStorage
+      function: set
+      args: []
+
+# txgen needs a sequence; this one writes zero to an empty slot of contract 0,
+# which leaves its storage trie empty.
+sequences:
+  zero_write:
+    steps:
+      - { name: zero, template: set_slot, with: { call: { to: { var: setup.c0.address }, args: [999, 0] } } }
+
+mix:
+  - { sequence: zero_write, weight: 1 }

@@ -1,0 +1,27 @@
+[package]
+name = "tempo-dst"
+version.workspace = true
+edition = "2021"
+license.workspace = true
+description = "In-guest nemesis and oracles for Tempo deterministic simulation runs"
+
+# The same binary plans on the host and runs in its own guest container.
+# Guest hooks enter the guest host's mount/cgroup namespaces before using
+# Podman, LazyFS, or the shared assertion files.
+[[bin]]
+name = "tempo-dst"
+path = "src/main.rs"
+
+[dependencies]
+bedrock-assertions = { path = "bedrock-assertions" }
+bedrock-dst-contract = { path = "bedrock-dst-contract" }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["raw_value"] }
+nix = { version = "0.30", features = ["process", "time", "resource", "fs", "dir", "mount", "user", "signal", "sched"] }
+rand = "0.9"
+# E5 from-scratch storage roots and E6 eth_getProof verification.
+alloy-primitives = { version = "1", default-features = false, features = ["std", "serde"] }
+alloy-rlp = "0.3"
+alloy-trie = { version = "0.9", default-features = false, features = ["std", "ethereum"] }
+# Plain HTTP to the local node only; no TLS.
+ureq = { version = "2", default-features = false, features = ["json"] }

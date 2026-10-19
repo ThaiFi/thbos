@@ -1,0 +1,10 @@
+# Consumed by Bedrock's workloads/dst/run.sh. Paths are relative to this harness
+# for hooks, and to RUN_DIR for outputs produced by prepare.sh.
+prepare: [./prepare.sh]
+prepare_initrd: [./prepare-initrd.sh]
+compose: compose-run.yaml
+planner: tempo-dst
+command: podman exec tempo-dst /usr/local/bin/tempo-dst
+workload_args:
+  validators: 2
+  consensus: true

@@ -1,0 +1,17 @@
+diff --git a/xtask/src/generate_localnet.rs b/xtask/src/generate_localnet.rs
+index 37a3431a5..f8665129f 100644
+--- a/xtask/src/generate_localnet.rs
++++ b/xtask/src/generate_localnet.rs
+@@ -143,6 +143,12 @@ impl GenerateLocalnet {
+                         signing_key_dst.display()
+                     )
+                 })?;
++            // bedrock-dst: also write the key unencrypted; the encrypted one costs
++            // ~512 MiB and seconds of scrypt at every node start.
++            validator
++                .signing_key
++                .to_writer_unencrypted(std::fs::File::create(target_dir.join("signing.key.hex"))?)
++                .wrap_err("failed writing unencrypted signing key")?;
+             let signing_share_dst = validator.dst_signing_share(&output);
+             std::fs::write(&signing_share_dst, config.consensus_on_disk_signing_share)
+                 .wrap_err_with(|| {

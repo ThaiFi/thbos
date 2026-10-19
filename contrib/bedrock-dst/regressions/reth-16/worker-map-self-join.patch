@@ -1,0 +1,17 @@
+diff --git a/crates/tasks/src/worker_map.rs b/crates/tasks/src/worker_map.rs
+--- a/crates/tasks/src/worker_map.rs
++++ b/crates/tasks/src/worker_map.rs
+@@ -193,7 +193,11 @@ impl Drop for WorkerMap {
+         for (_, mut w) in std::mem::take(&mut self.workers) {
+             // Drop sender so the thread's recv loop exits, then join.
+             drop(w.tx);
+             if let Some(handle) = w.handle.take() {
+-                let _ = handle.join();
++                // The last owner can be a task running on this worker; a thread
++                // can't join itself (EDEADLK panic), and it exits on its own.
++                if handle.thread().id() != std::thread::current().id() {
++                    let _ = handle.join();
++                }
+             }
+         }
+     }

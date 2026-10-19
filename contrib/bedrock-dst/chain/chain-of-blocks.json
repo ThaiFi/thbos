@@ -1,0 +1,88 @@
+{
+ "abi": [
+  {
+   "anonymous": false,
+   "inputs": [
+    {
+     "indexed": false,
+     "internalType": "uint256",
+     "name": "index",
+     "type": "uint256"
+    },
+    {
+     "indexed": false,
+     "internalType": "bytes32",
+     "name": "payload",
+     "type": "bytes32"
+    },
+    {
+     "indexed": false,
+     "internalType": "bytes32",
+     "name": "link",
+     "type": "bytes32"
+    }
+   ],
+   "name": "Appended",
+   "type": "event"
+  },
+  {
+   "inputs": [
+    {
+     "internalType": "bytes32",
+     "name": "payload",
+     "type": "bytes32"
+    }
+   ],
+   "name": "append",
+   "outputs": [],
+   "stateMutability": "nonpayable",
+   "type": "function"
+  },
+  {
+   "inputs": [],
+   "name": "head",
+   "outputs": [
+    {
+     "internalType": "bytes32",
+     "name": "",
+     "type": "bytes32"
+    }
+   ],
+   "stateMutability": "view",
+   "type": "function"
+  },
+  {
+   "inputs": [],
+   "name": "length",
+   "outputs": [
+    {
+     "internalType": "uint256",
+     "name": "",
+     "type": "uint256"
+    }
+   ],
+   "stateMutability": "view",
+   "type": "function"
+  },
+  {
+   "inputs": [
+    {
+     "internalType": "uint256",
+     "name": "",
+     "type": "uint256"
+    }
+   ],
+   "name": "links",
+   "outputs": [
+    {
+     "internalType": "bytes32",
+     "name": "",
+     "type": "bytes32"
+    }
+   ],
+   "stateMutability": "view",
+   "type": "function"
+  }
+ ],
+ "bytecode": "0x6080604052348015600e575f5ffd5b506101bc8061001c5f395ff3fe608060405234801561000f575f5ffd5b506004361061004a575f3560e01c80631f7b6d321461004e5780636483ec2514610068578063881d8a401461007d5780638f7dcfa31461009c575b5f5ffd5b6100565f5481565b60405190815260200160405180910390f35b61007b61007636600461014a565b6100a5565b005b61005661008b36600461014a565b60026020525f908152604090205481565b61005660015481565b5f805460015460408051602081019290925281018490526060810182905290919060800160408051601f1981840301815291815281516020928301205f858152600290935291208190556001818155909150610102908390610161565b5f5560408051838152602081018590529081018290527fc8daaf7465c6422bc52c7683d7edf8c64e25a1d93ea2b2700a2fcb4be4c2d5819060600160405180910390a1505050565b5f6020828403121561015a575f5ffd5b5035919050565b8082018082111561018057634e487b7160e01b5f52601160045260245ffd5b9291505056fea2646970667358221220112f8ec857f6c1e2bf3993ac7fb1ae1c0e4660ed8971385f7e0401d6f7ca2e1964736f6c63430008230033"
+}

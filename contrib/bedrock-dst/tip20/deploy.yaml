@@ -1,0 +1,83 @@
+# Creates the TIP-20 load's token before the warm checkpoint (`tempo-dst
+# deploy`), so every branch starts with it. Dev account 9 creates it through
+# the TIP20Factory precompile (address = getTokenAddress(account 9, salt 0xb1d)
+# = 0x20C0000000000000000000008a34063c54ebdca3), grants itself ISSUER_ROLE, and
+# mints the whole supply to the holders, dev accounts 1-8: holder k (1-based)
+# gets k * 10^24, total 36 * 10^24. Nothing mints or burns afterwards, so
+# transfers among the holders conserve the supply (fees are paid in pathUSD).
+# Keep in sync with bin/tempo-dst/src/tip20.rs.
+
+chain_id: 1337
+
+accounts:
+  admin:
+    mnemonic: "test test test test test test test test test test test junk"
+    range: [9, 10]
+  holders:
+    mnemonic: "test test test test test test test test test test test junk"
+    range: [1, 9]
+
+artifacts:
+  TIP20: tip20.abi.json
+
+setup:
+  steps:
+    - id: create
+      tx:
+        type: eip1559
+        from: { pool: admin, select: { index: 0 } }
+        gas_limit: 10000000
+        call:
+          to: "0x20fc000000000000000000000000000000000000"
+          abi: TIP20
+          function: createToken
+          args:
+            - "Bedrock DST"
+            - "BDST"
+            - "USD"
+            - "0x20c0000000000000000000000000000000000000"
+            - { pool: { pool: admin, select: { index: 0 } } }
+            - "0x0000000000000000000000000000000000000000000000000000000000000b1d"
+    - id: issuer
+      tx:
+        type: eip1559
+        from: { pool: admin, select: { index: 0 } }
+        gas_limit: 1000000
+        call:
+          to: "0x20c0000000000000000000008a34063c54ebdca3"
+          abi: TIP20
+          function: grantRole
+          args:
+            - "0x114e74f6ea3bd819998f78687bfcb11b140da08e9b7d222fa9c1f1ba1f2aa122"
+            - { pool: { pool: admin, select: { index: 0 } } }
+    - { id: mint1, tx: { type: eip1559, from: { pool: admin, select: { index: 0 } }, gas_limit: 1000000, call: { to: "0x20c0000000000000000000008a34063c54ebdca3", abi: TIP20, function: mint, args: [{ pool: { pool: holders, select: { index: 0 } } }, "1000000000000000000000000"] } } }
+    - { id: mint2, tx: { type: eip1559, from: { pool: admin, select: { index: 0 } }, gas_limit: 1000000, call: { to: "0x20c0000000000000000000008a34063c54ebdca3", abi: TIP20, function: mint, args: [{ pool: { pool: holders, select: { index: 1 } } }, "2000000000000000000000000"] } } }
+    - { id: mint3, tx: { type: eip1559, from: { pool: admin, select: { index: 0 } }, gas_limit: 1000000, call: { to: "0x20c0000000000000000000008a34063c54ebdca3", abi: TIP20, function: mint, args: [{ pool: { pool: holders, select: { index: 2 } } }, "3000000000000000000000000"] } } }
+    - { id: mint4, tx: { type: eip1559, from: { pool: admin, select: { index: 0 } }, gas_limit: 1000000, call: { to: "0x20c0000000000000000000008a34063c54ebdca3", abi: TIP20, function: mint, args: [{ pool: { pool: holders, select: { index: 3 } } }, "4000000000000000000000000"] } } }
+    - { id: mint5, tx: { type: eip1559, from: { pool: admin, select: { index: 0 } }, gas_limit: 1000000, call: { to: "0x20c0000000000000000000008a34063c54ebdca3", abi: TIP20, function: mint, args: [{ pool: { pool: holders, select: { index: 4 } } }, "5000000000000000000000000"] } } }
+    - { id: mint6, tx: { type: eip1559, from: { pool: admin, select: { index: 0 } }, gas_limit: 1000000, call: { to: "0x20c0000000000000000000008a34063c54ebdca3", abi: TIP20, function: mint, args: [{ pool: { pool: holders, select: { index: 5 } } }, "6000000000000000000000000"] } } }
+    - { id: mint7, tx: { type: eip1559, from: { pool: admin, select: { index: 0 } }, gas_limit: 1000000, call: { to: "0x20c0000000000000000000008a34063c54ebdca3", abi: TIP20, function: mint, args: [{ pool: { pool: holders, select: { index: 6 } } }, "7000000000000000000000000"] } } }
+    - { id: mint8, tx: { type: eip1559, from: { pool: admin, select: { index: 0 } }, gas_limit: 1000000, call: { to: "0x20c0000000000000000000008a34063c54ebdca3", abi: TIP20, function: mint, args: [{ pool: { pool: holders, select: { index: 7 } } }, "8000000000000000000000000"] } } }
+
+templates:
+  # txgen needs a sequence; a no-op transfer of zero from holder 1 to itself.
+  noop:
+    type: tempo
+    from: { pool: holders, select: { index: 0 } }
+    gas_limit: 300000
+    max_fee_per_gas: 100000000000
+    max_priority_fee_per_gas: 1000000000
+    fee_token: "0x20c0000000000000000000000000000000000000"
+    call:
+      to: "0x20c0000000000000000000008a34063c54ebdca3"
+      abi: TIP20
+      function: transfer
+      args: [{ pool: { pool: holders, select: { index: 0 } } }, 0]
+
+sequences:
+  noop:
+    steps:
+      - { name: noop, template: noop }
+
+mix:
+  - { sequence: noop, weight: 1 }

@@ -1,0 +1,47 @@
+# Deploys RawStorage from dev account 0 at nonce 0, i.e. at
+# 0x5FbDB2315678afecb367f032d93F642f64180aa3, before the warm checkpoint
+# (`tempo-dst deploy`). txgen needs a sequence; this one writes zero to an
+# empty slot, which leaves the storage trie empty.
+
+chain_id: 1337
+
+accounts:
+  trie:
+    mnemonic: "test test test test test test test test test test test junk"
+    range: [0, 1]
+
+artifacts:
+  RawStorage:
+    abi: raw-storage.json
+    bytecode: raw-storage.json
+
+setup:
+  steps:
+    - id: store
+      deploy:
+        type: eip1559
+        from: { pool: trie, select: { index: 0 } }
+        artifact: RawStorage
+        gas_limit: 1000000
+        constructor_args: []
+
+templates:
+  set_slot:
+    type: tempo
+    from: { pool: trie, select: { index: 0 } }
+    gas_limit: 1000000
+    max_fee_per_gas: 100000000000
+    max_priority_fee_per_gas: 1000000000
+    fee_token: "0x20c0000000000000000000000000000000000000"
+    call:
+      abi: RawStorage
+      function: set
+      args: []
+
+sequences:
+  zero_write:
+    steps:
+      - { name: zero, template: set_slot, with: { call: { to: { var: setup.store.address }, args: [999, 0] } } }
+
+mix:
+  - { sequence: zero_write, weight: 1 }

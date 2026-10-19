@@ -1,0 +1,13 @@
+diff --git a/crates/storage/storage-overlay/src/changeset_cache.rs b/crates/storage/storage-overlay/src/changeset_cache.rs
+index 6508538f2..1632ebc1f 100644
+--- a/crates/storage/storage-overlay/src/changeset_cache.rs
++++ b/crates/storage/storage-overlay/src/changeset_cache.rs
+@@ -413,7 +413,7 @@ impl ChangesetCache {
+             .map(|block| {
+                 (
+                     block.recovered_block().number(),
+-                    Arc::clone(&block.trie_data().sorted.trie_updates),
++                    Arc::clone(&block.trie_data().trie_updates),
+                 )
+             })
+             .collect::<Vec<_>>();

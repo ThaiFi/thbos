@@ -1,0 +1,12 @@
+[package]
+name = "bedrock-dst-contract"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The bedrock-dst workload contract: typed requests and responses of each workload hook"
+
+[dependencies]
+serde = { version = "1", default-features = false, features = ["derive", "alloc"] }
+
+[dev-dependencies]
+serde_json = "1"

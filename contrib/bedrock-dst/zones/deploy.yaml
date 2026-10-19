@@ -1,0 +1,50 @@
+# Zones load setup, run before the warm checkpoint (`tempo-dst deploy-zones`).
+# ZoneFactory.createZone requires its initial token to have a TIP-403 registry
+# transfer-policy binding; on Tempo's dev genesis pathUSD still carries its
+# legacy policy ID, so dev account 9 migrates it (permissionless). The zone
+# service's `tempo-zone dev` retries createZone until this lands.
+
+chain_id: 1337
+
+accounts:
+  setup:
+    mnemonic: "test test test test test test test test test test test junk"
+    range: [9, 10]
+
+artifacts:
+  TIP403Registry: tip403.abi.json
+
+setup:
+  steps:
+    - id: migrate
+      tx:
+        type: eip1559
+        from: { pool: setup, select: { index: 0 } }
+        gas_limit: 1000000
+        call:
+          to: "0x403c000000000000000000000000000000000000"
+          abi: TIP403Registry
+          function: migrateTransferPolicyIds
+          args:
+            - ["0x20c0000000000000000000000000000000000000"]
+
+templates:
+  # txgen needs a sequence; re-running the migration is a no-op.
+  noop:
+    type: eip1559
+    from: { pool: setup, select: { index: 0 } }
+    gas_limit: 1000000
+    call:
+      to: "0x403c000000000000000000000000000000000000"
+      abi: TIP403Registry
+      function: migrateTransferPolicyIds
+      args:
+        - ["0x20c0000000000000000000000000000000000000"]
+
+sequences:
+  noop:
+    steps:
+      - { name: noop, template: noop }
+
+mix:
+  - { sequence: noop, weight: 1 }

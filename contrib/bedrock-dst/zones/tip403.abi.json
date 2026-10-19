@@ -1,0 +1,19 @@
+[
+  {
+    "type": "function",
+    "name": "migrateTransferPolicyIds",
+    "stateMutability": "nonpayable",
+    "inputs": [{ "name": "tokens", "type": "address[]" }],
+    "outputs": [{ "name": "migrated", "type": "uint256" }]
+  },
+  {
+    "type": "function",
+    "name": "tokenTransferPolicyId",
+    "stateMutability": "view",
+    "inputs": [{ "name": "token", "type": "address" }],
+    "outputs": [
+      { "name": "isSet", "type": "bool" },
+      { "name": "policyId", "type": "uint64" }
+    ]
+  }
+]
