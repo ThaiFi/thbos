@@ -1320,15 +1320,59 @@ fn forced_withdrawal_aborts_when_advance_cannot_fund_debit_allotment() -> eyre::
     Ok(())
 }
 
-/// An attempt that needs one more unit of gas than its allotment rolls back as `DebitFailed`.
+/// The costliest debit fits `FORCED_EXIT_DEBIT_GAS` at production T14 gas: the first forced
+/// withdrawal (empty outbox queue and fallback map), cold storage, and a compound transfer policy.
+/// An attempt that needs one more unit of gas than its bound rolls back as `DebitFailed`.
 #[test]
-fn forced_debit_exhausting_its_allotment_is_debit_failed() -> eyre::Result<()> {
+fn forced_debit_worst_case_fits_its_bound_at_t14() -> eyre::Result<()> {
+    use tempo_contracts::precompiles::ITIP403Registry;
+    use tempo_precompiles::tip403_registry::TIP403Registry;
     let mut h = Harness::new()?;
     h.ctx.cfg.spec = TempoHardfork::T14;
+    h.ctx.cfg.gas_params = tempo_revm::gas_params::tempo_gas_params(TempoHardfork::T14);
+    {
+        let mut storage = test_storage_provider(&mut h.ctx, u64::MAX, false);
+        StorageCtx::enter(&mut storage, || -> TempoResult<()> {
+            let mut registry = TIP403Registry::new();
+            registry.initialize()?;
+            let mut policies = Vec::new();
+            for _ in 0..3 {
+                policies.push(registry.create_policy(
+                    ALICE,
+                    ITIP403Registry::createPolicyCall {
+                        admin: ALICE,
+                        policyType: ITIP403Registry::PolicyType::BLACKLIST,
+                    },
+                )?);
+            }
+            let compound = registry.create_compound_policy(
+                ALICE,
+                ITIP403Registry::createCompoundPolicyCall {
+                    senderPolicyId: policies[0],
+                    recipientPolicyId: policies[1],
+                    mintRecipientPolicyId: policies[2],
+                },
+            )?;
+            TIP20Token::from_address(h.token)?.change_transfer_policy_id(
+                ALICE,
+                ITIP20::changeTransferPolicyIdCall {
+                    newPolicyId: compound,
+                },
+            )
+        })?;
+    }
+    assert!(h.pending()?.is_empty());
+    assert_eq!(h.last_fallback_nonce()?, 0);
+    // End the setup transaction so the attempt starts cold.
+    h.ctx.journaled_state.commit_tx();
     let checkpoint = h.ctx.journaled_state.checkpoint();
     let (result, needed) = h.try_debit(FORCED_EXIT_DEBIT_GAS)?;
     assert_eq!(result, Ok(()));
-    assert!(needed <= FORCED_EXIT_DEBIT_GAS, "debit needs {needed} gas");
+    eprintln!("worst-case forced debit at T14: {needed} gas");
+    assert!(
+        needed <= FORCED_EXIT_DEBIT_GAS,
+        "debit needs {needed} gas, above FORCED_EXIT_DEBIT_GAS"
+    );
     h.ctx.journaled_state.checkpoint_revert(checkpoint);
 
     let logs_before = h.ctx.journaled_state.logs().to_vec();
