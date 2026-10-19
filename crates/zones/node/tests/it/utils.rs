@@ -1386,6 +1386,7 @@ impl ZoneTestNode {
                     batch_anchor_config: Default::default(),
                     withdrawal_poll_interval: Duration::from_secs(5),
                     withdrawal_batch_limits: Default::default(),
+                    deposit_allowlist: None,
                 });
         }
         if let Some(config) = prover_config {

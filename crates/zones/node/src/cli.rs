@@ -19,7 +19,8 @@ use zone_p2p::{MAX_TRANSACTION_MESSAGE_SIZE, P2pConfig, Role};
 use zone_payload::DEFAULT_WITHDRAWAL_BATCH_INTERVAL_BLOCKS;
 
 use crate::{
-    ZoneNode, ZoneProverConfig, ZoneRedactedRpcConfig, ZoneSequencerAddOnsConfig, dev::DevCommand,
+    DepositAllowlist, DepositAllowlistConfig, ZoneNode, ZoneProverConfig, ZoneRedactedRpcConfig,
+    ZoneSequencerAddOnsConfig, deposit_allowlist::DEPOSIT_ALLOWLIST_FILE_NAME, dev::DevCommand,
     rpc::auth::DEFAULT_MAX_AUTH_TOKEN_VALIDITY_SECS,
 };
 use zone_checker::{CheckerConfig, CheckerExEx, CheckerMode};
@@ -165,7 +166,8 @@ fn run_node(mut cli: Cli<ZoneChainSpecParser, ZoneArgs>) -> eyre::Result<()> {
             node = node.with_deposit_decryption_keys(additional_decryption_keys);
         }
 
-        node = configure_sequencing(&args, zone_id, node).await?;
+        let data_dir = builder.config().datadir().data_dir();
+        node = configure_sequencing(&args, zone_id, &data_dir, node).await?;
 
         // Install or skip the checker ExEx based on the configured mode.
         match args.checker_mode {
@@ -220,6 +222,7 @@ fn cli_evm_config(chain_spec: Arc<ZoneChainSpec>, l1_rpc_url: Option<url::Url>) 
 async fn configure_sequencing(
     args: &ZoneArgs,
     zone_id: u32,
+    data_dir: &std::path::Path,
     mut node: ZoneNode,
 ) -> eyre::Result<ZoneNode> {
     let p2p_config =
@@ -290,8 +293,25 @@ async fn configure_sequencing(
         })
     };
 
+    eyre::ensure!(
+        !args.deposit_allowlist || should_sequence_blocks,
+        "--deposits.allowlist requires a sequencer"
+    );
     if should_sequence_blocks {
         let sequencer_signer = load_sequencer_signer(args.sequencer_key_file.as_deref()).await?;
+        let deposit_allowlist = args
+            .deposit_allowlist
+            .then(|| {
+                DepositAllowlist::load(
+                    data_dir.join(DEPOSIT_ALLOWLIST_FILE_NAME),
+                    args.deposit_allowlist_seed.as_deref(),
+                )
+            })
+            .transpose()?
+            .map(|allowlist| DepositAllowlistConfig {
+                allowlist,
+                admin_addr: args.deposit_allowlist_admin_addr,
+            });
         node = node.with_sequencer(ZoneSequencerAddOnsConfig {
             sequencer_signer,
             // `None` on an rpc-only node: it holds no individual key, and it is never the
@@ -307,6 +327,7 @@ async fn configure_sequencing(
                 max_batch_gas: args.withdrawal_max_batch_gas,
                 max_in_flight_batches: args.withdrawal_max_in_flight_batches,
             },
+            deposit_allowlist,
         });
     }
     if let Some(config) = prover_config {
@@ -615,6 +636,32 @@ pub struct ZoneArgs {
         requires = "prover_addresses"
     )]
     pub shadow_prover_pcrs: Option<zone_prover::ShadowProofVerifier>,
+
+    /// Bounce deposits whose L1 sender is not on the allowlist persisted at
+    /// `<datadir>/deposit-allowlist.json`. Startup fails if that file and the seed are both
+    /// missing.
+    #[arg(long = "deposits.allowlist", env = "DEPOSITS_ALLOWLIST")]
+    pub deposit_allowlist: bool,
+
+    /// JSON array of depositor addresses used to create the persisted allowlist when it does
+    /// not exist yet. Ignored once the persisted allowlist exists.
+    #[arg(
+        long = "deposits.allowlist.seed",
+        env = "DEPOSITS_ALLOWLIST_SEED",
+        value_name = "PATH",
+        requires = "deposit_allowlist"
+    )]
+    pub deposit_allowlist_seed: Option<PathBuf>,
+
+    /// Serve the unauthenticated `zoneAdmin` allowlist JSON-RPC methods on this address.
+    /// Restrict access at the network layer.
+    #[arg(
+        long = "deposits.allowlist.admin-addr",
+        env = "DEPOSITS_ALLOWLIST_ADMIN_ADDR",
+        value_name = "ADDR",
+        requires = "deposit_allowlist"
+    )]
+    pub deposit_allowlist_admin_addr: Option<SocketAddr>,
 }
 
 fn prepend_log_filter(filter: &mut String, directives: &str) {

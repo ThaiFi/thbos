@@ -5,6 +5,7 @@
 
 use crate::{
     ZoneEngine,
+    deposit_allowlist::{DepositAllowlistApiServer as _, DepositAllowlistConfig},
     follower::PeerTipRegistry,
     replication::{BACKFILL_SERVE_QUEUE_CAPACITY, serve_backfill_requests},
     role::{
@@ -27,6 +28,7 @@ use alloy_primitives::{Address, U256};
 use alloy_provider::{DynProvider, Provider as _};
 use alloy_signer_local::PrivateKeySigner;
 use alloy_sol_types::SolEvent as _;
+use eyre::WrapErr as _;
 use k256::SecretKey;
 use reth_chainspec::EthChainSpec;
 use reth_eth_wire_types::primitives::BasicNetworkPrimitives;
@@ -201,6 +203,8 @@ pub struct ZoneSequencerAddOnsConfig {
     pub withdrawal_poll_interval: Duration,
     /// Gas and concurrency limits for withdrawal processing transactions.
     pub withdrawal_batch_limits: WithdrawalBatchLimits,
+    /// Depositor allowlist enforced while leading. `None` credits every deposit.
+    pub deposit_allowlist: Option<DepositAllowlistConfig>,
 }
 
 /// How this node validates Zone batches with the SPF.
@@ -720,6 +724,24 @@ where
             };
 
         let task_executor = ctx.node.task_executor().clone();
+        if let Some(DepositAllowlistConfig {
+            allowlist,
+            admin_addr: Some(admin_addr),
+        }) = self
+            .sequencer_config
+            .as_ref()
+            .and_then(|config| config.deposit_allowlist.clone())
+        {
+            let server = jsonrpsee::server::Server::builder()
+                .build(admin_addr)
+                .await
+                .wrap_err_with(|| format!("failed to bind zoneAdmin server on {admin_addr}"))?;
+            let local_addr = server.local_addr()?;
+            let handle = server.start(allowlist.into_rpc());
+            info!(target: "reth::cli", %local_addr, "Deposit allowlist admin server started");
+            // Dropping the handle stops the server, so the task owns it for the node's lifetime.
+            task_executor.spawn_critical_task("zone-deposit-allowlist-admin", handle.stopped());
+        }
         if !self.portal_address.is_zero() {
             // Initialize the pause gate before block production starts, so a restart during a
             // pause does not produce blocks while ingestion catches up.
@@ -999,6 +1021,12 @@ where
                     .expect("sequencer mode configures deposit decryption keys"),
                 self.portal_address,
                 proof_collector.clone(),
+            )
+            .with_deposit_allowlist(
+                config
+                    .deposit_allowlist
+                    .as_ref()
+                    .map(|config| config.allowlist.clone()),
             );
             task_executor.spawn_critical_task("zone-engine", engine.run());
 
