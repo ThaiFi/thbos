@@ -468,7 +468,7 @@ impl TempoTxEnv {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use alloy_consensus::{Signed, TxLegacy, transaction::TxHashRef};
     use alloy_evm::{FromRecoveredTx, FromTxWithEncoded};
     use alloy_primitives::{Address, Bytes, Signature, TxKind, U256, keccak256};
@@ -485,7 +485,7 @@ mod tests {
 
     use crate::{ExecutionContext, TempoInvalidTransaction, TempoTxEnv};
 
-    fn create_call(to: TxKind) -> Call {
+    pub(crate) fn create_call(to: TxKind) -> Call {
         Call {
             to,
             value: alloy_primitives::U256::ZERO,

@@ -1,8 +1,12 @@
 use super::*;
 use crate::{
     ExecutionContext, FeeTokenResolver, ProtocolFeeManager, TempoBlockEnv, TempoFeeManager,
-    TempoTxEnv, evm::TempoEvm, gas_params::tempo_gas_params, native_multisig::authorizations,
-    signature_gas::primitive_signature_verification_gas, tx::TempoBatchCallEnv,
+    TempoTxEnv,
+    evm::TempoEvm,
+    gas_params::tempo_gas_params,
+    native_multisig::authorizations,
+    signature_gas::primitive_signature_verification_gas,
+    tx::{TempoBatchCallEnv, tests::create_call},
 };
 use alloy_primitives::{Address, B256, Bytes, Signature, TxKind, U256};
 use alloy_sol_types::SolCall;
@@ -80,11 +84,7 @@ fn native_fixture() -> TestHandlerEvm {
         TempoHardfork::T14,
         TempoBatchCallEnv {
             signature: TempoSignature::Multisig(signature),
-            aa_calls: vec![Call {
-                to: TxKind::Call(Address::repeat_byte(0x33)),
-                value: U256::ZERO,
-                input: Bytes::new(),
-            }],
+            aa_calls: vec![create_call(TxKind::Call(Address::repeat_byte(0x33)))],
             ..Default::default()
         },
         |tx| {

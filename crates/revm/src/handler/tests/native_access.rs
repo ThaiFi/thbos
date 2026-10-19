@@ -123,11 +123,7 @@ impl NativeAccessFixture {
             nonce_key,
             gas_limit,
             fee_token: Some(PATH_USD_ADDRESS),
-            calls: vec![Call {
-                to: TxKind::Call(Address::repeat_byte(0x44)),
-                value: U256::ZERO,
-                input: Bytes::new(),
-            }],
+            calls: vec![create_call(TxKind::Call(Address::repeat_byte(0x44)))],
             access_list: if matches!(warmth, Warmth::AccessList) {
                 AccessList(vec![AccessListItem {
                     address: self.delegate(),
