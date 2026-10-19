@@ -411,6 +411,49 @@ async fn test_gas_filler_fills_the_fee_payer_access_at_t14() -> eyre::Result<()>
     Ok(())
 }
 
+/// `SponsorFiller` marks a request only when it fills, after `TempoGasFiller` prepared in the same
+/// round. A request that carries its chain id, as `ChainIdFiller` sets it from its cache on every
+/// request after a provider's first, is prepared in that first round, so the gas filler must add
+/// the fee payer access when it fills: a provider built with `sponsor` fills the node's estimate
+/// for the marked request.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_sponsor_provider_fills_the_fee_payer_access_at_t14() -> eyre::Result<()> {
+    let mut env = Localnet::new().await?;
+    assert!(env.hardfork().is_t14(), "the devnet schedule starts at T14");
+    let signer = PrivateKeySigner::random();
+    let current_timestamp = env.current_block_timestamp().await?;
+    let test_case = FillTestCase::new(NonceMode::Protocol, KeyType::Secp256k1);
+    let mut marked = sponsored_fill_request(
+        &test_case,
+        signer.address(),
+        current_timestamp,
+        env.hardfork().expiring_nonce_max_expiry_secs(),
+    );
+    marked.set_fee_token(DEFAULT_FEE_TOKEN);
+    marked.inner.chain_id = Some(env.chain_id);
+    let request = TempoTransactionRequest {
+        fee_payer_signature: None,
+        ..marked.clone()
+    };
+
+    let rpc_url = env.setup.node.rpc_url();
+    let provider = ProviderBuilder::new_with_network::<TempoNetwork>()
+        .sponsor(rpc_url.as_str())
+        .connect(rpc_url.as_str())
+        .await?;
+    let filled = provider.fill(request).await?;
+    let filled = filled
+        .as_builder()
+        .ok_or_eyre("the filler built the transaction")?;
+
+    assert_eq!(filled.fee_payer_signature, marked.fee_payer_signature);
+    assert_eq!(
+        filled.inner.gas,
+        Some(estimate_gas(&env.provider, &marked).await?)
+    );
+    Ok(())
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn test_aa_2d_nonce_pool_comprehensive() -> eyre::Result<()> {
     let localnet = Localnet::new().await?;
