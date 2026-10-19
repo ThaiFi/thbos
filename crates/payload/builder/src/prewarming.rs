@@ -43,7 +43,7 @@ impl BestTransactionsPrewarming {
         let (commands_tx, commands_rx) = mpsc::channel();
         let this = Self {
             transactions_rx,
-            commands_tx: commands_tx.clone(),
+            commands_tx,
             stop: prewarm.stop.clone(),
         };
 
@@ -57,7 +57,6 @@ impl BestTransactionsPrewarming {
                         best_txs,
                         transactions_tx,
                         commands_rx,
-                        commands_tx,
                         prewarm,
                         next_expiring_nonce_offset: 0,
                     },
@@ -100,7 +99,6 @@ impl BestTransactionsPrewarming {
 
                 let parallel = ctx.prewarm.parallel;
                 let prewarm = ctx.prewarm.clone();
-                let commands_tx = ctx.commands_tx.clone();
                 // Only parallel jobs send their result. A sender held by every job would make
                 // the drain on invalidation wait for all in-flight and queued prewarms.
                 let transactions_tx = parallel.then(|| ctx.transactions_tx.clone());
@@ -116,7 +114,6 @@ impl BestTransactionsPrewarming {
                     if let Some(transactions_tx) = transactions_tx {
                         let _ = transactions_tx.send(Some(tx));
                     }
-                    let _ = commands_tx.send(BestTransactionsCommand::Advance);
                 });
             };
 
@@ -270,6 +267,7 @@ impl Iterator for BestTransactionsPrewarming {
         // Empty replies describe earlier source polls. Drain them before deciding
         // whether a ready transaction exists, preserving the order of actual txs.
         if let Some(tx) = self.transactions_rx.try_iter().flatten().next() {
+            let _ = self.commands_tx.send(BestTransactionsCommand::Advance);
             return Some(tx);
         }
         self.commands_tx
@@ -323,7 +321,6 @@ impl BestTransactions for BestTransactionsPrewarming {
 struct BestTransactionsPrewarmingContext<Txs, Provider> {
     best_txs: Txs,
     transactions_tx: Sender<Option<PrewarmedTransaction>>,
-    commands_tx: Sender<BestTransactionsCommand>,
     commands_rx: Receiver<BestTransactionsCommand>,
     prewarm: PrewarmingExecutionContext<Provider>,
     next_expiring_nonce_offset: usize,
@@ -778,17 +775,18 @@ mod tests {
     }
 
     #[test]
-    fn prewarming_eagerly_drains_source_iterator() {
+    fn prewarming_bounds_lookahead_until_transactions_are_consumed() {
         let sender = Address::random();
         let executor = TaskExecutor::test();
-        let txs = (0..executor.prewarming_pool().current_num_threads() * 2 + 4)
+        let lookahead = executor.prewarming_pool().current_num_threads() * 2;
+        let txs = (0..lookahead + 4)
             .map(|nonce| test_tx(sender, nonce as u64))
             .collect::<Vec<_>>();
         let expected = txs.iter().map(|tx| *tx.hash()).collect::<Vec<_>>();
         let log = Arc::new(Mutex::new(TestLog::default()));
 
         let mut prewarming = prewarming_with_executor(executor, txs, log.clone());
-        wait_until(|| log.lock().unwrap().yielded == expected.len());
+        wait_until(|| log.lock().unwrap().yielded == lookahead);
 
         let actual = (0..expected.len())
             .map(|_| *prewarming.next().expect("transaction").tx.hash())
@@ -836,6 +834,12 @@ mod tests {
 
             assert_eq!(prewarming.next().unwrap().tx.hash(), first.hash());
             assert_eq!(prewarming.next().unwrap().tx.hash(), second.hash());
+            for _ in 0..2 {
+                assert!(matches!(
+                    commands_rx.try_recv(),
+                    Ok(BestTransactionsCommand::Advance)
+                ));
+            }
             assert!(matches!(
                 commands_rx.try_recv(),
                 Err(mpsc::TryRecvError::Empty)
