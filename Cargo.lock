@@ -17144,6 +17144,7 @@ dependencies = [
  "tempo-precompiles",
  "tempo-precompiles-macros",
  "tempo-primitives",
+ "tempo-revm",
  "thiserror 2.0.21",
  "zone-primitives",
 ]

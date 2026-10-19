@@ -7,7 +7,9 @@ use tempo_precompiles::{tip20::Recipient, tip403_registry::TIP403Registry};
 /// Gas allotted to one forced-exit debit attempt: debit, token hooks, fallback mapping, and
 /// enqueue. An attempt that needs more produces `DebitFailed`.
 ///
-/// Provisional until the weight-14 worst case is re-measured with the caught debit.
+/// About twice the costliest measured debit (2.56M at T14 gas, cold outbox state). Even when
+/// every request spends the full allotment, a forced exit stays cheaper than the 14 deposits
+/// its admission weight displaces, so the deposit-only queue remains the worst weight-14 mix.
 pub(crate) const FORCED_EXIT_DEBIT_GAS: u64 = 5_000_000;
 
 /// Private authenticated input; never emitted as a public L1 attribution.
