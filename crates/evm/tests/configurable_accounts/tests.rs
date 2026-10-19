@@ -5282,3 +5282,106 @@ fn verify_multisig_needs_its_gas() {
         );
     }
 }
+
+#[test]
+fn native_multisig_is_rejected_before_t14() {
+    let unsupported =
+        TempoInvalidTransaction::NativeMultisig(NativeMultisigError::UnsupportedContext);
+    let mut f = Fixture::with_spec(true, TempoHardfork::T13);
+    let account = f.account;
+    // Signature type `0x05`.
+    let tx = f.signed(3, vec![f.getter()]);
+    assert_eq!(rejection(&mut f, &tx, account), unsupported, "0x05");
+    // A multisig-signed key authorization under a primitive transaction signature.
+    let grant = KeyAuthorization::unrestricted(1, SignatureType::Secp256k1, signer(5).address());
+    let approval = multisig_approval(account, &f.config, &f.owner, grant.signature_hash());
+    let tx = f.sign_primitive(TempoTransaction {
+        key_authorization: Some(grant.into_signed(approval)),
+        ..aa_tx(3, vec![f.getter()])
+    });
+    assert_eq!(
+        rejection(&mut f, &tx, account),
+        unsupported,
+        "multisig-signed grant"
+    );
+    // Key type 3 in a primitive-signed grant: no native role is involved.
+    let grant = KeyAuthorization::unrestricted(1, SignatureType::Multisig, signer(5).address());
+    let approval = f.owner.sign_hash_sync(&grant.signature_hash()).unwrap();
+    let tx = f.sign_primitive(TempoTransaction {
+        key_authorization: Some(grant.into_signed(approval)),
+        ..aa_tx(3, vec![f.getter()])
+    });
+    assert_eq!(
+        rejection(&mut f, &tx, account),
+        unsupported,
+        "key type 3 grant"
+    );
+}
+
+#[test]
+fn key_type_3_authorization_calls_revert_as_before_t14() {
+    let key_id = signer(5).address();
+    let signature_type = IAccountKeychain::SignatureType::Multisig;
+    let config = IAccountKeychain::KeyRestrictions {
+        expiry: u64::MAX,
+        enforceLimits: false,
+        limits: vec![],
+        allowAnyCalls: true,
+        allowedCalls: vec![],
+    };
+    let calls = [
+        IAccountKeychain::authorizeKey_0Call {
+            keyId: key_id,
+            signatureType: signature_type,
+            expiry: u64::MAX,
+            enforceLimits: false,
+            limits: vec![],
+        }
+        .abi_encode(),
+        IAccountKeychain::authorizeKey_1Call {
+            keyId: key_id,
+            signatureType: signature_type,
+            config: config.clone(),
+        }
+        .abi_encode(),
+        IAccountKeychain::authorizeKey_2Call {
+            keyId: key_id,
+            signatureType: signature_type,
+            config,
+            witness: B256::ZERO,
+        }
+        .abi_encode(),
+        IAccountKeychain::authorizeAdminKeyCall {
+            keyId: key_id,
+            signatureType: signature_type,
+            witness: B256::ZERO,
+        }
+        .abi_encode(),
+    ];
+    let run = |spec, calldata: &[u8], value: u8| {
+        let mut f = Fixture::with_spec(true, spec);
+        let account = f.account;
+        let mut input = calldata.to_vec();
+        input[67] = value;
+        // The admin check's target and value, with the patched calldata.
+        let call = Call {
+            input: input.into(),
+            ..is_admin_key_call(account, account)
+        };
+        send(&mut f, account, vec![call])
+    };
+    for calldata in &calls {
+        // Before T14 type 3 is indistinguishable from any other unknown type.
+        let multisig = run(TempoHardfork::T13, calldata, 3);
+        let unknown = run(TempoHardfork::T13, calldata, 4);
+        assert!(
+            matches!(multisig, ExecutionResult::Revert { .. }),
+            "{multisig:?}"
+        );
+        assert_eq!(multisig, unknown);
+        // At T14 the same calldata is accepted or fails with a distinct error.
+        let active = run(TempoHardfork::T14, calldata, 3);
+        assert_ne!(active, run(TempoHardfork::T14, calldata, 4));
+        assert_ne!(active, multisig);
+    }
+}
