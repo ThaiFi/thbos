@@ -107,6 +107,12 @@ impl ForcedWithdraw {
             None => signer.clone(),
         };
         let payer_address = payer.address();
+        if payer_address == signer.address() {
+            eprintln!(
+                "Warning: the account pays its own fee, so L1 publicly links it to this forced \
+                 exit. Pass --fee-payer-private-key to use a separate payer."
+            );
+        }
         let provider = ProviderBuilder::new_with_network::<TempoNetwork>()
             .wallet(EthereumWallet::from(payer))
             .connect(&self.l1_rpc_url)
