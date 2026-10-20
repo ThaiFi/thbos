@@ -36,13 +36,13 @@ impl HeaderValidator<TempoHeader> for ZoneConsensus {
 
         let header = header.header();
         if header.consensus_context.is_some() {
-            return Err(ConsensusError::other(ZoneConsensusError::ConsensusContext));
+            return Err(ConsensusError::other(Error::ConsensusContext));
         }
         if !header.inner.extra_data.is_empty() {
-            return Err(ConsensusError::other(ZoneConsensusError::ExtraData));
+            return Err(ConsensusError::other(Error::ExtraData));
         }
         if header.inner.mix_hash != B256::ZERO {
-            return Err(ConsensusError::other(ZoneConsensusError::MixHash {
+            return Err(ConsensusError::other(Error::MixHash {
                 actual: header.inner.mix_hash,
             }));
         }
@@ -52,12 +52,10 @@ impl HeaderValidator<TempoHeader> for ZoneConsensus {
             .is_cancun_active_at_timestamp(header.inner.timestamp)
             .then_some(B256::ZERO);
         if header.inner.parent_beacon_block_root != expected_parent_beacon_block_root {
-            return Err(ConsensusError::other(
-                ZoneConsensusError::ParentBeaconBlockRoot {
-                    expected: expected_parent_beacon_block_root,
-                    actual: header.inner.parent_beacon_block_root,
-                },
-            ));
+            return Err(ConsensusError::other(Error::ParentBeaconBlockRoot {
+                expected: expected_parent_beacon_block_root,
+                actual: header.inner.parent_beacon_block_root,
+            }));
         }
 
         Ok(())
@@ -120,7 +118,7 @@ impl FullConsensus<TempoPrimitives> for ZoneConsensus {
 }
 
 #[derive(Debug, PartialEq, Eq, thiserror::Error)]
-enum ZoneConsensusError {
+enum Error {
     #[error("zone header consensus context must be absent")]
     ConsensusContext,
     #[error("zone header extra data must be empty")]
@@ -172,11 +170,7 @@ mod tests {
         (consensus, parent, header)
     }
 
-    fn assert_zone_header_error(
-        consensus: &ZoneConsensus,
-        header: TempoHeader,
-        expected: ZoneConsensusError,
-    ) {
+    fn assert_zone_header_error(consensus: &ZoneConsensus, header: TempoHeader, expected: Error) {
         let header = SealedHeader::seal_slow(header);
         consensus.inner.validate_header(&header).unwrap();
         let error = consensus.validate_header(&header).unwrap_err();
@@ -204,7 +198,7 @@ mod tests {
                 }),
                 ..header.clone()
             },
-            ZoneConsensusError::ConsensusContext,
+            Error::ConsensusContext,
         );
         assert_zone_header_error(
             &consensus,
@@ -215,7 +209,7 @@ mod tests {
                 },
                 ..header
             },
-            ZoneConsensusError::ExtraData,
+            Error::ExtraData,
         );
 
         let mix_hash = B256::repeat_byte(0x11);
@@ -228,7 +222,7 @@ mod tests {
                 },
                 ..header
             },
-            ZoneConsensusError::MixHash { actual: mix_hash },
+            Error::MixHash { actual: mix_hash },
         );
 
         let parent_beacon_block_root = Some(B256::repeat_byte(0x22));
@@ -241,7 +235,7 @@ mod tests {
                 },
                 ..header
             },
-            ZoneConsensusError::ParentBeaconBlockRoot {
+            Error::ParentBeaconBlockRoot {
                 expected: Some(B256::ZERO),
                 actual: parent_beacon_block_root,
             },
