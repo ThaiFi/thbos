@@ -19,7 +19,7 @@ pub struct ProposalBudget {
     /// preparation, see [`Self::after_preparation`].
     pub return_budget: Duration,
     /// How far the proposal may run past `return_budget` and still take a
-    /// network sample, see [`EstimatorConfig::return_budget_overrun_tolerance`].
+    /// network sample, see [`crate::EstimatorConfig::return_budget_overrun_tolerance`].
     pub overrun_tolerance: Duration,
 }
 
@@ -58,7 +58,7 @@ impl ProposalBudget {
 
     /// Whether a proposal that returns `spent` after its window opened
     /// overran its return budget, so that it must take no network sample,
-    /// see [`Estimator::on_proposal_returned`].
+    /// see [`crate::Estimator::on_proposal_returned`].
     ///
     /// A proposal that spent at most `overrun_tolerance` more than its return
     /// budget counts as having met it.
