@@ -351,7 +351,7 @@ fn update_config_rejects_invalid_current_and_next_configs() {
         let initial = config(B256::ZERO, 0, 1, &owners).commitment().unwrap();
         seed_commitment(account, initial);
 
-        // An initial configuration may not list the account itself.
+        // A current configuration that fails validation is stale, so it gets `InvalidConfig`.
         let self_owned = weighted_owners(&[(account, 1)]);
         let current = INativeMultisig::MultisigConfig {
             salt: B256::ZERO,
@@ -361,7 +361,7 @@ fn update_config_rejects_invalid_current_and_next_configs() {
         };
         assert_reverts(
             update(account, &current, 1, &owners),
-            NativeMultisigError::invalid_multisig_owner(),
+            NativeMultisigError::invalid_config(),
         );
 
         let current = INativeMultisig::MultisigConfig {

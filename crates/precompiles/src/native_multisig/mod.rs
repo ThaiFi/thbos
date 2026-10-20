@@ -87,9 +87,12 @@ impl NativeMultisig {
             current.threshold,
             &current.owners,
         );
-        current.validate_for_account(sender)?;
         let stored = self.get_config_commitment(sender)?;
-        let hash = self.storage.keccak256(&current.commitment_preimage()?)?;
+        let hash = self.storage.keccak256(
+            &current
+                .commitment_preimage()
+                .map_err(|_| NativeMultisigError::invalid_config())?,
+        )?;
         if stored.is_zero() || stored != hash {
             return Err(NativeMultisigError::invalid_config().into());
         }
