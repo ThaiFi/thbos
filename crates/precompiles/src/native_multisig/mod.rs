@@ -91,7 +91,7 @@ impl NativeMultisig {
                 .commitment_preimage()
                 .map_err(|_| NativeMultisigError::invalid_config())?,
         )?;
-        if stored.is_zero() || stored != hash {
+        if stored != hash {
             return Err(NativeMultisigError::invalid_config().into());
         }
         let version = current
