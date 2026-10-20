@@ -5,7 +5,7 @@ use tempo_primitives::TempoAddressExt;
 use crate::TempoHardfork;
 
 /// Checks namespace eligibility only; account code and commitment state are checked by callers.
-pub fn is_valid_native_account(address: Address, hardfork: TempoHardfork) -> bool {
+pub fn is_valid_configurable_account(address: Address, hardfork: TempoHardfork) -> bool {
     !address.is_zero()
         && !address.is_virtual()
         && !address.is_precompile(hardfork)

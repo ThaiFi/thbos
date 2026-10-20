@@ -19,11 +19,11 @@ fn genesis_info_reads_the_configured_recovery_factory() {
 
     let spec = TempoChainSpec::from_genesis(genesis);
 
-    assert_eq!(spec.info.multisig_recovery_factory(), Some(factory));
+    assert_eq!(spec.info.recovery_factory(), Some(factory));
 }
 
 #[test]
 fn public_networks_configure_no_recovery_factory() {
-    assert_eq!(PRESTO.info.multisig_recovery_factory(), None);
-    assert_eq!(MODERATO.info.multisig_recovery_factory(), None);
+    assert_eq!(PRESTO.info.recovery_factory(), None);
+    assert_eq!(MODERATO.info.recovery_factory(), None);
 }

@@ -1,9 +1,10 @@
 pub use INativeMultisig::{
-    INativeMultisigErrors as NativeMultisigError, INativeMultisigEvents as NativeMultisigEvent,
+    INativeMultisigErrors as ConfigurableAccountError,
+    INativeMultisigEvents as ConfigurableAccountEvent,
 };
 
 sol! {
-    /// Native multisig account precompile.
+    /// Configurable account precompile.
     #[derive(Debug, PartialEq, Eq)]
     #[sol(abi)]
     interface INativeMultisig {

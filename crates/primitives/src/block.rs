@@ -34,7 +34,7 @@ pub struct TempoBlockEnv {
     /// unavailable when absent; there is no default production factory address.
     // TODO: set the canonical TIP-1110 recovery factory for public networks before T14 activation
     #[cfg_attr(feature = "serde", serde(default))]
-    pub multisig_recovery_factory: Option<Address>,
+    pub recovery_factory: Option<Address>,
 }
 
 impl Default for TempoBlockEnv {
@@ -44,7 +44,7 @@ impl Default for TempoBlockEnv {
             timestamp_millis_part: 0,
             epoch_length: NonZeroU64::MIN,
             proposer_public_key: None,
-            multisig_recovery_factory: None,
+            recovery_factory: None,
         }
     }
 }
@@ -64,9 +64,8 @@ impl TempoBlockEnv {
     }
 
     /// Returns the configured recovery factory, treating the zero address as unset.
-    pub fn configured_multisig_recovery_factory(&self) -> Option<Address> {
-        self.multisig_recovery_factory
-            .filter(|factory| !factory.is_zero())
+    pub fn configured_recovery_factory(&self) -> Option<Address> {
+        self.recovery_factory.filter(|factory| !factory.is_zero())
     }
 }
 

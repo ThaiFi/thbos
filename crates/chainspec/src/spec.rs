@@ -49,8 +49,11 @@ macro_rules! tempo_genesis_info {
                 )*
                 /// Development-only TIP-1110 factory; public networks remain unconfigured.
                 // TODO: set the canonical TIP-1110 recovery factory for public networks before T14 activation
-                #[serde(skip_serializing_if = "Option::is_none")]
-                multisig_recovery_factory: Option<Address>,
+                #[serde(
+                    rename = "multisigRecoveryFactory",
+                    skip_serializing_if = "Option::is_none"
+                )]
+                recovery_factory: Option<Address>,
             }
 
             impl TempoGenesisInfo {
@@ -89,8 +92,8 @@ impl TempoGenesisInfo {
     }
 
     /// Returns the TIP-1110 recovery factory configured in genesis, if any.
-    pub const fn multisig_recovery_factory(&self) -> Option<Address> {
-        self.multisig_recovery_factory
+    pub const fn recovery_factory(&self) -> Option<Address> {
+        self.recovery_factory
     }
 }
 

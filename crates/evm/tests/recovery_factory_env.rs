@@ -49,13 +49,13 @@ fn configured_genesis_factory_reaches_the_block_env() {
     };
 
     let evm_env = evm_config.next_evm_env(&parent, &attributes).unwrap();
-    assert_eq!(evm_env.block_env.multisig_recovery_factory, Some(factory));
+    assert_eq!(evm_env.block_env.recovery_factory, Some(factory));
     assert_eq!(
         evm_config
             .evm_env(&parent)
             .unwrap()
             .block_env
-            .multisig_recovery_factory,
+            .recovery_factory,
         Some(factory)
     );
 }
