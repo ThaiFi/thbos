@@ -17,7 +17,7 @@ pub const DEFAULT_BUILD_TIME_MULTIPLIER: f64 = 1.35;
 const MAX_BUILD_TIME_MULTIPLIER: u64 = 1_700_000;
 const BUILD_TIME_MULTIPLIER_DECAY: u64 = 8;
 
-/// Clonable pacing feedback shared by consensus and the payload builder.
+/// Cloneable pacing feedback shared by consensus and the payload builder.
 #[derive(Clone, Debug)]
 pub struct Estimator {
     inner: Arc<EstimatorInner>,
