@@ -1,4 +1,3 @@
-use super::{ConfigCommitmentWriteGas, ensure_config_commitment_writable};
 use alloy::primitives::{Address, B256, LogData, U256};
 use revm::{
     context::{BlockEnv, journaled_state::JournalCheckpoint},
@@ -12,7 +11,7 @@ use tempo_primitives::TempoBlockEnv;
 
 use crate::{
     error::TempoPrecompileError,
-    storage::{PrecompileStorageProvider, SstoreTransitionFlags},
+    storage::{ConfigCommitmentWriteGas, PrecompileStorageProvider, SstoreTransitionFlags},
     storage_credits::{NonCreditableSlots, StorageCreditsBackend, sstore_storage_credits},
 };
 
@@ -106,12 +105,6 @@ impl HashMapStorageProvider {
     pub fn with_amsterdam_eip8037_enabled(mut self, enabled: bool) -> Self {
         self.amsterdam_eip8037_enabled = enabled;
         self.gas_params = GasParams::new_spec(self.spec.into());
-        self
-    }
-
-    /// Returns self with the static-call context overridden (builder pattern).
-    pub fn with_is_static(mut self, is_static: bool) -> Self {
-        self.is_static = is_static;
         self
     }
 }
@@ -314,7 +307,10 @@ impl PrecompileStorageProvider for HashMapStorageProvider {
         commitment: B256,
         gas: ConfigCommitmentWriteGas,
     ) -> Result<(), TempoPrecompileError> {
-        ensure_config_commitment_writable(self.spec, self.is_static, commitment)?;
+        // Reject before any read or gas charge, so a rejected write is never charged.
+        if !self.spec.is_t14() || self.is_static || commitment.is_zero() {
+            return Err(TempoPrecompileError::InvalidConfigCommitmentWrite);
+        }
         let previous = self.config_commitment(address)?;
         self.deduct_gas(gas.cost(previous)?)?;
         self.config_commitments.insert(address, commitment);
@@ -469,5 +465,10 @@ impl HashMapStorageProvider {
         self.internals
             .into_iter()
             .map(|((addr, slot), value)| (addr, slot, value))
+    }
+
+    /// Overrides the static-call context.
+    pub fn set_is_static(&mut self, is_static: bool) {
+        self.is_static = is_static;
     }
 }

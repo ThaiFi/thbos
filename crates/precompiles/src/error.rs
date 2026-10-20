@@ -137,7 +137,7 @@ pub enum TempoPrecompileError {
     Fatal(String),
 
     /// A commitment write is zero, predates T14, or occurs in a read-only context.
-    #[error("invalid account commitment write")]
+    #[error("Invalid account commitment write")]
     InvalidConfigCommitmentWrite,
 }
 

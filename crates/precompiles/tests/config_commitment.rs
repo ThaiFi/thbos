@@ -79,7 +79,8 @@ fn rejects_zero_pre_t14_and_static_writes() {
         });
     }
 
-    let mut storage = t14_storage().with_is_static(true);
+    let mut storage = t14_storage();
+    storage.set_is_static(true);
     StorageCtx::enter(&mut storage, || {
         let mut ctx = StorageCtx;
         assert!(is_invalid_write(ctx.set_config_commitment(
@@ -163,6 +164,14 @@ fn evm_storage_reads_zero_and_rejects_writes() {
 
         let before = ctx.gas_used();
         assert_eq!(ctx.config_commitment(ACCOUNT).unwrap(), B256::ZERO);
+        assert_eq!(ctx.gas_used() - before, account_access);
+
+        // Each read touches the account it was asked about, so another fresh account is cold too.
+        let before = ctx.gas_used();
+        assert_eq!(
+            ctx.config_commitment(Address::repeat_byte(2)).unwrap(),
+            B256::ZERO
+        );
         assert_eq!(ctx.gas_used() - before, account_access);
 
         for gas in [

@@ -1,4 +1,3 @@
-use super::ConfigCommitmentWriteGas;
 use alloy::{
     primitives::{Address, B256, Bytes, LogData, U256},
     sol_types::SolInterface,
@@ -17,7 +16,10 @@ use tempo_primitives::TempoBlockEnv;
 use crate::{
     Precompile,
     error::{IntoPrecompileResult, Result, TempoPrecompileError},
-    storage::{PrecompileStorageProvider, StorageActions, evm::EvmPrecompileStorageProvider},
+    storage::{
+        ConfigCommitmentWriteGas, PrecompileStorageProvider, StorageActions,
+        evm::EvmPrecompileStorageProvider,
+    },
 };
 
 scoped_thread_local!(static STORAGE: RefCell<&mut dyn PrecompileStorageProvider>);
