@@ -179,7 +179,7 @@ impl BlockExecutorFactory for TempoEvmConfig {
     {
         let ext = self.evm_factory.evm_ext(TempoEvmExt::default());
         let precompiles = self.evm_factory.precompiles(&env, &ext);
-        evm2::Evm::new_with_execution_config_and_ext(
+        let evm = evm2::Evm::new_with_execution_config_and_ext(
             ExecutionConfig::for_spec_and_version(env.spec, env.version),
             env.spec,
             env.block,
@@ -187,7 +187,14 @@ impl BlockExecutorFactory for TempoEvmConfig {
             db,
             precompiles,
             ext,
-        )
+        );
+        #[cfg(feature = "jit")]
+        let evm = {
+            let mut evm = evm;
+            self.evm_factory.configure_jit(&mut evm);
+            evm
+        };
+        evm
     }
 }
 
