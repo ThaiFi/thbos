@@ -232,7 +232,7 @@ pub trait PrecompileStorageProvider {
     /// Callers must validate registration, rotation, or migration authority first.
     /// Account-access gas belongs to that authorization read; this method charges
     /// only what `gas` names, or nothing when registration was charged intrinsically.
-    /// Read-only providers reject every write.
+    /// Providers that cannot store commitments reject every write.
     fn set_config_commitment(
         &mut self,
         address: Address,
