@@ -1061,6 +1061,7 @@ def run-local-e2e-phase [run: record, ctx: record] {
     let a_rpc = $"http://($ctx.a.ip):8545"
     let b_rpc = $"http://($ctx.b.ip):8645"
     let a_base_args = (build-base-args $genesis $ctx.a.datadir $a_log_dir $ctx.a.ip 8545 19001)
+        | append ["--faucet.node-address" $a_rpc]
         | append ["--log.file.format" "json"]
         | append (build-e2e-consensus-args $ctx.a.node_dir $ctx.trusted_peers $ctx.a.consensus_port $ctx.a.ip)
         | append $local_reth_args
@@ -1070,6 +1071,7 @@ def run-local-e2e-phase [run: record, ctx: record] {
         | append (if $ctx.tracy != "off" { ["--log.tracy" "--log.tracy.filter" $ctx.tracy_filter] } else { [] })
         | append (benchmark-otlp-args $ctx.tracing_otlp)
     let b_base_args = (build-base-args $genesis $ctx.b.datadir $b_log_dir $ctx.b.ip 8645 19101)
+        | append ["--faucet.node-address" $b_rpc]
         | append ["--log.file.format" "json"]
         | append (build-e2e-consensus-args $ctx.b.node_dir $ctx.trusted_peers $ctx.b.consensus_port $ctx.b.ip)
         | append $local_reth_args
