@@ -36,6 +36,9 @@ macro_rules! tempo_genesis_info {
             #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
             #[serde(rename_all = "camelCase")]
             pub struct TempoGenesisInfo {
+                /// Development-only TIP-1110 factory; public networks remain unconfigured.
+                #[serde(skip_serializing_if = "Option::is_none")]
+                multisig_recovery_factory: Option<Address>,
                 /// The epoch length used by consensus.
                 #[serde(skip_serializing_if = "Option::is_none")]
                 epoch_length: Option<NonZeroU64>,
@@ -67,6 +70,10 @@ macro_rules! tempo_genesis_info {
 tempo_hardfork::tempo_post_genesis_hardforks!(tempo_genesis_info);
 
 impl TempoGenesisInfo {
+    /// Explicit custom-chain factory shared by execution, pool validation, and RPC.
+    pub const fn multisig_recovery_factory(&self) -> Option<Address> {
+        self.multisig_recovery_factory
+    }
     /// Extract Tempo genesis info from genesis extra_fields
     fn extract_from(genesis: &Genesis) -> Self {
         genesis
