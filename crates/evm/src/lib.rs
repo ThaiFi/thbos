@@ -204,6 +204,7 @@ impl ConfigureEvm for TempoEvmConfig {
                     .epoch_length()
                     .unwrap_or(NonZeroU64::MIN),
                 proposer_public_key: header.consensus_context.map(|ctx| ctx.proposer),
+                multisig_recovery_factory: self.chain_spec().info.multisig_recovery_factory(),
             },
         })
     }
@@ -259,6 +260,7 @@ impl ConfigureEvm for TempoEvmConfig {
                     .epoch_length()
                     .unwrap_or(NonZeroU64::MIN),
                 proposer_public_key: attributes.consensus_context.map(|ctx| ctx.proposer),
+                multisig_recovery_factory: self.chain_spec().info.multisig_recovery_factory(),
             },
         })
     }

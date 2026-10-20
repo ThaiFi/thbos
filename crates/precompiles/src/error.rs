@@ -11,7 +11,7 @@ use std::{
 
 use crate::{storage_credits::StorageCreditsErr, tip20::TIP20Error};
 use alloy::{
-    primitives::{FixedBytes, Selector, U256},
+    primitives::{Bytes, FixedBytes, Selector, U256},
     sol_types::{Panic, PanicKind, SolError, SolInterface},
 };
 use alloy_evm::EvmInternalsError;
@@ -135,6 +135,10 @@ pub enum TempoPrecompileError {
     #[error("Fatal precompile error: {0:?}")]
     #[from(skip)]
     Fatal(String),
+
+    /// A commitment write is zero, predates T14, or occurs in a read-only context.
+    #[error("Invalid account commitment write")]
+    InvalidConfigCommitmentWrite,
 }
 
 impl From<EvmInternalsError> for TempoPrecompileError {
@@ -212,7 +216,10 @@ impl TempoPrecompileError {
             Self::NativeMultisigError(e) => e.selector(),
             Self::UnknownFunctionSelector(selector) => *selector,
             Self::Panic(_) | Self::StorageDeltaUnderflow(_) => Panic::SELECTOR,
-            Self::OutOfGas | Self::StaticCallNotAllowed | Self::Fatal(_) => [0, 0, 0, 0],
+            Self::OutOfGas
+            | Self::StaticCallNotAllowed
+            | Self::Fatal(_)
+            | Self::InvalidConfigCommitmentWrite => [0, 0, 0, 0],
         }
         .into()
     }
@@ -245,7 +252,8 @@ impl TempoPrecompileError {
             | Self::CurrentCommitteeError(_)
             | Self::ZoneFactoryError(_)
             | Self::NativeMultisigError(_)
-            | Self::UnknownFunctionSelector(_) => false,
+            | Self::UnknownFunctionSelector(_)
+            | Self::InvalidConfigCommitmentWrite => false,
         }
     }
 
@@ -326,6 +334,7 @@ impl TempoPrecompileError {
             Self::Fatal(msg) => {
                 return Err(PrecompileError::Fatal(msg));
             }
+            Self::InvalidConfigCommitmentWrite => Bytes::new(),
         };
         Ok(PrecompileOutput::revert(gas, bytes, reservoir))
     }

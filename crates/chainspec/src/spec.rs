@@ -47,6 +47,9 @@ macro_rules! tempo_genesis_info {
                     #[serde(skip_serializing_if = "Option::is_none")]
                     [<$variant:lower _time>]: Option<u64>,
                 )*
+                /// Development-only TIP-1110 factory; public networks remain unconfigured.
+                #[serde(skip_serializing_if = "Option::is_none")]
+                multisig_recovery_factory: Option<Address>,
             }
 
             impl TempoGenesisInfo {
@@ -82,6 +85,11 @@ impl TempoGenesisInfo {
 
     pub fn general_gas_limit(&self) -> Option<u64> {
         self.general_gas_limit
+    }
+
+    /// Returns the TIP-1110 recovery factory configured in genesis, if any.
+    pub const fn multisig_recovery_factory(&self) -> Option<Address> {
+        self.multisig_recovery_factory
     }
 }
 
