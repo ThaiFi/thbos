@@ -7,6 +7,7 @@ mod attrs;
 mod budget;
 mod build_plan;
 mod estimator;
+mod proposal_budget;
 
 use alloy_primitives::Bytes;
 pub use attrs::TempoPayloadAttributes;
@@ -15,6 +16,7 @@ pub use budget::{
 };
 pub use build_plan::{BUILD_TIME_MULTIPLIER_SCALE, BuildPlan, PayloadBudgetDecision};
 pub use estimator::{DEFAULT_BUILD_TIME_MULTIPLIER, Estimator, EstimatorConfig, FinishedBuild};
+pub use proposal_budget::ProposalBudget;
 use std::{
     sync::{Arc, OnceLock},
     time::Duration,

@@ -49,4 +49,6 @@ type TempoNodeAdapter = NodeAdapter<TempoFullNodeTypes>;
 /// Type alias for a launched tempo node.
 pub type TempoFullNode = FullNode<TempoNodeAdapter, TempoAddOns<TempoFullNodeTypes>>;
 
-pub use tempo_payload_types::{DEFAULT_BUILD_TIME_MULTIPLIER, Estimator, EstimatorConfig};
+pub use tempo_payload_types::{
+    DEFAULT_BUILD_TIME_MULTIPLIER, Estimator, EstimatorConfig, ProposalBudget,
+};
