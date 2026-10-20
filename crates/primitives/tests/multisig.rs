@@ -2,8 +2,6 @@
 
 use alloy_primitives::{Address, B256, Bytes, Signature, U256, address, b256, keccak256};
 use alloy_rlp::{Decodable, Encodable, Error as RlpError, Header, decode_exact};
-use alloy_signer::SignerSync;
-use alloy_signer_local::PrivateKeySigner;
 use proptest::prelude::*;
 use tempo_primitives::transaction::{
     ACCOUNT_PROXY_INIT_CODE_HASH, KeychainSignature, MAX_MULTISIG_OWNER_SIGNATURE_BYTES,
@@ -17,56 +15,49 @@ use tempo_primitives::transaction::{
 // Deliberately non-production factory fixture: TIP-1110 has not selected its public address.
 const TEST_FACTORY: Address = Address::repeat_byte(0x99);
 
-fn current_config(owner: Address) -> MultisigConfig {
+/// A zero-salt config holding the `(owner, weight)` entries in the order given.
+fn multisig_config(version: u64, threshold: u8, owners: &[(Address, u8)]) -> MultisigConfig {
     MultisigConfig {
         salt: B256::ZERO,
-        version: 1,
-        threshold: 1,
-        owners: vec![MultisigOwner { owner, weight: 1 }],
-    }
-}
-
-fn sign_hash(signer: &PrivateKeySigner, digest: &B256) -> PrimitiveSignature {
-    PrimitiveSignature::Secp256k1(signer.sign_hash_sync(digest).expect("signing failed"))
-}
-
-fn sorted_secp_config(owners: &[(Address, u8)], threshold: u8) -> MultisigConfig {
-    let mut owners = owners
-        .iter()
-        .map(|(owner, weight)| MultisigOwner {
-            owner: *owner,
-            weight: *weight,
-        })
-        .collect::<Vec<_>>();
-    owners.sort_by_key(|owner| owner.owner);
-    MultisigConfig {
-        salt: B256::ZERO,
-        version: 0,
+        version,
         threshold,
-        owners,
+        owners: owners
+            .iter()
+            .map(|&(owner, weight)| MultisigOwner { owner, weight })
+            .collect(),
     }
+}
+
+fn current_config(owner: Address) -> MultisigConfig {
+    multisig_config(1, 1, &[(owner, 1)])
 }
 
 fn indexed_owner(index: u16) -> Address {
     Address::left_padding_from(&index.to_be_bytes())
 }
 
-fn valid_owner_signature_bytes() -> Bytes {
-    valid_owner_signature().to_bytes()
+/// `count` ascending owners of equal weight.
+fn indexed_owners(count: usize, weight: u8) -> Vec<(Address, u8)> {
+    (1..=u16::try_from(count).unwrap())
+        .map(|index| (indexed_owner(index), weight))
+        .collect()
 }
 
-fn valid_owner_signature() -> PrimitiveSignature {
-    PrimitiveSignature::default()
+/// A secp256k1 owner approval with fixed scalars: decoding checks its shape, not its signer.
+fn owner_approval() -> PrimitiveSignature {
+    PrimitiveSignature::Secp256k1(Signature::new(U256::from(1), U256::from(2), false))
 }
 
-fn initial_multisig_signature() -> MultisigSignature {
-    let config = sorted_secp_config(&[(indexed_owner(2), 1)], 1);
-    MultisigSignature::try_new(
-        config.derive_account(TEST_FACTORY).unwrap(),
-        config,
-        vec![PrimitiveSignature::default()],
-    )
-    .unwrap()
+/// A WebAuthn owner approval whose encoding is `encoded_len` bytes: the type byte, the
+/// authenticator data and four 32-byte fields.
+fn webauthn_approval(encoded_len: usize) -> PrimitiveSignature {
+    PrimitiveSignature::WebAuthn(WebAuthnSignature {
+        webauthn_data: Bytes::from(vec![0; encoded_len - 1 - 4 * 32]),
+        r: B256::ZERO,
+        s: B256::ZERO,
+        pub_key_x: B256::ZERO,
+        pub_key_y: B256::ZERO,
+    })
 }
 
 fn encoded_multisig(
@@ -94,23 +85,101 @@ fn nested_multisig_encoding(levels: usize) -> Vec<u8> {
     let mut current = encoded_multisig(
         indexed_owner(100),
         &current_config(indexed_owner(200)),
-        vec![valid_owner_signature_bytes().to_vec()],
+        vec![owner_approval().to_bytes().to_vec()],
     );
     for level in 1..u16::try_from(levels).unwrap() {
-        let mut owner_approval = vec![SIGNATURE_TYPE_MULTISIG];
-        owner_approval.extend_from_slice(&current);
+        let mut nested_approval = vec![SIGNATURE_TYPE_MULTISIG];
+        nested_approval.extend_from_slice(&current);
         current = encoded_multisig(
             indexed_owner(100 + level),
             &current_config(indexed_owner(200 + level)),
-            vec![owner_approval],
+            vec![nested_approval],
         );
     }
     current
 }
 
-fn assert_multisig_decode_rejected(encoded: &[u8], expected: RlpError) {
-    let mut input = encoded;
-    assert_eq!(MultisigSignature::decode(&mut input), Err(expected));
+/// Encodings that multisig signature decoding rejects, each with the message of its error.
+fn malformed_multisig_encodings() -> Vec<(&'static str, Vec<u8>, String)> {
+    let account = indexed_owner(1);
+    let config = current_config(indexed_owner(2));
+    let approval = owner_approval().to_bytes().to_vec();
+    // A nested multisig or keychain approval carries a type byte no primitive signature has.
+    let unknown_type = RlpError::Custom("Unknown signature type identifier").to_string();
+    let keychain_owner = |keychain: KeychainSignature| {
+        encoded_multisig(
+            account,
+            &config,
+            vec![TempoSignature::Keychain(keychain).to_bytes().to_vec()],
+        )
+    };
+    vec![
+        (
+            "a nested multisig owner",
+            nested_multisig_encoding(2),
+            unknown_type.clone(),
+        ),
+        (
+            "two levels of nested multisig owners",
+            nested_multisig_encoding(3),
+            unknown_type.clone(),
+        ),
+        (
+            "4096 levels of nested multisig owners",
+            nested_multisig_encoding(4096),
+            unknown_type.clone(),
+        ),
+        (
+            "a keychain owner",
+            keychain_owner(KeychainSignature::new(indexed_owner(2), owner_approval())),
+            unknown_type.clone(),
+        ),
+        (
+            "a v1 keychain owner",
+            keychain_owner(KeychainSignature::new_v1(
+                indexed_owner(2),
+                owner_approval(),
+            )),
+            unknown_type,
+        ),
+        (
+            "an invalid config",
+            encoded_multisig(account, &multisig_config(0, 0, &[]), vec![approval.clone()]),
+            MultisigSignatureError::InvalidConfig(MultisigConfigError::EmptyOwners).to_string(),
+        ),
+        (
+            "more owners than the cap",
+            encoded_multisig(
+                account,
+                &multisig_config(0, 8, &indexed_owners(MAX_MULTISIG_OWNERS + 1, 1)),
+                vec![approval.clone()],
+            ),
+            MultisigSignatureError::InvalidConfig(MultisigConfigError::TooManyOwners).to_string(),
+        ),
+        (
+            "more approvals than the cap",
+            encoded_multisig(
+                account,
+                &config,
+                vec![approval; MAX_MULTISIG_SIGNATURES + 1],
+            ),
+            MultisigSignatureError::TooManySignatures.to_string(),
+        ),
+        // The primitive decoder bounds a WebAuthn approval before the owner size cap applies.
+        (
+            "an approval over the size cap",
+            encoded_multisig(
+                account,
+                &config,
+                vec![
+                    webauthn_approval(MAX_MULTISIG_OWNER_SIGNATURE_BYTES + 1)
+                        .to_bytes()
+                        .to_vec(),
+                ],
+            ),
+            RlpError::Custom("Invalid WebAuthn signature length").to_string(),
+        ),
+    ]
 }
 
 /// Owner-approval bytes of every primitive shape, accepted ones (with the non-canonical
@@ -168,197 +237,265 @@ fn arbitrary_bounded_approvals() {
 }
 
 #[test]
-fn validates_owner_order() {
-    let owner_a = Address::repeat_byte(0x11);
-    let owner_b = Address::repeat_byte(0x22);
-    let config = sorted_secp_config(&[(owner_b, 2), (owner_a, 1)], 2);
-
-    assert_eq!(config.validate(), Ok(3));
-
-    let unsorted = MultisigConfig {
-        salt: B256::ZERO,
-        version: 0,
-        threshold: 1,
-        owners: vec![
-            MultisigOwner {
-                owner: owner_b,
-                weight: 1,
-            },
-            MultisigOwner {
-                owner: owner_a,
-                weight: 1,
-            },
-        ],
-    };
-    assert_eq!(
-        unsorted.validate(),
-        Err(MultisigConfigError::OwnersNotAscending)
-    );
-}
-
-#[test]
 fn config_validation_reports_the_first_broken_rule() {
-    let low = indexed_owner(1);
-    let high = indexed_owner(2);
-    let entry = |owner, weight| MultisigOwner { owner, weight };
-    let config_of = |threshold, owners| MultisigConfig {
-        salt: B256::ZERO,
-        version: 0,
-        threshold,
-        owners,
-    };
-    let indexed_owners = |count: usize, weight| {
-        (1..=u16::try_from(count).unwrap())
-            .map(|index| entry(indexed_owner(index), weight))
-            .collect::<Vec<_>>()
+    let [low, high] = [1, 2].map(indexed_owner);
+    let account = indexed_owner(0x10);
+    // Nine owners of weight 30 but one of weight 1: the eight heaviest reach 240, of 241.
+    let one_light_owner = |index: usize| {
+        let mut owners = indexed_owners(MAX_MULTISIG_SIGNATURES + 1, 30);
+        owners[index].1 = 1;
+        owners
     };
 
-    for (invalid, expected) in [
-        // Owner count comes before the threshold.
-        (config_of(0, Vec::new()), MultisigConfigError::EmptyOwners),
+    for (case, config, for_account, expected) in [
         (
-            config_of(0, indexed_owners(MAX_MULTISIG_OWNERS + 1, 1)),
-            MultisigConfigError::TooManyOwners,
-        ),
-        // The threshold comes before every owner entry.
-        (
-            config_of(0, vec![entry(Address::ZERO, 0)]),
-            MultisigConfigError::ZeroThreshold,
-        ),
-        // A zero owner anywhere in the list comes before a zero weight earlier in it.
-        (
-            config_of(1, vec![entry(low, 0), entry(Address::ZERO, 1)]),
-            MultisigConfigError::ZeroOwner,
+            "no owners, before the threshold",
+            multisig_config(0, 0, &[]),
+            None,
+            Err(MultisigConfigError::EmptyOwners),
         ),
         (
-            config_of(1, vec![entry(low, 1), entry(high, 0)]),
-            MultisigConfigError::ZeroWeight,
-        ),
-        // Weights come before ordering.
-        (
-            config_of(1, vec![entry(high, 1), entry(low, 0)]),
-            MultisigConfigError::ZeroWeight,
+            "more owners than the cap, before the threshold",
+            multisig_config(0, 0, &indexed_owners(MAX_MULTISIG_OWNERS + 1, 1)),
+            None,
+            Err(MultisigConfigError::TooManyOwners),
         ),
         (
-            config_of(1, vec![entry(low, 1), entry(low, 1)]),
-            MultisigConfigError::DuplicateOwner,
+            "as many owners as the cap",
+            multisig_config(0, 8, &indexed_owners(MAX_MULTISIG_OWNERS, 1)),
+            None,
+            Ok(48),
         ),
-        // A duplicate is reported even when it is not adjacent to its first occurrence.
         (
-            config_of(1, vec![entry(low, 1), entry(high, 1), entry(low, 1)]),
-            MultisigConfigError::DuplicateOwner,
+            "a zero threshold, before every owner entry",
+            multisig_config(0, 0, &[(Address::ZERO, 0)]),
+            None,
+            Err(MultisigConfigError::ZeroThreshold),
         ),
-        // Ordering comes before the weight total.
         (
-            config_of(1, vec![entry(high, 128), entry(low, 128)]),
-            MultisigConfigError::OwnersNotAscending,
+            "a zero owner anywhere, before an earlier zero weight",
+            multisig_config(0, 1, &[(low, 0), (Address::ZERO, 1)]),
+            None,
+            Err(MultisigConfigError::ZeroOwner),
         ),
-        // The weight total comes before threshold reachability: nine owners of weight 29 sum
-        // past `u8::MAX`, and the eight heaviest cannot reach the threshold either.
         (
-            config_of(u8::MAX, indexed_owners(MAX_MULTISIG_SIGNATURES + 1, 29)),
-            MultisigConfigError::TotalWeightExceedsMax,
+            "a zero weight",
+            multisig_config(0, 1, &[(low, 1), (high, 0)]),
+            None,
+            Err(MultisigConfigError::ZeroWeight),
+        ),
+        (
+            "a zero weight, before ordering",
+            multisig_config(0, 1, &[(high, 1), (low, 0)]),
+            None,
+            Err(MultisigConfigError::ZeroWeight),
+        ),
+        (
+            "an adjacent duplicate",
+            multisig_config(0, 1, &[(low, 1), (low, 1)]),
+            None,
+            Err(MultisigConfigError::DuplicateOwner),
+        ),
+        (
+            "a nonadjacent duplicate",
+            multisig_config(0, 1, &[(low, 1), (high, 1), (low, 1)]),
+            None,
+            Err(MultisigConfigError::DuplicateOwner),
+        ),
+        (
+            "descending owners, before the weight total",
+            multisig_config(0, 1, &[(high, 128), (low, 128)]),
+            None,
+            Err(MultisigConfigError::OwnersNotAscending),
+        ),
+        (
+            "ascending owners",
+            multisig_config(0, 2, &[(low, 1), (high, 2)]),
+            None,
+            Ok(3),
+        ),
+        (
+            "the largest threshold and total weight",
+            multisig_config(0, u8::MAX, &[(low, u8::MAX)]),
+            None,
+            Ok(u8::MAX),
+        ),
+        // The eight heaviest of nine owners of weight 29 cannot reach the threshold either.
+        (
+            "a weight total past u8::MAX, before reachability",
+            multisig_config(0, u8::MAX, &indexed_owners(MAX_MULTISIG_SIGNATURES + 1, 29)),
+            None,
+            Err(MultisigConfigError::TotalWeightExceedsMax),
+        ),
+        (
+            "the eight heaviest owners reach the threshold, light owner first",
+            multisig_config(0, 240, &one_light_owner(0)),
+            None,
+            Ok(241),
+        ),
+        (
+            "a threshold past the eight heaviest owners",
+            multisig_config(0, 241, &one_light_owner(0)),
+            None,
+            Err(MultisigConfigError::ThresholdExceedsWeight),
+        ),
+        (
+            "an initial config owning its account",
+            multisig_config(0, 1, &[(account, 1)]),
+            Some(account),
+            Err(MultisigConfigError::AccountIsOwner),
+        ),
+        (
+            "self-ownership, before its own zero weight",
+            multisig_config(0, 1, &[(account, 0)]),
+            Some(account),
+            Err(MultisigConfigError::AccountIsOwner),
+        ),
+        (
+            "self-ownership anywhere, before an earlier zero weight",
+            multisig_config(0, 1, &[(high, 0), (account, 1)]),
+            Some(account),
+            Err(MultisigConfigError::AccountIsOwner),
+        ),
+        (
+            "a later version owning its account",
+            multisig_config(1, 1, &[(account, 1)]),
+            Some(account),
+            Ok(1),
+        ),
+        (
+            "the last version owning its account",
+            multisig_config(u64::MAX, 1, &[(account, 1)]),
+            Some(account),
+            Ok(1),
         ),
     ] {
-        assert_eq!(invalid.validate(), Err(expected));
+        match for_account {
+            Some(account) => {
+                assert_eq!(config.validate_for_account(account), expected, "{case}");
+            }
+            None => {
+                assert_eq!(config.validate(), expected, "{case}");
+            }
+        }
     }
 }
 
 #[test]
-fn rejects_nested_and_keychain_owner_encodings() {
-    // A nested multisig or keychain approval carries a type byte no primitive signature has.
-    let unknown_type = RlpError::Custom("Unknown signature type identifier");
-    for depth in [2, 3, 4096] {
-        assert_multisig_decode_rejected(&nested_multisig_encoding(depth), unknown_type);
-    }
-    for keychain in [
-        KeychainSignature::new(indexed_owner(2), PrimitiveSignature::default()),
-        KeychainSignature::new_v1(indexed_owner(2), PrimitiveSignature::default()),
+fn multisig_signature_construction_reports_the_first_broken_rule() {
+    let account = Address::repeat_byte(0x11);
+    let config = current_config(indexed_owner(2));
+    let empty_config = multisig_config(0, 0, &[]);
+    let largest = webauthn_approval(MAX_MULTISIG_OWNER_SIGNATURE_BYTES);
+    let oversized = webauthn_approval(MAX_MULTISIG_OWNER_SIGNATURE_BYTES + 1);
+    assert_eq!(largest.encoded_length(), MAX_MULTISIG_OWNER_SIGNATURE_BYTES);
+    assert_eq!(
+        oversized.encoded_length(),
+        MAX_MULTISIG_OWNER_SIGNATURE_BYTES + 1
+    );
+
+    for (case, account, config, approvals, expected) in [
+        (
+            "a zero account, before the config and the approvals",
+            Address::ZERO,
+            empty_config.clone(),
+            Vec::new(),
+            Err(MultisigSignatureError::ZeroAccount),
+        ),
+        (
+            "an invalid config, before the approvals",
+            account,
+            empty_config,
+            Vec::new(),
+            Err(MultisigSignatureError::InvalidConfig(
+                MultisigConfigError::EmptyOwners,
+            )),
+        ),
+        (
+            "initial self-ownership of the named account",
+            account,
+            multisig_config(0, 1, &[(account, 1)]),
+            vec![owner_approval()],
+            Err(MultisigSignatureError::InvalidConfig(
+                MultisigConfigError::AccountIsOwner,
+            )),
+        ),
+        (
+            "no approvals",
+            account,
+            config.clone(),
+            Vec::new(),
+            Err(MultisigSignatureError::EmptySignatures),
+        ),
+        (
+            "more approvals than the cap, before their sizes",
+            account,
+            config.clone(),
+            vec![oversized.clone(); MAX_MULTISIG_SIGNATURES + 1],
+            Err(MultisigSignatureError::TooManySignatures),
+        ),
+        (
+            "an approval over the size cap after one within it",
+            account,
+            config.clone(),
+            vec![owner_approval(), oversized],
+            Err(MultisigSignatureError::OwnerSignatureTooLarge),
+        ),
+        (
+            "as many approvals of the largest size as the caps allow",
+            account,
+            config,
+            vec![largest; MAX_MULTISIG_SIGNATURES],
+            Ok(()),
+        ),
     ] {
-        let encoded = encoded_multisig(
-            indexed_owner(1),
-            &current_config(indexed_owner(2)),
-            vec![TempoSignature::Keychain(keychain).to_bytes().to_vec()],
+        assert_eq!(
+            MultisigSignature::try_new(account, config, approvals.clone())
+                .map(|signature| signature.signatures().to_vec()),
+            expected.map(|()| approvals),
+            "{case}"
         );
-        assert_multisig_decode_rejected(&encoded, unknown_type);
     }
 }
 
 #[test]
-fn positive_versions_allow_primitive_self_ownership() {
-    let account = indexed_owner(1);
-    for version in [0, 1, u64::MAX] {
-        let mut config = current_config(account);
-        config.version = version;
-        let expected = if version == 0 {
-            Err(MultisigConfigError::AccountIsOwner)
-        } else {
-            Ok(1)
-        };
-        assert_eq!(config.validate_for_account(account), expected);
+fn multisig_signature_rlp_roundtrips_and_rejects_malformed_encodings() {
+    let account = Address::repeat_byte(0x11);
+    let config = current_config(indexed_owner(2));
+    let approvals = vec![
+        owner_approval(),
+        webauthn_approval(MAX_MULTISIG_OWNER_SIGNATURE_BYTES),
+    ];
+    let signature = MultisigSignature::try_new(account, config.clone(), approvals.clone()).unwrap();
+
+    // The wire form is the account, the complete config and each approval's bytes, in order.
+    let encoded = alloy_rlp::encode(&signature);
+    assert_eq!(
+        encoded,
+        encoded_multisig(
+            account,
+            &config,
+            approvals
+                .iter()
+                .map(|approval| approval.to_bytes().to_vec())
+                .collect(),
+        )
+    );
+    assert_eq!(decode_exact::<MultisigSignature>(&encoded), Ok(signature));
+
+    for (case, encoded, expected) in malformed_multisig_encodings() {
+        assert_eq!(
+            MultisigSignature::decode(&mut encoded.as_slice()).map_err(|error| error.to_string()),
+            Err(expected),
+            "{case}"
+        );
     }
-}
-
-#[test]
-fn quorum_rejects_approvals_after_threshold() {
-    let mut accumulator = MultisigWeightAccumulator::new(1).unwrap();
-    accumulator.record_owner(indexed_owner(1), 1).unwrap();
-    assert_eq!(
-        accumulator.record_owner(indexed_owner(2), 1),
-        Err(MultisigQuorumError::ExcessSignatures)
-    );
-    // Excess is reported before the entry itself is checked.
-    assert_eq!(
-        accumulator.record_owner(indexed_owner(0), 0),
-        Err(MultisigQuorumError::ExcessSignatures)
-    );
-}
-
-#[test]
-fn quorum_accumulator_rejects_each_broken_rule() {
-    assert_eq!(
-        MultisigWeightAccumulator::new(1).unwrap().finish(),
-        Err(MultisigQuorumError::EmptySignatures)
-    );
-
-    // The accumulator reads a zero configured weight as a signer outside the owner set.
-    let mut accumulator = MultisigWeightAccumulator::new(2).unwrap();
-    assert_eq!(
-        accumulator.record_owner(indexed_owner(1), 0),
-        Err(MultisigQuorumError::SignerNotOwner)
-    );
-
-    let mut accumulator = MultisigWeightAccumulator::new(2).unwrap();
-    accumulator.record_owner(indexed_owner(1), 1).unwrap();
-    assert_eq!(
-        accumulator.record_owner(indexed_owner(1), 1),
-        Err(MultisigQuorumError::SignersNotAscending)
-    );
-
-    // Below quorum, the approval cap comes before ordering.
-    let mut accumulator = MultisigWeightAccumulator::new(u8::MAX).unwrap();
-    for index in 1..=u16::try_from(MAX_MULTISIG_SIGNATURES).unwrap() {
-        accumulator.record_owner(indexed_owner(index), 1).unwrap();
-    }
-    assert_eq!(
-        accumulator.record_owner(indexed_owner(1), 1),
-        Err(MultisigQuorumError::TooManySignatures)
-    );
-}
-
-#[test]
-fn access_key_digest_binds_parent_before_multisig_domain() {
-    let signature = initial_multisig_signature();
-    let inner = B256::repeat_byte(0x42);
-    let digest_a = signature.digest(KeychainSignature::signing_hash(inner, indexed_owner(3)));
-    let digest_b = signature.digest(KeychainSignature::signing_hash(inner, indexed_owner(4)));
-    assert_ne!(digest_a, digest_b);
 }
 
 #[test]
 fn sixty_five_byte_owners_remain_untyped() {
     for first in [0x03, 0x04, 0x05] {
-        let mut primitive = valid_owner_signature_bytes().to_vec();
+        let mut primitive = owner_approval().to_bytes().to_vec();
         primitive[0] = first;
         let expected =
             PrimitiveSignature::Secp256k1(Signature::try_from(primitive.as_slice()).unwrap());
@@ -373,63 +510,58 @@ fn sixty_five_byte_owners_remain_untyped() {
 }
 
 #[test]
-fn account_derivation_includes_salt() {
+fn multisig_hashes_follow_vectors_and_documented_layout() {
+    let inner_digest = B256::repeat_byte(0x42);
+
+    // Vectors over one owner of weight 1 at threshold 1, independently reproduced with raw
+    // keccak and CREATE2 hashing over the placeholder account proxy hash.
     let owner = Address::repeat_byte(0x11);
-    let zero_salt = sorted_secp_config(&[(owner, 1)], 1);
-    let mut nonzero_salt = zero_salt.clone();
-    nonzero_salt.salt = B256::repeat_byte(0x42);
-
-    assert_ne!(
-        zero_salt.derive_account(TEST_FACTORY).unwrap(),
-        nonzero_salt.derive_account(TEST_FACTORY).unwrap()
+    let initial = multisig_config(0, 1, &[(owner, 1)]);
+    assert_eq!(
+        initial.account_salt_preimage().map(keccak256),
+        Ok(b256!(
+            "7162e370e58784e6b33d61878820d1497eeaf4f68e00b2cfc00a2f3b1dbb00da"
+        ))
     );
-    zero_salt.validate().expect("zero salt is valid");
-}
-
-#[test]
-fn multisig_domains_match_spec_vectors() {
-    let mut config = sorted_secp_config(&[(Address::repeat_byte(0x11), 1)], 1);
-    let account_salt = keccak256(config.account_salt_preimage().unwrap());
+    assert_eq!(
+        initial.derive_account(TEST_FACTORY),
+        Ok(address!("d62b59cb4e41a0dd9000c71c6663df05e2bb910d"))
+    );
+    assert_eq!(
+        initial.commitment(),
+        Ok(b256!(
+            "a9e7d1e2ad25e227a4de5f38f3bba31d854ffc8efec46aaa8649097a516bb4ee"
+        ))
+    );
     let digest_account = address!("91847576f406d0842ad7c1a0c97c22a122e64278");
-
     assert_eq!(
-        account_salt,
-        b256!("7162e370e58784e6b33d61878820d1497eeaf4f68e00b2cfc00a2f3b1dbb00da")
-    );
-    // Independently reproduced with raw CREATE2 hashing over the placeholder account proxy hash.
-    let expected = address!("d62b59cb4e41a0dd9000c71c6663df05e2bb910d");
-    assert_eq!(
-        TEST_FACTORY.create2(account_salt, ACCOUNT_PROXY_INIT_CODE_HASH),
-        expected
-    );
-    assert_eq!(config.derive_account(TEST_FACTORY).unwrap(), expected);
-    assert_eq!(
-        multisig_digest(B256::repeat_byte(0x42), digest_account, 0),
+        multisig_digest(inner_digest, digest_account, 0),
         b256!("7a62ef46efdf76a6a0ab6c38c5fdeda2169d6a0de3643bb9912a4fbce881a870")
     );
-
+    let current = MultisigSignature::try_new(
+        digest_account,
+        current_config(owner),
+        vec![owner_approval()],
+    )
+    .unwrap();
     assert_eq!(
-        config.commitment().unwrap(),
-        b256!("a9e7d1e2ad25e227a4de5f38f3bba31d854ffc8efec46aaa8649097a516bb4ee")
-    );
-    config.version = 1;
-    assert_eq!(
-        config.commitment().unwrap(),
-        b256!("6237ca5930f2265d4fb70a0305dd6ceea4df227053b4a62c304489ede946a2f8")
-    );
-    assert_eq!(
-        multisig_digest(B256::repeat_byte(0x42), digest_account, 1),
+        current.digest(inner_digest),
         b256!("cceb022fd342beddcf6583e680c18a34936212276a680f026e52728b5ebb722b")
     );
-}
+    assert_eq!(
+        current.config_commitment(),
+        b256!("6237ca5930f2265d4fb70a0305dd6ceea4df227053b4a62c304489ede946a2f8")
+    );
+    // The most owners, each of weight 1, at threshold 8, reproduced the same way.
+    assert_eq!(
+        multisig_config(0, 8, &indexed_owners(MAX_MULTISIG_OWNERS, 1)).derive_account(TEST_FACTORY),
+        Ok(address!("213bb3642432619a5327c0c6c60bda3ca2bbe59c"))
+    );
 
-#[test]
-fn multisig_preimages_follow_documented_layout() {
+    // The documented preimage layouts, built by hand.
     let owners = [(indexed_owner(1), 2), (indexed_owner(2), 3)];
-    let mut config = sorted_secp_config(&owners, 4);
+    let mut config = multisig_config(9, 4, &owners);
     config.salt = B256::repeat_byte(0x07);
-    config.version = 9;
-
     let mut owner_set = vec![4, 2];
     for (owner, weight) in owners {
         owner_set.extend_from_slice(owner.as_slice());
@@ -442,7 +574,7 @@ fn multisig_preimages_follow_documented_layout() {
         owner_set.as_slice(),
     ]
     .concat();
-    assert_eq!(config.account_salt_preimage().unwrap(), salt_preimage);
+    assert_eq!(config.account_salt_preimage(), Ok(salt_preimage.clone()));
     assert_eq!(config.account_salt_preimage_len(), salt_preimage.len());
 
     let commitment_preimage = [
@@ -452,12 +584,12 @@ fn multisig_preimages_follow_documented_layout() {
         owner_set.as_slice(),
     ]
     .concat();
-    assert_eq!(config.commitment_preimage().unwrap(), commitment_preimage);
-    assert_eq!(config.commitment_preimage_len(), commitment_preimage.len());
     assert_eq!(
-        config.commitment().unwrap(),
-        keccak256(&commitment_preimage)
+        config.commitment_preimage(),
+        Ok(commitment_preimage.clone())
     );
+    assert_eq!(config.commitment_preimage_len(), commitment_preimage.len());
+    assert_eq!(config.commitment(), Ok(keccak256(&commitment_preimage)));
 
     let create2_preimage = [
         &[0xff][..],
@@ -470,13 +602,9 @@ fn multisig_preimages_follow_documented_layout() {
         create2_preimage.len(),
         MULTISIG_ACCOUNT_CREATE2_PREIMAGE_LEN
     );
-    assert_eq!(
-        config.derive_account(TEST_FACTORY).unwrap(),
-        Address::from_word(keccak256(&create2_preimage))
-    );
+    let account = Address::from_word(keccak256(&create2_preimage));
+    assert_eq!(config.derive_account(TEST_FACTORY), Ok(account));
 
-    let inner_digest = B256::repeat_byte(0x42);
-    let account = Address::repeat_byte(0x11);
     let digest_preimage = [
         MULTISIG_SIGNATURE_DOMAIN,
         inner_digest.as_slice(),
@@ -488,435 +616,113 @@ fn multisig_preimages_follow_documented_layout() {
         multisig_digest(inner_digest, account, config.version),
         keccak256(digest_preimage)
     );
-}
 
-#[test]
-fn multisig_signature_accessors_expose_committed_parts() {
-    let config = sorted_secp_config(&[(indexed_owner(2), 1)], 1);
-    let account = config.derive_account(TEST_FACTORY).unwrap();
-    let signature =
-        MultisigSignature::try_new(account, config.clone(), vec![PrimitiveSignature::default()])
-            .unwrap();
-
-    assert_eq!(signature.account(), account);
-    assert_eq!(signature.config(), &config);
-    assert_eq!(signature.config_commitment(), config.commitment().unwrap());
-    assert_eq!(
-        signature.digest(B256::ZERO),
-        multisig_digest(B256::ZERO, account, config.version)
+    // An owner approval cannot replay across accounts that share owners, or across versions.
+    let mut resalted = config.clone();
+    resalted.salt = B256::repeat_byte(0x08);
+    let resalted_account = resalted.derive_account(TEST_FACTORY).unwrap();
+    assert_ne!(resalted_account, account, "the salt sets the account");
+    assert_ne!(
+        multisig_digest(inner_digest, resalted_account, config.version),
+        multisig_digest(inner_digest, account, config.version),
+        "the account sets the digest"
+    );
+    assert_ne!(
+        multisig_digest(inner_digest, account, config.version + 1),
+        multisig_digest(inner_digest, account, config.version),
+        "the version sets the digest"
     );
 }
 
 #[test]
-fn config_accepts_max_owners() {
-    let owners = (1..=u16::try_from(MAX_MULTISIG_OWNERS).unwrap())
-        .map(|index| (indexed_owner(index), 1))
-        .collect::<Vec<_>>();
-    let config = sorted_secp_config(&owners, u8::try_from(MAX_MULTISIG_SIGNATURES).unwrap());
-
+fn multisig_quorum_reports_the_first_broken_rule() {
+    let [first, second, third] = [1, 2, 3].map(indexed_owner);
+    let config = multisig_config(0, 4, &[(first, 1), (second, 3), (third, 2)]);
     assert_eq!(
-        config.validate(),
-        Ok(u8::try_from(MAX_MULTISIG_OWNERS).unwrap())
-    );
-    // Independently reproduced with raw CREATE2 hashing over the placeholder account proxy hash.
-    assert_eq!(
-        config.derive_account(TEST_FACTORY),
-        Ok(address!("213bb3642432619a5327c0c6c60bda3ca2bbe59c"))
-    );
-}
-
-#[test]
-fn config_rejects_more_than_max_owners() {
-    let owners = (1..=u16::try_from(MAX_MULTISIG_OWNERS).unwrap() + 1)
-        .map(|index| (indexed_owner(index), 1))
-        .collect::<Vec<_>>();
-    let config = sorted_secp_config(&owners, 1);
-
-    assert_eq!(config.validate(), Err(MultisigConfigError::TooManyOwners));
-}
-
-#[test]
-fn config_total_weight_is_capped_at_u8_max() {
-    let owner_a = Address::repeat_byte(0x11);
-    let owner_b = Address::repeat_byte(0x22);
-    let config = sorted_secp_config(&[(owner_a, 128), (owner_b, 128)], 1);
-
-    assert_eq!(
-        config.validate(),
-        Err(MultisigConfigError::TotalWeightExceedsMax)
-    );
-}
-
-#[test]
-fn config_accepts_max_threshold() {
-    let owner = Address::repeat_byte(0x11);
-    let threshold = u8::MAX;
-    let config = sorted_secp_config(&[(owner, threshold)], threshold);
-
-    assert_eq!(config.validate(), Ok(threshold));
-}
-
-#[test]
-fn config_rejects_threshold_requiring_too_many_approvals() {
-    let owners = (1..=u16::try_from(MAX_MULTISIG_SIGNATURES).unwrap() + 1)
-        .map(|index| (indexed_owner(index), if index == 1 { 1 } else { 30 }))
-        .collect::<Vec<_>>();
-    let config = sorted_secp_config(&owners, 240);
-    assert_eq!(config.validate(), Ok(241));
-
-    let config = sorted_secp_config(&owners, 241);
-    assert_eq!(
-        config.validate(),
-        Err(MultisigConfigError::ThresholdExceedsWeight)
-    );
-}
-
-#[test]
-fn config_rejects_own_account_as_owner() {
-    let account = indexed_owner(1);
-    let config = sorted_secp_config(&[(account, 1)], 1);
-
-    assert_eq!(
-        config.validate_for_account(account),
-        Err(MultisigConfigError::AccountIsOwner)
+        [first, second, third, indexed_owner(4)].map(|owner| config.owner_weight(owner)),
+        [Some(1), Some(3), Some(2), None]
     );
 
-    let config = sorted_secp_config(&[(account, 0)], 1);
-    assert_eq!(
-        config.validate_for_account(account),
-        Err(MultisigConfigError::AccountIsOwner)
-    );
+    // Records each recovered owner with its configured weight, in order.
+    let quorum =
+        |threshold: u8, approvals: Vec<(Address, u8)>| -> Result<(), MultisigQuorumError> {
+            let mut accumulator = MultisigWeightAccumulator::new(threshold)?;
+            for (owner, weight) in approvals {
+                accumulator.record_owner(owner, weight)?;
+            }
+            accumulator.finish()
+        };
+    let light = (first, 1);
+    let heavy = (second, 3);
 
-    // Self-ownership anywhere in the list comes before a zero weight earlier in it.
-    let config = sorted_secp_config(&[(indexed_owner(0x10), 1), (indexed_owner(2), 0)], 1);
-    let account = indexed_owner(0x10);
-    assert_eq!(
-        config.validate_for_account(account),
-        Err(MultisigConfigError::AccountIsOwner)
-    );
-}
-
-#[test]
-fn shared_quorum_helpers_verify_order_and_threshold() {
-    let owner_a = indexed_owner(1);
-    let owner_b = indexed_owner(2);
-    let owner_c = indexed_owner(3);
-    let config = sorted_secp_config(&[(owner_a, 1), (owner_b, 3), (owner_c, 2)], 4);
-
-    // Reproduce the weight-accounting the native multisig verifier performs: look up each
-    // recovered owner's configured weight and feed it to the shared accumulator in order.
-    let ordered_weights = |owners: &[Address]| -> Result<(), MultisigQuorumError> {
-        let mut accumulator = MultisigWeightAccumulator::new(config.threshold)?;
-        for &owner in owners {
-            let weight = config
-                .owner_weight(owner)
-                .ok_or(MultisigQuorumError::SignerNotOwner)?;
-            accumulator.record_owner(owner, weight)?;
-        }
-        accumulator.finish()
-    };
-
-    assert_eq!(ordered_weights(&[owner_a, owner_b]), Ok(()));
-    assert_eq!(
-        ordered_weights(&[owner_b]),
-        Err(MultisigQuorumError::WeightBelowThreshold)
-    );
-    assert_eq!(
-        ordered_weights(&[owner_b, owner_a]),
-        Err(MultisigQuorumError::SignersNotAscending)
-    );
-    assert_eq!(
-        ordered_weights(&[indexed_owner(4)]),
-        Err(MultisigQuorumError::SignerNotOwner)
-    );
-
-    assert_eq!(
-        MultisigWeightAccumulator::new(0).err(),
-        Some(MultisigQuorumError::ZeroThreshold)
-    );
-}
-
-#[test]
-fn owner_signature_cannot_replay_across_accounts_with_same_owners() {
-    let signer = PrivateKeySigner::random();
-    let owner = signer.address();
-    let mut config_a = sorted_secp_config(&[(owner, 1)], 1);
-    config_a.salt = B256::repeat_byte(0x11);
-    let mut config_b = sorted_secp_config(&[(owner, 1)], 1);
-    config_b.salt = B256::repeat_byte(0x22);
-
-    let account_a = config_a.derive_account(TEST_FACTORY).unwrap();
-    let account_b = config_b.derive_account(TEST_FACTORY).unwrap();
-    assert_ne!(account_a, account_b);
-
-    let inner_digest = B256::repeat_byte(0x42);
-    let digest_a = multisig_digest(inner_digest, account_a, 0);
-    let digest_b = multisig_digest(inner_digest, account_b, 0);
-    assert_ne!(digest_a, digest_b, "digest is domain-separated by account");
-
-    // An owner approval recovers the owner only against the account it was signed for; replaying
-    // it against another account's digest recovers a different address that is not an owner.
-    let signature = sign_hash(&signer, &digest_a);
-    assert_eq!(signature.recover_signer(&digest_a).unwrap(), owner);
-    assert_ne!(signature.recover_signer(&digest_b).unwrap(), owner);
-}
-
-#[test]
-fn owner_signature_cannot_replay_across_config_versions() {
-    let signer = PrivateKeySigner::random();
-    let owner = signer.address();
-    let config = sorted_secp_config(&[(owner, 1)], 1);
-    let account = config.derive_account(TEST_FACTORY).unwrap();
-    let inner_digest = B256::repeat_byte(0x42);
-    let initial_digest = multisig_digest(inner_digest, account, 0);
-    let rotated_digest = multisig_digest(inner_digest, account, 1);
-
-    assert_ne!(initial_digest, rotated_digest);
-    let signature = sign_hash(&signer, &initial_digest);
-    assert_eq!(signature.recover_signer(&initial_digest).unwrap(), owner);
-    assert_ne!(signature.recover_signer(&rotated_digest).unwrap(), owner);
-}
-
-#[test]
-fn verifies_weighted_owner_signatures_in_sorted_order() {
-    let signer_a = PrivateKeySigner::random();
-    let owner_a = signer_a.address();
-    let signer_b = PrivateKeySigner::random();
-    let owner_b = signer_b.address();
-    let config = sorted_secp_config(&[(owner_a, 1), (owner_b, 1)], 2);
-    let account = config.derive_account(TEST_FACTORY).unwrap();
-    let digest = multisig_digest(B256::repeat_byte(0x42), account, 0);
-
-    let mut signed = [
-        (owner_a, sign_hash(&signer_a, &digest)),
-        (owner_b, sign_hash(&signer_b, &digest)),
-    ];
-    signed.sort_by_key(|(owner, _)| *owner);
-
-    // Feed the recovered owners through the shared accumulator, as the verifier does.
-    let quorum_weight = |approvals: &[&PrimitiveSignature]| -> Result<(), MultisigQuorumError> {
-        let mut accumulator = MultisigWeightAccumulator::new(config.threshold)?;
-        for approval in approvals {
-            let owner = approval.recover_signer(&digest).unwrap();
-            let weight = config
-                .owner_weight(owner)
-                .ok_or(MultisigQuorumError::SignerNotOwner)?;
-            accumulator.record_owner(owner, weight)?;
-        }
-        accumulator.finish()
-    };
-
-    let both = [&signed[0].1, &signed[1].1];
-    assert_eq!(quorum_weight(&both), Ok(()));
-
-    // A single owner falls short of the threshold of 2.
-    assert_eq!(
-        quorum_weight(&[&signed[0].1]),
-        Err(MultisigQuorumError::WeightBelowThreshold)
-    );
-}
-
-#[test]
-fn multisig_signature_encodes_complete_config() {
-    let config = current_config(indexed_owner(2));
-    let account = Address::repeat_byte(0x11);
-    let signatures = [valid_owner_signature_bytes()];
-    let signature =
-        MultisigSignature::try_new(account, config.clone(), vec![valid_owner_signature()]).unwrap();
-
-    let encoded = alloy_rlp::encode(&signature);
-    assert_eq!(
-        encoded,
-        encoded_multisig(
-            account,
-            &config,
-            signatures
-                .iter()
-                .map(|signature| signature.to_vec())
-                .collect(),
-        )
-    );
-
-    let decoded = decode_exact::<MultisigSignature>(encoded.as_slice()).unwrap();
-    assert_eq!(decoded, signature);
-}
-
-#[test]
-fn multisig_signature_decode_rejects_invalid_config() {
-    let invalid_config = MultisigConfig {
-        salt: B256::ZERO,
-        version: 0,
-        threshold: 0,
-        owners: Vec::new(),
-    };
-    let encoded = encoded_multisig(
-        Address::repeat_byte(0x11),
-        &invalid_config,
-        vec![valid_owner_signature_bytes().to_vec()],
-    );
-
-    assert_multisig_decode_rejected(
-        &encoded,
-        RlpError::Custom("multisig owners cannot be empty"),
-    );
-}
-
-#[test]
-fn multisig_signature_construction_reports_the_first_broken_rule() {
-    let account = Address::repeat_byte(0x11);
-    let config = current_config(indexed_owner(2));
-    let empty_config = MultisigConfig {
-        salt: B256::ZERO,
-        version: 0,
-        threshold: 0,
-        owners: Vec::new(),
-    };
-    let oversized = PrimitiveSignature::WebAuthn(WebAuthnSignature {
-        webauthn_data: Bytes::from(vec![0; MAX_MULTISIG_OWNER_SIGNATURE_BYTES - 128]),
-        r: B256::ZERO,
-        s: B256::ZERO,
-        pub_key_x: B256::ZERO,
-        pub_key_y: B256::ZERO,
-    });
-
-    for (constructed, expected) in [
-        // The account comes before the config and the approvals.
+    for (case, threshold, approvals, expected) in [
         (
-            MultisigSignature::try_new(Address::ZERO, empty_config.clone(), Vec::new()),
-            MultisigSignatureError::ZeroAccount,
-        ),
-        // The config comes before the approvals.
-        (
-            MultisigSignature::try_new(account, empty_config, Vec::new()),
-            MultisigSignatureError::InvalidConfig(MultisigConfigError::EmptyOwners),
-        ),
-        // Initial self-ownership is checked against the named account.
-        (
-            MultisigSignature::try_new(
-                account,
-                sorted_secp_config(&[(account, 1)], 1),
-                vec![valid_owner_signature()],
-            ),
-            MultisigSignatureError::InvalidConfig(MultisigConfigError::AccountIsOwner),
+            "a zero threshold",
+            0,
+            Vec::new(),
+            Err(MultisigQuorumError::ZeroThreshold),
         ),
         (
-            MultisigSignature::try_new(account, config.clone(), Vec::new()),
-            MultisigSignatureError::EmptySignatures,
+            "no approvals",
+            1,
+            Vec::new(),
+            Err(MultisigQuorumError::EmptySignatures),
         ),
-        // The approval count comes before each approval's size.
         (
-            MultisigSignature::try_new(
-                account,
-                config,
-                vec![oversized; MAX_MULTISIG_SIGNATURES + 1],
-            ),
-            MultisigSignatureError::TooManySignatures,
+            "a signer of zero weight, read as outside the owner set",
+            2,
+            vec![(first, 0)],
+            Err(MultisigQuorumError::SignerNotOwner),
         ),
+        (
+            "a repeated owner",
+            2,
+            vec![light, light],
+            Err(MultisigQuorumError::SignersNotAscending),
+        ),
+        (
+            "descending owners",
+            4,
+            vec![heavy, light],
+            Err(MultisigQuorumError::SignersNotAscending),
+        ),
+        (
+            "more approvals than the cap below quorum, before ordering",
+            u8::MAX,
+            [indexed_owners(MAX_MULTISIG_SIGNATURES, 1), vec![light]].concat(),
+            Err(MultisigQuorumError::TooManySignatures),
+        ),
+        (
+            "an approval after quorum",
+            1,
+            vec![light, heavy],
+            Err(MultisigQuorumError::ExcessSignatures),
+        ),
+        (
+            "an approval after quorum, before its entry is checked",
+            1,
+            vec![light, (Address::ZERO, 0)],
+            Err(MultisigQuorumError::ExcessSignatures),
+        ),
+        (
+            "weight below the threshold",
+            4,
+            vec![heavy],
+            Err(MultisigQuorumError::WeightBelowThreshold),
+        ),
+        ("weight at the threshold", 4, vec![light, heavy], Ok(())),
     ] {
-        assert_eq!(constructed, Err(expected));
+        assert_eq!(quorum(threshold, approvals), expected, "{case}");
     }
-}
-
-#[test]
-fn multisig_config_validates_owner_count_after_decoding() {
-    let config = MultisigConfig {
-        salt: B256::ZERO,
-        version: 0,
-        threshold: u8::try_from(MAX_MULTISIG_SIGNATURES).unwrap(),
-        owners: (1..=u16::try_from(MAX_MULTISIG_OWNERS).unwrap() + 1)
-            .map(|index| MultisigOwner {
-                owner: Address::from_word(B256::from(U256::from(index))),
-                weight: 1,
-            })
-            .collect(),
-    };
-    let decoded = decode_exact::<MultisigConfig>(&alloy_rlp::encode(&config)).unwrap();
-    assert_eq!(decoded, config);
-    assert_eq!(decoded.validate(), Err(MultisigConfigError::TooManyOwners));
-
-    let encoded = encoded_multisig(
-        Address::repeat_byte(0x11),
-        &decoded,
-        vec![valid_owner_signature_bytes().to_vec()],
-    );
-    assert_multisig_decode_rejected(&encoded, RlpError::Custom("too many multisig owners"));
-}
-
-#[test]
-fn multisig_signature_decode_rejects_excess_approvals() {
-    let encoded = encoded_multisig(
-        Address::repeat_byte(0x11),
-        &current_config(indexed_owner(2)),
-        vec![valid_owner_signature_bytes().to_vec(); MAX_MULTISIG_SIGNATURES + 1],
-    );
-
-    let mut input = encoded.as_slice();
-    assert!(matches!(
-        MultisigSignature::decode(&mut input),
-        Err(RlpError::Custom("too many multisig signatures"))
-    ));
-}
-
-#[test]
-fn multisig_signature_shape_rejects_oversized_owner_signature() {
-    // A WebAuthn envelope one byte over the 2049-byte owner cap, not an unknown tag.
-    let owner_signature = PrimitiveSignature::WebAuthn(WebAuthnSignature {
-        webauthn_data: Bytes::from(vec![0; MAX_MULTISIG_OWNER_SIGNATURE_BYTES - 128]),
-        r: B256::ZERO,
-        s: B256::ZERO,
-        pub_key_x: B256::ZERO,
-        pub_key_y: B256::ZERO,
-    });
-    let bytes = owner_signature.to_bytes();
-    assert_eq!(bytes.len(), MAX_MULTISIG_OWNER_SIGNATURE_BYTES + 1);
-
-    // The largest owner approval is accepted, as many times as the approval cap allows.
-    let largest = PrimitiveSignature::WebAuthn(WebAuthnSignature {
-        webauthn_data: Bytes::from(vec![0; MAX_MULTISIG_OWNER_SIGNATURE_BYTES - 129]),
-        r: B256::ZERO,
-        s: B256::ZERO,
-        pub_key_x: B256::ZERO,
-        pub_key_y: B256::ZERO,
-    });
-    assert_eq!(largest.encoded_length(), MAX_MULTISIG_OWNER_SIGNATURE_BYTES);
-    let largest_approvals = vec![largest; MAX_MULTISIG_SIGNATURES];
-    assert_eq!(
-        MultisigSignature::try_new(
-            Address::repeat_byte(0x11),
-            current_config(indexed_owner(2)),
-            largest_approvals.clone(),
-        )
-        .map(|signature| signature.signatures().to_vec()),
-        Ok(largest_approvals)
-    );
-    assert_eq!(
-        MultisigSignature::try_new(
-            Address::repeat_byte(0x11),
-            current_config(indexed_owner(2)),
-            vec![owner_signature],
-        ),
-        Err(MultisigSignatureError::OwnerSignatureTooLarge)
-    );
-    let encoded = encoded_multisig(
-        Address::repeat_byte(0x11),
-        &current_config(indexed_owner(2)),
-        vec![bytes.to_vec()],
-    );
-    assert_eq!(
-        MultisigSignature::decode(&mut encoded.as_slice()),
-        Err(RlpError::Custom("Invalid WebAuthn signature length")),
-    );
 }
 
 #[cfg(feature = "serde")]
 mod serde_json_and_binary {
     use super::{
-        MAX_MULTISIG_SIGNATURES, MultisigSignature, PrimitiveSignature, RlpError, TEST_FACTORY,
-        current_config, encoded_multisig, indexed_owner, multisig_digest, nested_multisig_encoding,
-        sign_hash, sorted_secp_config, valid_owner_signature_bytes,
+        MultisigSignature, RlpError, current_config, indexed_owner, malformed_multisig_encodings,
+        owner_approval,
     };
-    use alloy_primitives::{Address, B256, Bytes};
-    use alloy_signer_local::PrivateKeySigner;
+    use alloy_primitives::{Address, Bytes};
     use serde::{
         Deserialize as _,
         de::{
@@ -924,104 +730,49 @@ mod serde_json_and_binary {
             value::{BorrowedBytesDeserializer, Error as DeError},
         },
     };
-    use serde_json::{from_value, json, to_value};
+    use serde_json::{from_value, to_value};
 
     fn decode_binary_multisig(bytes: &[u8]) -> Result<MultisigSignature, DeError> {
         MultisigSignature::deserialize(BorrowedBytesDeserializer::new(bytes))
     }
 
-    fn malformed_multisig_encodings() -> [(Vec<u8>, RlpError); 2] {
-        [
-            (
-                encoded_multisig(
-                    indexed_owner(1),
-                    &current_config(indexed_owner(2)),
-                    vec![valid_owner_signature_bytes().to_vec(); MAX_MULTISIG_SIGNATURES + 1],
-                ),
-                RlpError::Custom("too many multisig signatures"),
-            ),
-            (
-                nested_multisig_encoding(4_096),
-                RlpError::Custom("Unknown signature type identifier"),
-            ),
-        ]
-    }
-
     #[test]
     fn multisig_signature_serde_roundtrips_rlp_bytes() {
-        let signer = PrivateKeySigner::random();
-        let owner = signer.address();
-        let config = sorted_secp_config(&[(owner, 1)], 1);
-        let account = config.derive_account(TEST_FACTORY).unwrap();
-        let digest = multisig_digest(B256::ZERO, account, 0);
-        let owner_signature = sign_hash(&signer, &digest);
-        let signatures = vec![owner_signature];
+        let signature = MultisigSignature::try_new(
+            Address::repeat_byte(0x11),
+            current_config(indexed_owner(2)),
+            vec![owner_approval()],
+        )
+        .unwrap();
+        let encoded = alloy_rlp::encode(&signature);
 
-        let signature = MultisigSignature::try_new(account, config, signatures).unwrap();
-        let mut encoded = alloy_rlp::encode(&signature);
         let json = to_value(&signature).unwrap();
         assert_eq!(json, to_value(Bytes::from(encoded.clone())).unwrap());
         assert_eq!(from_value::<MultisigSignature>(json).unwrap(), signature);
-        encoded.push(0x80);
-        let json = to_value(Bytes::from(encoded)).unwrap();
+        assert_eq!(decode_binary_multisig(&encoded), Ok(signature));
+        // The bytes hold exactly one signature.
+        let trailing = [encoded, vec![0x80]].concat();
         assert_eq!(
-            from_value::<MultisigSignature>(json)
-                .unwrap_err()
-                .to_string(),
-            RlpError::UnexpectedLength.to_string()
+            decode_binary_multisig(&trailing),
+            Err(DeError::custom(RlpError::UnexpectedLength))
         );
     }
 
     #[test]
-    fn multisig_signature_json_bytes_reject_malformed_shapes() {
-        for (encoded, expected) in malformed_multisig_encodings() {
+    fn multisig_signature_serde_rejects_malformed_encodings() {
+        for (case, encoded, expected) in malformed_multisig_encodings() {
+            assert_eq!(
+                decode_binary_multisig(&encoded),
+                Err(DeError::custom(&expected)),
+                "{case}"
+            );
             let json = to_value(Bytes::from(encoded)).unwrap();
             assert_eq!(
                 from_value::<MultisigSignature>(json)
                     .unwrap_err()
                     .to_string(),
-                expected.to_string()
-            );
-        }
-    }
-
-    #[test]
-    fn multisig_signature_json_rejects_structured_form() {
-        let json = json!({
-            "account": Address::repeat_byte(0x11),
-            "signatures": [],
-        });
-        // Only the RLP byte string is accepted, so the error is the byte-string deserializer's.
-        let expected = from_value::<Bytes>(json.clone()).unwrap_err().to_string();
-        assert_eq!(
-            from_value::<MultisigSignature>(json)
-                .unwrap_err()
-                .to_string(),
-            expected
-        );
-    }
-
-    #[test]
-    fn binary_multisig_deserializer_roundtrips_bytes() {
-        let signature = MultisigSignature::try_new(
-            indexed_owner(2),
-            current_config(indexed_owner(3)),
-            vec![PrimitiveSignature::default()],
-        )
-        .unwrap();
-
-        let encoded = alloy_rlp::encode(&signature);
-        let decoded = decode_binary_multisig(&encoded).unwrap();
-
-        assert_eq!(decoded, signature);
-    }
-
-    #[test]
-    fn binary_multisig_deserializer_bounds_shape_before_typed_recursion() {
-        for (encoded, expected) in malformed_multisig_encodings() {
-            assert_eq!(
-                decode_binary_multisig(&encoded),
-                Err(DeError::custom(expected))
+                expected,
+                "{case}"
             );
         }
     }
