@@ -1266,3 +1266,4 @@ jobs:
             "${events_args[@]}" \
             -H "Content-Type: application/json" \
             -d "$payload"
+undefined
