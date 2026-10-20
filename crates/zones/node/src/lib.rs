@@ -8,7 +8,7 @@ use eyre as _;
 
 #[cfg(feature = "cli")]
 pub mod cli;
-pub mod deposit_allowlist;
+mod deposit_allowlist;
 pub mod dev;
 pub mod engine;
 mod follower;
@@ -22,7 +22,7 @@ mod shadow_prover;
 mod tx_forwarding;
 pub mod version;
 
-pub use deposit_allowlist::DepositAllowlist;
+pub use deposit_allowlist::{DepositAllowlist, DepositAllowlistAdmin, DepositAllowlistError};
 pub use engine::{EngineExit, ProductionPermit, ZoneEngine};
 pub use node::{
     ZoneExecutorBuilder, ZoneNode, ZoneProverConfig, ZoneRedactedRpcConfig,

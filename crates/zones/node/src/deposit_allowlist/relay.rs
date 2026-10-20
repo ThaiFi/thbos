@@ -1,9 +1,10 @@
-//! Relays `zoneAdmin` allowlist writes from an RPC-only node to every sequencer over P2P.
+//! Relays `zoneAdmin` allowlist requests from an RPC-only node to every sequencer over P2P.
 //!
-//! The RPC-only node serves the operator-facing RPC but holds no allowlist. Each write is sent to
-//! every quorum member, which applies it to its own persisted list and acknowledges it. The call
-//! returns only after every member acknowledged, so a success means every sequencer will enforce
-//! the change on its next block.
+//! The RPC-only node serves the operator-facing RPC but holds no allowlist and no admin key.
+//! Each request is sent unchanged to every quorum member, which checks the admin signature,
+//! applies the write to its own persisted list, and acknowledges it. The call returns only after
+//! every member acknowledged, so a success means every sequencer will enforce the change on its
+//! next block.
 
 use std::{
     collections::HashMap,
@@ -14,19 +15,21 @@ use std::{
     time::Duration,
 };
 
-use alloy_primitives::Address;
+use alloy_primitives::{Address, Bytes};
 use jsonrpsee::{core::RpcResult, types::ErrorObjectOwned};
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
-use tracing::{info, warn};
-use zone_p2p::{P2pCommand, P2pEvent, P2pPeerId};
+use tracing::{debug, info, warn};
+use zone_p2p::{MAX_ALLOWLIST_PAYLOAD_SIZE, P2pCommand, P2pEvent, P2pPeerId};
 
-use super::{DepositAllowlist, DepositAllowlistApiServer, internal_error};
+use super::{
+    DepositAllowlist, DepositAllowlistApiServer, DepositAllowlistError, SignedWrite, Write,
+};
 
-/// How long a relayed write waits for every sequencer before failing.
+/// How long a relayed request waits for every sequencer before failing.
 const RELAY_TIMEOUT: Duration = Duration::from_secs(10);
-/// How often an unacknowledged update is resent to the sequencers still missing.
+/// How often an unacknowledged request is resent to the sequencers still missing.
 const RELAY_RETRY_INTERVAL: Duration = Duration::from_millis(500);
 
 /// An allowlist request relayed over P2P, tagged so acknowledgements match their request.
@@ -38,35 +41,41 @@ struct Update {
 
 #[derive(Debug, Serialize, Deserialize)]
 enum Request {
-    Set {
-        addresses: Vec<Address>,
-        allowed: bool,
-    },
-    Replace {
-        addresses: Vec<Address>,
-    },
+    Write(SignedWrite),
     Get,
 }
 
 /// A sequencer's result for one relayed request: the list for `Get`, empty once a write is
-/// persisted, or the error that prevented it.
+/// persisted, or the reason it was rejected.
 #[derive(Debug, Serialize, Deserialize)]
 struct Ack {
     id: u64,
-    result: Result<Vec<Address>, String>,
+    result: Result<Vec<Address>, DepositAllowlistError>,
 }
 
 type PendingAcks = Arc<Mutex<HashMap<u64, mpsc::UnboundedSender<(P2pPeerId, Ack)>>>>;
 
-/// `zoneAdmin` API on an RPC-only node, relaying writes to the sequencers it lists.
+/// Removes a request's acknowledgement route on every exit, including a cancelled RPC call.
+struct PendingGuard<'a> {
+    pending: &'a PendingAcks,
+    id: u64,
+}
+
+impl Drop for PendingGuard<'_> {
+    fn drop(&mut self) {
+        self.pending.lock().remove(&self.id);
+    }
+}
+
+/// `zoneAdmin` API on an RPC-only node, relaying requests to the sequencers it lists.
 #[derive(Clone)]
 pub(crate) struct AllowlistRelay {
     sequencers: Vec<P2pPeerId>,
     commands: mpsc::Sender<P2pCommand>,
     pending: PendingAcks,
+    /// Starts at a random value so a sequencer's late acknowledgement for a request from before
+    /// a restart cannot match a new request.
     next_id: Arc<AtomicU64>,
-    /// One write at a time, so every sequencer applies writes in the same order.
-    write_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl AllowlistRelay {
@@ -77,12 +86,11 @@ impl AllowlistRelay {
             sequencers,
             commands,
             pending: Default::default(),
-            next_id: Default::default(),
-            write_lock: Default::default(),
+            next_id: Arc::new(AtomicU64::new(rand::random())),
         }
     }
 
-    /// Route an [`P2pEvent::AllowlistAckReceived`] to the write waiting for it.
+    /// Route an [`P2pEvent::AllowlistAckReceived`] to the request waiting for it.
     pub(crate) fn handle_event(&self, event: P2pEvent) {
         let P2pEvent::AllowlistAckReceived { peer, ack } = event else {
             return;
@@ -94,22 +102,34 @@ impl AllowlistRelay {
                 return;
             }
         };
-        if let Some(waiter) = self.pending.lock().get(&ack.id) {
-            let _ = waiter.send((peer, ack));
+        let id = ack.id;
+        let Some(waiter) = self.pending.lock().get(&id).cloned() else {
+            debug!(target: "zone::allowlist", %peer, id, "Ignoring allowlist acknowledgement for a finished request");
+            return;
+        };
+        if waiter.send((peer, ack)).is_err() {
+            debug!(target: "zone::allowlist", id, "Allowlist request finished before its acknowledgement arrived");
         }
     }
 
     /// Send `request` to every sequencer and return each one's result once all have answered.
     async fn relay(&self, request: Request) -> RpcResult<Vec<(P2pPeerId, Vec<Address>)>> {
-        let _serialized = self.write_lock.lock().await;
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let update = serde_json::to_vec(&Update { id, request })
-            .map_err(|err| internal_error(eyre::Report::new(err)))?;
+            .map_err(|err| relay_error(format!("failed to encode request: {err}")))?;
+        if update.len() > MAX_ALLOWLIST_PAYLOAD_SIZE {
+            return Err(relay_error(format!(
+                "request encodes to {} bytes; the relay limit is {MAX_ALLOWLIST_PAYLOAD_SIZE}",
+                update.len()
+            )));
+        }
         let (acks_tx, mut acks) = mpsc::unbounded_channel();
         self.pending.lock().insert(id, acks_tx);
-        let result = self.collect_acks(&update, &mut acks).await;
-        self.pending.lock().remove(&id);
-        result
+        let _guard = PendingGuard {
+            pending: &self.pending,
+            id,
+        };
+        self.collect_acks(&update, &mut acks).await
     }
 
     async fn collect_acks(
@@ -143,10 +163,8 @@ impl AllowlistRelay {
                 }
                 () = tokio::time::sleep_until(deadline) => {
                     let missing = missing.iter().map(ToString::to_string).collect::<Vec<_>>();
-                    return Err(relay_error(format!(
-                        "no acknowledgement from sequencers {}",
-                        missing.join(", ")
-                    )));
+                    errors.push(format!("no acknowledgement from sequencers {}", missing.join(", ")));
+                    break;
                 }
             }
         }
@@ -156,20 +174,45 @@ impl AllowlistRelay {
             Err(relay_error(errors.join("; ")))
         }
     }
+
+    async fn relay_write(&self, write: SignedWrite) -> RpcResult<()> {
+        self.relay(Request::Write(write)).await.map(|_| ())
+    }
 }
 
 #[jsonrpsee::core::async_trait]
 impl DepositAllowlistApiServer for AllowlistRelay {
-    async fn set_deposit_allowed(&self, addresses: Vec<Address>, allowed: bool) -> RpcResult<()> {
+    async fn set_deposit_allowed(
+        &self,
+        addresses: Vec<Address>,
+        allowed: bool,
+        deadline: u64,
+        signature: Bytes,
+    ) -> RpcResult<()> {
         let count = addresses.len();
-        self.relay(Request::Set { addresses, allowed }).await?;
+        self.relay_write(SignedWrite {
+            write: Write::Set { addresses, allowed },
+            deadline,
+            signature,
+        })
+        .await?;
         info!(target: "zone::allowlist", count, allowed, "Relayed deposit allowlist update to every sequencer");
         Ok(())
     }
 
-    async fn replace_deposit_allowlist(&self, addresses: Vec<Address>) -> RpcResult<()> {
+    async fn replace_deposit_allowlist(
+        &self,
+        addresses: Vec<Address>,
+        deadline: u64,
+        signature: Bytes,
+    ) -> RpcResult<()> {
         let count = addresses.len();
-        self.relay(Request::Replace { addresses }).await?;
+        self.relay_write(SignedWrite {
+            write: Write::Replace { addresses },
+            deadline,
+            signature,
+        })
+        .await?;
         info!(target: "zone::allowlist", count, "Relayed deposit allowlist replacement to every sequencer");
         Ok(())
     }
@@ -194,9 +237,9 @@ impl DepositAllowlistApiServer for AllowlistRelay {
     }
 }
 
-/// Apply relayed writes on a sequencer and acknowledge each one to its relayer.
+/// Apply relayed requests on a sequencer and acknowledge each one to its relayer.
 ///
-/// Writes are idempotent, so a retried update that was already applied is applied again and
+/// Writes are idempotent, so a retried request that was already applied is applied again and
 /// acknowledged again.
 pub(crate) async fn apply_relayed_updates(
     allowlist: Option<DepositAllowlist>,
@@ -214,42 +257,29 @@ pub(crate) async fn apply_relayed_updates(
                 continue;
             }
         };
-        let result = match &allowlist {
-            None => Err("deposit allowlist is not enabled on this sequencer".to_owned()),
-            Some(allowlist) => {
-                let allowlist = allowlist.clone();
-                let is_write = !matches!(update.request, Request::Get);
-                let result = tokio::task::spawn_blocking(move || match update.request {
-                    Request::Set { addresses, allowed } => {
-                        allowlist.set(&addresses, allowed).map(|()| Vec::new())
-                    }
-                    Request::Replace { addresses } => {
-                        allowlist.replace(addresses).map(|()| Vec::new())
-                    }
-                    Request::Get => Ok(allowlist.addresses()),
-                })
-                .await;
-                let result = match result {
-                    Ok(result) => result.map_err(|err| format!("{err:#}")),
-                    Err(err) => Err(format!("allowlist task failed: {err}")),
-                };
+        let result = match (&allowlist, update.request) {
+            (None, _) => Err(DepositAllowlistError::Disabled),
+            (Some(allowlist), Request::Get) => Ok(allowlist.addresses()),
+            (Some(allowlist), Request::Write(write)) => {
+                let result = allowlist.apply_signed_blocking(write).await;
                 match &result {
-                    Ok(_) if is_write => {
+                    Ok(()) => {
                         info!(target: "zone::allowlist", %peer, "Applied relayed deposit allowlist update")
                     }
-                    Ok(_) => {}
                     Err(error) => {
-                        warn!(target: "zone::allowlist", %peer, %error, "Failed to apply relayed deposit allowlist request")
+                        warn!(target: "zone::allowlist", %peer, %error, "Rejected relayed deposit allowlist update")
                     }
                 }
-                result
+                result.map(|()| Vec::new())
             }
         };
-        let ack = serde_json::to_vec(&Ack {
-            id: update.id,
-            result,
-        })
-        .expect("acknowledgements always serialize");
+        let ack = match encode_ack(update.id, result) {
+            Ok(ack) => ack,
+            Err(err) => {
+                warn!(target: "zone::allowlist", %peer, %err, "Failed to encode allowlist acknowledgement");
+                continue;
+            }
+        };
         if commands
             .send(P2pCommand::SendAllowlistAck { peer, ack })
             .await
@@ -260,10 +290,78 @@ pub(crate) async fn apply_relayed_updates(
     }
 }
 
+/// Encode an acknowledgement, replacing a result too large for one frame with an error so the
+/// relayer is never blocked for an oversized frame.
+fn encode_ack(
+    id: u64,
+    result: Result<Vec<Address>, DepositAllowlistError>,
+) -> serde_json::Result<Vec<u8>> {
+    let ack = serde_json::to_vec(&Ack { id, result })?;
+    if ack.len() <= MAX_ALLOWLIST_PAYLOAD_SIZE {
+        return Ok(ack);
+    }
+    serde_json::to_vec(&Ack {
+        id,
+        result: Err(DepositAllowlistError::Internal(format!(
+            "acknowledgement encodes to {} bytes; the relay limit is {MAX_ALLOWLIST_PAYLOAD_SIZE}",
+            ack.len()
+        ))),
+    })
+}
+
 fn relay_error(message: String) -> ErrorObjectOwned {
     ErrorObjectOwned::owned(
         jsonrpsee::types::error::INTERNAL_ERROR_CODE,
         message,
         None::<()>,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::deposit_allowlist::MAX_DEPOSIT_ALLOWLIST_LEN;
+
+    fn full_list() -> Vec<Address> {
+        (0..MAX_DEPOSIT_ALLOWLIST_LEN)
+            .map(|index| Address::left_padding_from(&u32::try_from(index).unwrap().to_be_bytes()))
+            .collect()
+    }
+
+    #[test]
+    fn a_full_list_fits_in_one_frame_both_ways() {
+        let addresses = full_list();
+        let ack = encode_ack(u64::MAX, Ok(addresses.clone())).unwrap();
+        let ack: Ack = serde_json::from_slice(&ack).unwrap();
+        assert_eq!(ack.result.unwrap().len(), MAX_DEPOSIT_ALLOWLIST_LEN);
+
+        let replace = serde_json::to_vec(&Update {
+            id: u64::MAX,
+            request: Request::Write(SignedWrite {
+                write: Write::Replace { addresses },
+                deadline: u64::MAX,
+                signature: Bytes::from([0xff; 65]),
+            }),
+        })
+        .unwrap();
+        assert!(
+            replace.len() <= MAX_ALLOWLIST_PAYLOAD_SIZE,
+            "{}",
+            replace.len()
+        );
+    }
+
+    #[test]
+    fn oversized_ack_becomes_an_error() {
+        let mut addresses = full_list();
+        addresses.extend(full_list());
+        let ack = encode_ack(7, Ok(addresses)).unwrap();
+        assert!(ack.len() <= MAX_ALLOWLIST_PAYLOAD_SIZE);
+        let ack: Ack = serde_json::from_slice(&ack).unwrap();
+        assert_eq!(ack.id, 7);
+        assert!(matches!(
+            ack.result,
+            Err(DepositAllowlistError::Internal(_))
+        ));
+    }
 }

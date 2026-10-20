@@ -718,12 +718,7 @@ async fn run_commands(
                     warn!(target: "zone::p2p", %peer, "Ignoring allowlist update not addressed from an RPC-only member to a quorum member");
                     continue;
                 }
-                // The relayer retries until acknowledged, so a dropped send is recovered there.
-                let _ = senders.allowlist.send(
-                    Recipients::Some(vec![peer]),
-                    AllowlistFrame::Update(update).encode(),
-                    true,
-                );
+                send_allowlist_frame(&mut senders.allowlist, peer, AllowlistFrame::Update(update));
             }
 
             P2pCommand::SendAllowlistAck { peer, ack } => {
@@ -735,16 +730,31 @@ async fn run_commands(
                     warn!(target: "zone::p2p", %peer, "Ignoring allowlist acknowledgement addressed to a non-RPC peer");
                     continue;
                 }
-                let _ = senders.allowlist.send(
-                    Recipients::Some(vec![peer]),
-                    AllowlistFrame::Ack(ack).encode(),
-                    true,
-                );
+                send_allowlist_frame(&mut senders.allowlist, peer, AllowlistFrame::Ack(ack));
             }
         }
     }
 
     Err(eyre::eyre!("P2P command channel closed unexpectedly"))
+}
+
+/// Send one allowlist frame to `peer`. An oversized frame is dropped rather than sent, because
+/// the receiver would block this node on every channel.
+fn send_allowlist_frame(sender: &mut CommonwareSender, peer: PublicKey, frame: AllowlistFrame) {
+    let frame = frame.encode();
+    if frame.len() > MAX_ALLOWLIST_MESSAGE_SIZE {
+        metrics::counter!("zone_p2p_allowlist_frames_dropped_total").increment(1);
+        warn!(target: "zone::p2p", %peer, allowlist_frame_size_bytes = frame.len(), max_allowlist_frame_size_bytes = MAX_ALLOWLIST_MESSAGE_SIZE, "Dropping oversized allowlist frame");
+        return;
+    }
+    // The relayer retries until acknowledged, so a frame that is not admitted is resent there.
+    if sender
+        .send(Recipients::Some(vec![peer.clone()]), frame, true)
+        .is_empty()
+    {
+        metrics::counter!("zone_p2p_allowlist_frames_dropped_total").increment(1);
+        debug!(target: "zone::p2p", %peer, "Allowlist frame was not admitted");
+    }
 }
 
 async fn run_receivers<R, B>(

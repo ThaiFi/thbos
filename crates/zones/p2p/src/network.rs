@@ -31,9 +31,13 @@ pub(crate) const ALLOWLIST_CHANNEL: u64 = 6;
 /// memory before the transaction-specific wire limit can run without sacrificing eventual relay.
 pub(crate) const TRANSACTION_BURST: u32 = 4;
 
-/// Maximum deposit allowlist frame accepted from a peer. A full-list replacement of about
-/// 90,000 JSON-encoded addresses fits.
-pub const MAX_ALLOWLIST_MESSAGE_SIZE: usize = 4 * 1024 * 1024;
+/// Maximum deposit allowlist frame accepted from a peer. A receiver blocks a peer that sends a
+/// larger frame.
+pub(crate) const MAX_ALLOWLIST_MESSAGE_SIZE: usize = 4 * 1024 * 1024;
+
+/// Largest allowlist update or acknowledgement payload that fits in one frame after its tag
+/// byte. Senders must check payloads against it.
+pub const MAX_ALLOWLIST_PAYLOAD_SIZE: usize = MAX_ALLOWLIST_MESSAGE_SIZE - 1;
 
 /// Maximum raw EIP-2718 transaction frame accepted from another sequencer.
 ///

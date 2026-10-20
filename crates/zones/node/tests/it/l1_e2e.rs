@@ -6,10 +6,10 @@
 
 use crate::utils::{
     L1TestNode, PolicySeed, RouterCallbackArgs, RouterDepositArgs, STABLECOIN_DEX_ADDRESS,
-    WithdrawalArgs, ZoneAccount, ZoneCreationConfig, ZoneTestNode, fetch_submit_batch_call,
-    poll_until, seed_raw_tip403_policy, seed_raw_tip403_token_policy, spawn_sequencer,
-    spawn_sequencer_with_config, start_real_p2p_cluster, start_real_p2p_cluster_with_active_nodes,
-    start_real_p2p_cluster_with_deposit_allowlist,
+    WithdrawalArgs, ZoneAccount, ZoneCreationConfig, ZoneTestNode, deposit_allowlist_admin,
+    fetch_submit_batch_call, poll_until, seed_raw_tip403_policy, seed_raw_tip403_token_policy,
+    spawn_sequencer, spawn_sequencer_with_config, start_real_p2p_cluster,
+    start_real_p2p_cluster_with_active_nodes, start_real_p2p_cluster_with_deposit_allowlist,
 };
 use alloy::{
     primitives::{Address, B256, U256},
@@ -26,7 +26,7 @@ use tempo_contracts::zones::{
 };
 use tempo_precompiles::{PATH_USD_ADDRESS, zone_factory::portal};
 use zone_node::{
-    DepositAllowlist,
+    DepositAllowlist, DepositAllowlistAdmin,
     dev::{ProvisionConfig, provision_zone},
 };
 
@@ -2517,8 +2517,15 @@ async fn test_deposit_allowlist_bounces_unlisted_senders() -> eyre::Result<()> {
     let datadir = tempfile::tempdir()?;
     let seed = datadir.path().join("seed.json");
     std::fs::write(&seed, serde_json::to_vec(&[listed_signer.address()])?)?;
-    let allowlist =
-        DepositAllowlist::load(datadir.path().join("deposit-allowlist.json"), Some(&seed))?;
+    // This test changes the list in process, so no admin signs RPC writes.
+    let allowlist = DepositAllowlist::load(
+        datadir.path().join("deposit-allowlist.json"),
+        Some(&seed),
+        DepositAllowlistAdmin {
+            address: Address::ZERO,
+            zone_chain_id: 0,
+        },
+    )?;
 
     let zone = ZoneTestNode::start_from_l1_with_deposit_allowlist(
         l1.http_url(),
@@ -2584,13 +2591,48 @@ async fn get_deposit_allowlist(node: &ZoneTestNode) -> eyre::Result<Vec<Address>
         .await?)
 }
 
+mod allowlist_admin {
+    alloy::sol! {
+        struct SetDepositAllowed {
+            address[] addresses;
+            bool allowed;
+            uint64 deadline;
+        }
+    }
+}
+
+/// Call `zoneAdmin_setDepositAllowed` with a write `signer` authorizes for the next minute.
 async fn set_deposit_allowed(
     node: &ZoneTestNode,
+    signer: &alloy::signers::local::PrivateKeySigner,
+    zone_chain_id: u64,
     addresses: &[Address],
     allowed: bool,
 ) -> eyre::Result<()> {
+    use alloy::{signers::SignerSync as _, sol_types::SolStruct as _};
+
+    let deadline = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)?
+        .as_secs()
+        + 60;
+    let domain = alloy::sol_types::eip712_domain! {
+        name: "TempoZoneDepositAllowlist",
+        version: "1",
+        chain_id: zone_chain_id,
+    };
+    let hash = allowlist_admin::SetDepositAllowed {
+        addresses: addresses.to_vec(),
+        allowed,
+        deadline,
+    }
+    .eip712_signing_hash(&domain);
+    let signature =
+        alloy::primitives::Bytes::copy_from_slice(&signer.sign_hash_sync(&hash)?.as_bytes());
     node.provider()
-        .raw_request::<_, ()>("zoneAdmin_setDepositAllowed".into(), (addresses, allowed))
+        .raw_request::<_, ()>(
+            "zoneAdmin_setDepositAllowed".into(),
+            (addresses, allowed, deadline, signature),
+        )
         .await?;
     Ok(())
 }
@@ -2608,6 +2650,7 @@ async fn test_rpc_node_relays_deposit_allowlist_to_every_sequencer() -> eyre::Re
     let (first, second) = (first_signer.address(), second_signer.address());
     let fixture = start_real_p2p_cluster_with_deposit_allowlist(4, 3, &[first]).await?;
     let (cluster, rpc) = (&fixture.cluster, &fixture.rpc_node);
+    let (admin, zone_chain_id) = (deposit_allowlist_admin(), fixture.zone_chain_id);
 
     // The relay fails until the RPC node has connected to every sequencer.
     let listed = poll_until(
@@ -2619,9 +2662,23 @@ async fn test_rpc_node_relays_deposit_allowlist_to_every_sequencer() -> eyre::Re
     .await?;
     assert_eq!(listed, vec![first]);
 
+    // A write not signed by the admin is rejected by every sequencer.
+    let error = set_deposit_allowed(rpc, &second_signer, zone_chain_id, &[second], true)
+        .await
+        .expect_err("a write signed by a non-admin must fail")
+        .to_string();
+    assert_eq!(
+        error.matches("not the allowlist admin").count(),
+        3,
+        "every sequencer must reject the write: {error}"
+    );
+    for node in &cluster.nodes {
+        assert_eq!(get_deposit_allowlist(node).await?, vec![first]);
+    }
+
     // Swap the listed sender in one write each way, so the expected list is unambiguous.
-    set_deposit_allowed(rpc, &[second], true).await?;
-    set_deposit_allowed(rpc, &[first], false).await?;
+    set_deposit_allowed(rpc, &admin, zone_chain_id, &[second], true).await?;
+    set_deposit_allowed(rpc, &admin, zone_chain_id, &[first], false).await?;
     for (index, node) in cluster.nodes.iter().enumerate() {
         assert_eq!(
             get_deposit_allowlist(node).await?,
@@ -2681,6 +2738,7 @@ async fn test_rpc_node_allowlist_write_fails_with_offline_sequencer() -> eyre::R
     let added = crate::utils::signer_at(4).address();
     let fixture = start_real_p2p_cluster_with_deposit_allowlist(4, 2, &[]).await?;
     let (cluster, rpc) = (&fixture.cluster, &fixture.rpc_node);
+    let admin = deposit_allowlist_admin();
 
     // Until the RPC node connects to both online sequencers, the error lists them as well.
     let error = poll_until(
@@ -2688,7 +2746,7 @@ async fn test_rpc_node_allowlist_write_fails_with_offline_sequencer() -> eyre::R
         Duration::from_millis(500),
         "relayed write missing only the offline sequencer",
         || async {
-            let error = set_deposit_allowed(rpc, &[added], true)
+            let error = set_deposit_allowed(rpc, &admin, fixture.zone_chain_id, &[added], true)
                 .await
                 .expect_err("a write cannot reach the offline sequencer")
                 .to_string();

@@ -4049,14 +4049,22 @@ struct RealP2pClusterParts {
 
 struct DepositAllowlistParts {
     rpc_node: ZoneTestNode,
+    zone_chain_id: u64,
     datadir: tempfile::TempDir,
 }
 
-/// Three-member P2P quorum whose sequencers enforce a deposit allowlist, plus an RPC-only node
-/// that relays `zoneAdmin` calls to them.
+/// Signer the deposit allowlist test cluster accepts `zoneAdmin` writes from.
+pub(crate) fn deposit_allowlist_admin() -> PrivateKeySigner {
+    PrivateKeySigner::from_bytes(&B256::repeat_byte(0xad)).expect("valid test admin key")
+}
+
+/// Three-member P2P quorum whose sequencers enforce a deposit allowlist administered by
+/// [`deposit_allowlist_admin`], plus an RPC-only node that relays `zoneAdmin` calls to them.
 pub(crate) struct DepositAllowlistP2pCluster {
     pub(crate) cluster: RealP2pCluster,
     pub(crate) rpc_node: ZoneTestNode,
+    /// EIP-712 domain chain ID for admin signatures.
+    pub(crate) zone_chain_id: u64,
     _datadir: tempfile::TempDir,
 }
 
@@ -4083,6 +4091,7 @@ pub(crate) async fn start_real_p2p_cluster_with_deposit_allowlist(
     Ok(DepositAllowlistP2pCluster {
         cluster: parts.cluster,
         rpc_node: allowlist.rpc_node,
+        zone_chain_id: allowlist.zone_chain_id,
         _datadir: allowlist.datadir,
     })
 }
@@ -4255,6 +4264,10 @@ async fn start_real_p2p_cluster_inner(
         .transpose()?;
     let _ = std::fs::remove_dir_all(&config_dir);
     let allowlist_datadir = tempfile::tempdir()?;
+    let allowlist_admin = zone_node::DepositAllowlistAdmin {
+        address: deposit_allowlist_admin().address(),
+        zone_chain_id: zone_chain_id(l1.provider().get_chain_id().await?, zone_id)?,
+    };
     let deposit_allowlists = match deposit_allowlist_seed {
         Some(seed) => {
             let seed_path = allowlist_datadir.path().join("seed.json");
@@ -4266,6 +4279,7 @@ async fn start_real_p2p_cluster_inner(
                             .path()
                             .join(format!("node-{index}-deposit-allowlist.json")),
                         Some(&seed_path),
+                        allowlist_admin,
                     )
                     .map(Some)
                 })
@@ -4315,6 +4329,7 @@ async fn start_real_p2p_cluster_inner(
                     None,
                 )
                 .await?,
+            zone_chain_id: allowlist_admin.zone_chain_id,
             datadir: allowlist_datadir,
         }),
         None => None,

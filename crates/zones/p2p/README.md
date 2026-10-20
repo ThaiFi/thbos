@@ -291,12 +291,18 @@ temporary leader disconnections.
 ## Deposit allowlist relay
 
 Sequencers started with `--deposits.allowlist` serve the `zoneAdmin` allowlist methods on their
-operator RPC. An rpc-follower serves the same methods and relays each call to every quorum member
-on a dedicated channel. Each member applies the call to its own persisted list and acknowledges
-it. The call returns only after every member acknowledges, and fails naming the members that did
-not; members that already applied a failed write keep it. Callers must send writes one at a
-time, because writes relayed concurrently through different rpc-followers may apply in different
-orders on different members.
+operator RPC. Each write carries an EIP-712 signature from the `--deposits.allowlist.admin`
+address with a deadline at most 10 minutes ahead; a sequencer rejects any other write. An
+rpc-follower serves the same methods and relays each request unchanged to every quorum member on
+a dedicated channel, so it needs no key. Each member checks the signature, applies the write to its
+own persisted list, and acknowledges it. The call returns only after every member acknowledges,
+and fails naming the members that did not; members that already applied a failed write keep it.
+Callers must send writes one at a time, because concurrent writes may apply in different orders
+on different members.
+
+Requests and acknowledgements must fit in one 4 MiB frame, so the list is capped at 80,000
+addresses. Senders check sizes before sending, because a receiver blocks a peer that sends an
+oversized frame.
 
 Upgrade every node before calling these methods through an rpc-follower: Commonware disconnects a
 peer that sends on a channel the receiver does not register.
