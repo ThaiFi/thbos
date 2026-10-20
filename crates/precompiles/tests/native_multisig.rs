@@ -209,7 +209,7 @@ fn derive_account_charges_input_and_proof_hashing_gas() {
             let config = config(B256::ZERO, 0, 1, &owners);
             let proof_gas = keccak(config.account_salt_preimage_len())
                 + keccak(MULTISIG_ACCOUNT_CREATE2_PREIMAGE_LEN);
-            assert_eq!(initial_account_proof_gas(&config), proof_gas);
+            assert_eq!(initial_account_proof_gas(&config).unwrap(), proof_gas);
 
             let calldata = INativeMultisig::deriveAccountCall {
                 salt: B256::ZERO,

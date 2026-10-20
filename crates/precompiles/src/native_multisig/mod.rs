@@ -3,11 +3,10 @@
 pub mod dispatch;
 
 use crate::{
-    error::Result,
-    storage::{ConfigCommitmentWriteGas, Handler},
+    error::{Result, TempoPrecompileError},
+    storage::{ConfigCommitmentWriteGas, Handler, keccak_cost},
 };
 use alloy::primitives::{Address, B256};
-use revm::interpreter::gas::{KECCAK256, KECCAK256WORD};
 pub use tempo_chainspec::is_valid_native_account as valid_account;
 use tempo_contracts::precompiles::{
     INativeMultisig, NATIVE_MULTISIG_ADDRESS, NativeMultisigError, NativeMultisigEvent,
@@ -53,7 +52,7 @@ impl NativeMultisig {
         let config = config(salt, 0, threshold, owners);
         config.validate()?;
         self.storage
-            .deduct_gas(initial_account_proof_gas(&config))?;
+            .deduct_gas(initial_account_proof_gas(&config)?)?;
         let account = config.derive_account(factory)?;
         if !valid_account(account, self.storage.spec()) {
             return Err(NativeMultisigError::invalid_account().into());
@@ -188,15 +187,13 @@ pub enum UpgradeEligibility {
     PrimitiveRoot,
 }
 
-/// Gas for one `KECCAK256` over `bytes` bytes of input.
-pub const fn keccak_cost(bytes: usize) -> u64 {
-    KECCAK256 + KECCAK256WORD * bytes.div_ceil(32) as u64
-}
-
 /// Hashing cost of deriving an unregistered account from its initial configuration.
-pub const fn initial_account_proof_gas(config: &MultisigConfig) -> u64 {
-    keccak_cost(config.account_salt_preimage_len())
-        + keccak_cost(MULTISIG_ACCOUNT_CREATE2_PREIMAGE_LEN)
+///
+/// Fails with `OutOfGas` if the cost overflows `u64`.
+pub fn initial_account_proof_gas(config: &MultisigConfig) -> Result<u64> {
+    keccak_cost(config.account_salt_preimage_len())?
+        .checked_add(keccak_cost(MULTISIG_ACCOUNT_CREATE2_PREIMAGE_LEN)?)
+        .ok_or(TempoPrecompileError::OutOfGas)
 }
 
 fn config(
