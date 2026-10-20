@@ -179,7 +179,7 @@ impl NativeMultisig {
 
     fn factory(&self) -> Result<Address> {
         self.storage
-            .with_block_env(TempoBlockEnv::configured_multisig_recovery_factory)
+            .with_block_env(TempoBlockEnv::configurable_account_recovery_factory)
             .ok_or_else(|| NativeMultisigError::invalid_config().into())
     }
 }

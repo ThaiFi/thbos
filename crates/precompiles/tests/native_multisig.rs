@@ -192,7 +192,7 @@ fn derive_account_charges_input_and_proof_hashing_gas() {
     let mut cfg = CfgEnv::<TempoHardfork>::default();
     cfg.set_spec_and_mainnet_gas_params(TempoHardfork::T14);
     let block_env = TempoBlockEnv {
-        multisig_recovery_factory: Some(FACTORY),
+        configurable_account_recovery_factory: Some(FACTORY),
         ..Default::default()
     };
     let mut evm = TempoEvm::new(

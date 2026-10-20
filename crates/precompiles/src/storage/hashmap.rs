@@ -474,6 +474,6 @@ impl HashMapStorageProvider {
 
     /// Selects an explicit recovery factory for native-account test fixtures.
     pub fn set_multisig_recovery_factory(&mut self, factory: Address) {
-        self.block_env.multisig_recovery_factory = Some(factory);
+        self.block_env.configurable_account_recovery_factory = Some(factory);
     }
 }
