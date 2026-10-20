@@ -414,10 +414,24 @@ jobs:
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           repository: tempoxyz/tempo-multi-region-benchmark
-          ref: ${{ github.repository == 'tempoxyz/tempo-multi-region-benchmark' && github.sha || 'main' }}
+          ref: 674e967862673c74037bc1e7464110aea94f7f9d
           path: ${{ env.BENCH_REPO_DIR }}
           token: ${{ steps.github-sts.outputs.token }}
           persist-credentials: false
+
+      - name: Disable archive snapshot promotion
+        run: |
+          python3 - <<'PYTHON'
+          import os
+          from pathlib import Path
+
+          path = Path(os.environ["BENCH_REPO_DIR"]) / "terraform/templates/validator_user_data.sh.tftpl"
+          source = path.read_text()
+          needle = '    run_prepare_step "promote_schelk" "promoting schelk scratch to virgin baseline" /usr/local/bin/schelk promote --yes'
+          assert source.count(needle) == 1, "Benchmark bootstrap changed; inspect it before running."
+          source = source.replace(needle, '    echo "Archive snapshot promotion is disabled for this benchmark." >&2\n    return 1')
+          path.write_text(source)
+          PYTHON
 
       - name: Resolve baseline and feature refs
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
