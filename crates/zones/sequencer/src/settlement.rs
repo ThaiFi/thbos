@@ -376,7 +376,7 @@ impl BatchSubmitter {
     ///
     /// The zone imports L1 blocks over its own connection, which can reach a different L1 node
     /// than this submitter's provider. While the submitter's L1 tip is behind the batch's Tempo
-    /// block, the tip is re-read with exponential backoff for up to [`L1_TIP_WAIT_ATTEMPTS`]
+    /// block, the tip is re-read with exponential backoff for up to `L1_TIP_WAIT_ATTEMPTS`
     /// reads before returning an error.
     pub async fn prepare_batch(&self, batch: BatchData) -> Result<PreparedBatch> {
         let tempo_block_number = batch.tempo_block_number;
