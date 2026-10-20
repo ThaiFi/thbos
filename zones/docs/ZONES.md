@@ -386,8 +386,10 @@ same `initialized`, `nonce`, and `listHash` hold the same list.
 #### Adding, replacing, or restoring a sequencer
 
 Once access mode is off, an uninitialized sequencer credits every deposit while it leads, and
-a sequencer restored with an old file enforces an old list. Before such a sequencer joins the
-leader rotation:
+a sequencer restored with an old file enforces an old list. Nothing monitors for this, so treat
+the file as part of every sequencer change: if a sequencer fails irreparably and its datadir is
+replaced, bring `deposit-allowlist.json` over with it. Before such a sequencer joins the leader
+rotation:
 
 1. Copy `deposit-allowlist.json` from a healthy sequencer into its datadir. The file holds no
    node-specific data, and copying the nonce keeps old writes from being replayed.
