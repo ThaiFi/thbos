@@ -980,3 +980,34 @@ jobs:
               fi
             done < "$RUNNER_TEMP/benchmark-instances.tsv"
           done
+
+      - name: Read owned benchmark progress metrics
+        env:
+          BENCHMARK_METRICS_QUERY_URL: ${{ secrets.VICTORIAMETRICS_URL }}
+        run: |
+          python3 - <<'PY'
+          import base64, json, os, urllib.error, urllib.parse, urllib.request
+          base = os.environ.get("BENCHMARK_METRICS_QUERY_URL", "")
+          if not base:
+              print("Metrics query endpoint is not configured")
+              raise SystemExit(0)
+          parsed = urllib.parse.urlsplit(base)
+          hostname = parsed.hostname or ""
+          netloc = hostname + (f":{parsed.port}" if parsed.port else "")
+          endpoint = urllib.parse.urlunsplit((parsed.scheme, netloc, parsed.path.rstrip("/") + "/api/v1/query", "", ""))
+          headers = {}
+          if parsed.username:
+              credentials = urllib.parse.unquote(parsed.username) + ":" + urllib.parse.unquote(parsed.password or "")
+              headers["Authorization"] = "Basic " + base64.b64encode(credentials.encode()).decode()
+          for run_id in os.environ["BENCHMARK_RUN_IDS"].split(","):
+              assert run_id.isdigit()
+              query = '{benchmark_id="bench-e2e-multi-region-' + run_id + '-1",__name__=~".*(height|current_view|build_duration_count|resident_memory_bytes|cpu_seconds_total).*"}'
+              request = urllib.request.Request(endpoint + "?" + urllib.parse.urlencode({"query": query}), headers=headers)
+              try:
+                  with urllib.request.urlopen(request, timeout=20) as response:
+                      result = json.load(response)
+                  rows = result.get("data", {}).get("result", [])
+                  print(json.dumps({"run_id": run_id, "status": result.get("status"), "samples": [{"name": row["metric"].get("__name__"), "node": row["metric"].get("validator_index"), "phase": row["metric"].get("benchmark_phase"), "value": row.get("value")} for row in rows[:120]]}))
+              except Exception as error:
+                  print(json.dumps({"run_id": run_id, "query_error": type(error).__name__}))
+          PY
