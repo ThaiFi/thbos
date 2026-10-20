@@ -296,8 +296,6 @@ where
             application,
             marshal_mailbox.clone(),
             epoch_strategy.clone(),
-            self.verification_mode,
-            execution_node.chain_spec(),
         );
 
         let epoch_manager_config = epoch::manager::Config {

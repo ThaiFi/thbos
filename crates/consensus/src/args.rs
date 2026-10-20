@@ -35,13 +35,13 @@ pub enum VerificationMode {
     Immediate,
     /// Defer completion of application verification until voting to finalize.
     Deferred,
-    /// Follow the hardfork schedule: immediate before T14, deferred from T14.
+    /// Follow T14 at the previous epoch boundary: deferred at or after activation.
     #[default]
     Hardfork,
 }
 
 impl VerificationMode {
-    /// Resolves the hardfork policy or explicit override for a proposal timestamp.
+    /// Resolves the policy using the previous epoch boundary timestamp (genesis for epoch zero).
     pub(crate) fn is_deferred_at(self, chainspec: &TempoChainSpec, timestamp: u64) -> bool {
         match self {
             Self::Immediate => false,
@@ -142,7 +142,8 @@ pub struct Args {
 
     /// When to complete application verification of proposed blocks.
     ///
-    /// Hardfork follows the chain schedule (immediate before T14, deferred from T14).
+    /// Hardfork uses the previous epoch boundary timestamp (genesis for epoch zero):
+    /// immediate before T14, deferred from T14.
     /// Immediate and deferred override the schedule.
     #[arg(long = "consensus.verification-mode", value_enum, default_value_t)]
     pub verification_mode: VerificationMode,
@@ -742,7 +743,7 @@ mod tests {
             .join("\n");
         assert_eq!(
             help,
-            "When to complete application verification of proposed blocks.\n\nHardfork follows the chain schedule (immediate before T14, deferred from T14). Immediate and deferred override the schedule.\n\n[default: hardfork]\n[possible values: immediate, deferred, hardfork]"
+            "When to complete application verification of proposed blocks.\n\nHardfork uses the previous epoch boundary timestamp (genesis for epoch zero): immediate before T14, deferred from T14. Immediate and deferred override the schedule.\n\n[default: hardfork]\n[possible values: immediate, deferred, hardfork]"
         );
     }
 
