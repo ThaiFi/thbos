@@ -648,6 +648,23 @@ fn malformed_inputs_are_classified_rather_than_executed() {
         ErrorClass::InvalidInput
     );
 
+    // Code with the EIP-7702 prefix that is not a valid delegation, in either kind of pre-state.
+    let malformed = StateInput {
+        accounts: BTreeMap::from([(
+            RECIPIENT,
+            AccountInput {
+                code: Bytes::from_static(&[0xef, 0x01, 0x00]),
+                ..Default::default()
+            },
+        )]),
+    };
+    for pre_state in [PreState::Genesis(malformed.clone()), exact(malformed)] {
+        assert_eq!(
+            error(pre_state, vec![transfer_block()]),
+            ErrorClass::InvalidInput
+        );
+    }
+
     // Senders that do not match the transactions, and transactions that do not decode.
     let mut mismatched = transfer_block();
     mismatched.senders.push(SENDER);

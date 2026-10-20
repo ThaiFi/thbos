@@ -124,12 +124,13 @@ static GENESIS: LazyLock<CacheState> = LazyLock::new(|| {
                 .map(|(slot, value)| ((*slot).into(), (*value).into()))
                 .collect(),
         };
-        insert(&mut cache, *address, &account);
+        insert(&mut cache, *address, &account).expect("the dev genesis code is well-formed");
     }
     cache
 });
 
-/// `pre_state` as a database. `InvalidInput` if a genesis pre-state overrides a genesis account.
+/// `pre_state` as a database. `InvalidInput` if a genesis pre-state overrides a genesis account, or
+/// if an account's code starts with the EIP-7702 prefix `0xef01` but is not a valid delegation.
 pub(crate) fn seed(pre_state: &PreState) -> Result<Db, ErrorClass> {
     let (state, mut cache, exact) = match pre_state {
         PreState::Genesis(state) => {
@@ -145,7 +146,7 @@ pub(crate) fn seed(pre_state: &PreState) -> Result<Db, ErrorClass> {
         PreState::Exact { state, .. } => (state, CacheState::new(), true),
     };
     for (address, account) in &state.accounts {
-        insert(&mut cache, *address, account);
+        insert(&mut cache, *address, account)?;
     }
     let mut db = State::builder()
         .with_database(WrapDatabaseRef(PreStateDb {
@@ -172,20 +173,28 @@ fn is_empty(account: &AccountInput) -> bool {
 }
 
 /// Inserts `account`, its code and the slots the pre-state holds for it, or records that it does not
-/// exist if it holds nothing. Other slots are read from the database below.
-fn insert(cache: &mut CacheState, address: Address, account: &AccountInput) {
+/// exist if it holds nothing. Other slots are read from the database below. `InvalidInput` if its
+/// code is a malformed EIP-7702 delegation.
+fn insert(
+    cache: &mut CacheState,
+    address: Address,
+    account: &AccountInput,
+) -> Result<(), ErrorClass> {
     if is_empty(account) {
         cache.insert_not_existing(address);
-        return;
+        return Ok(());
     }
+    let code =
+        Bytecode::new_raw_checked(account.code.clone()).map_err(|_| ErrorClass::InvalidInput)?;
     let info = AccountInfo::from_balance(account.balance)
         .with_nonce(account.nonce)
-        .with_code(Bytecode::new_raw(account.code.clone()));
+        .with_code(code);
     if let Some(code) = &info.code {
         cache.contracts.insert(info.code_hash, code.clone());
     }
     let storage = account.storage.iter().map(|(slot, value)| (*slot, *value));
     cache.insert_account_with_storage(address, info, storage.collect());
+    Ok(())
 }
 
 /// The net changes recorded since the last call: the state transitions of one execution step.
