@@ -336,10 +336,9 @@ fn storage_unavailable(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use reth_primitives_traits::Account as RethAccount;
-    use reth_trie_common::{
-        EMPTY_ROOT_HASH, HashedPostState, LeafNode, Nibbles, TrieAccount, TrieNode,
-    };
+    use evm2::{PendingState, evm::StateChangeSource};
+    use reth_execution_types::{BlockState, TransactionChanges};
+    use reth_trie_common::{EMPTY_ROOT_HASH, LeafNode, Nibbles, TrieAccount, TrieNode};
     use tempo_contracts::TempoHardfork;
     use tempo_primitives::account::{decode_config_commitment, encode_config_commitment};
 
@@ -364,16 +363,19 @@ mod tests {
                 bytecodes: Vec::new(),
             };
             let mut database = WitnessDatabase::from_zone_state_witness(witness, root).unwrap();
-            let info = database.basic(address).unwrap().unwrap();
+            let info = database.get_account(&address).unwrap().unwrap();
             assert_eq!(
                 decode_config_commitment(&info.extension, TempoHardfork::T14),
                 Ok(commitment)
             );
-            let mut state = HashedPostState::default();
-            state
-                .accounts
-                .insert(keccak256(address), Some(RethAccount::from(info)));
-            assert_eq!(database.state.calculate_state_root(state), Ok(root));
+            // Commit the account back through the production EVM2 -> reth bundle path.
+            let mut changes = PendingState::default();
+            changes.insert_account(address, None, Some(info));
+            let mut transaction = TransactionChanges::default();
+            changes.visit(&mut transaction).unwrap();
+            let mut block = BlockState::new();
+            block.commit(&transaction);
+            assert_eq!(database.state_root(&block.into_bundle()), Ok(root));
         }
     }
 
