@@ -8,6 +8,7 @@ use std::{cell::RefCell, thread_local};
 
 use alloy_primitives::{Address, B256};
 use tempo_contracts::zones::ZoneOutboxError;
+use tempo_precompiles::storage::StorageCtx;
 
 use crate::ZoneResult;
 
@@ -52,8 +53,11 @@ pub(crate) fn current_transaction() -> Option<(B256, Address)> {
     })
 }
 
-/// Consume one withdrawal attempt across success and all call-frame reverts.
+/// From T13, consume one withdrawal attempt across success and all call-frame reverts.
 pub(crate) fn consume_withdrawal_attempt() -> ZoneResult<()> {
+    if !StorageCtx.spec().is_t13() {
+        return Ok(());
+    }
     CURRENT_TRANSACTION.with(|slot| {
         let mut slot = slot.borrow_mut();
         let context = slot
@@ -72,31 +76,48 @@ pub(crate) fn consume_withdrawal_attempt() -> ZoneResult<()> {
 mod tests {
     use super::*;
 
+    use tempo_chainspec::hardfork::TempoHardfork;
+    use tempo_precompiles::storage::hashmap::HashMapStorageProvider;
+
     #[test]
     fn withdrawal_allowance_requires_context_and_resets_for_each_execution() {
-        assert_eq!(
-            consume_withdrawal_attempt(),
-            Err(ZoneOutboxError::invalid_current_tx_hash().into())
-        );
-        // Simulations may reuse the same synthetic hash; each execution still gets an allowance.
-        for _ in 0..2 {
-            let guard = set_current_transaction(B256::repeat_byte(0xff), Address::ZERO);
-            assert_eq!(
-                current_transaction(),
-                Some((B256::repeat_byte(0xff), Address::ZERO))
-            );
-            assert_eq!(consume_withdrawal_attempt(), Ok(()));
+        let mut storage = HashMapStorageProvider::new_with_spec(1, TempoHardfork::T13);
+        StorageCtx::enter(&mut storage, || {
             assert_eq!(
                 consume_withdrawal_attempt(),
-                Err(ZoneOutboxError::withdrawal_already_attempted().into())
+                Err(ZoneOutboxError::invalid_current_tx_hash().into())
             );
-            drop(guard);
-            assert_eq!(current_transaction(), None);
-        }
-        let _guard = set_current_transaction(B256::ZERO, Address::ZERO);
-        assert_eq!(
-            consume_withdrawal_attempt(),
-            Err(ZoneOutboxError::invalid_current_tx_hash().into())
-        );
+            // Simulations may reuse the same synthetic hash; each execution still gets an allowance.
+            for _ in 0..2 {
+                let guard = set_current_transaction(B256::repeat_byte(0xff), Address::ZERO);
+                assert_eq!(
+                    current_transaction(),
+                    Some((B256::repeat_byte(0xff), Address::ZERO))
+                );
+                assert_eq!(consume_withdrawal_attempt(), Ok(()));
+                assert_eq!(
+                    consume_withdrawal_attempt(),
+                    Err(ZoneOutboxError::withdrawal_already_attempted().into())
+                );
+                drop(guard);
+                assert_eq!(current_transaction(), None);
+            }
+            let _guard = set_current_transaction(B256::ZERO, Address::ZERO);
+            assert_eq!(
+                consume_withdrawal_attempt(),
+                Err(ZoneOutboxError::invalid_current_tx_hash().into())
+            );
+        });
+    }
+
+    #[test]
+    fn withdrawal_allowance_is_not_consumed_before_t13() {
+        let mut storage = HashMapStorageProvider::new_with_spec(1, TempoHardfork::T12);
+        StorageCtx::enter(&mut storage, || {
+            assert_eq!(consume_withdrawal_attempt(), Ok(()));
+            let _guard = set_current_transaction(B256::repeat_byte(0xff), Address::ZERO);
+            assert_eq!(consume_withdrawal_attempt(), Ok(()));
+            assert_eq!(consume_withdrawal_attempt(), Ok(()));
+        });
     }
 }
