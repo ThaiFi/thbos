@@ -291,12 +291,13 @@ where
             proposal_return_budget: self.proposal_return_budget,
             epoch_strategy: epoch_strategy.clone(),
         });
-        let application = application::Marshaled::new(
+        let application = application::Application::new(
             context.child("application"),
             application,
             marshal_mailbox.clone(),
             epoch_strategy.clone(),
             self.verification_mode,
+            execution_node.chain_spec(),
         );
 
         let epoch_manager_config = epoch::manager::Config {
