@@ -795,6 +795,7 @@ mod tests {
             timestamp,
             timestamp_millis_part,
             beneficiary: Address::ZERO,
+            gas_limit: 30_000_000,
             tempo_import: checkpoint_import(vec![Bytes::from([0x01])]),
             finalize_withdrawal_batch_count: None,
             finalize_withdrawal_batch_encrypted_senders: Vec::new(),
@@ -916,6 +917,7 @@ mod tests {
                 timestamp: 100,
                 timestamp_millis_part: 0,
                 beneficiary: Address::ZERO,
+                gas_limit: 30_000_000,
                 tempo_import: full_import(Bytes::from([0x01])),
                 finalize_withdrawal_batch_count: Some(U256::ZERO),
                 finalize_withdrawal_batch_encrypted_senders: Vec::new(),
@@ -937,6 +939,7 @@ mod tests {
             timestamp: 100,
             timestamp_millis_part: 0,
             beneficiary: Address::ZERO,
+            gas_limit: 30_000_000,
             tempo_import: full_import(Bytes::from([0x01])),
             finalize_withdrawal_batch_count: None,
             finalize_withdrawal_batch_encrypted_senders: Vec::new(),
@@ -956,6 +959,7 @@ mod tests {
             timestamp: 100,
             timestamp_millis_part: 0,
             beneficiary: Address::ZERO,
+            gas_limit: 30_000_000,
             tempo_import: checkpoint_import(vec![Bytes::from([0x01]), Bytes::from([0x02])]),
             finalize_withdrawal_batch_count: None,
             finalize_withdrawal_batch_encrypted_senders: Vec::new(),
@@ -979,6 +983,7 @@ mod tests {
             timestamp: 0,
             timestamp_millis_part: 0,
             beneficiary: Address::ZERO,
+            gas_limit: 30_000_000,
             tempo_import: checkpoint_import(Vec::new()),
             finalize_withdrawal_batch_count: None,
             finalize_withdrawal_batch_encrypted_senders: Vec::new(),
@@ -1067,7 +1072,7 @@ mod tests {
         parent: &TempoHeader,
         block: &ZoneBlock,
     ) -> Result<alloy_evm::EvmEnv<TempoHardfork, TempoBlockEnv>, Error> {
-        let attributes = next_block_env_attributes(config.chain_spec().as_ref(), parent, block)?;
+        let attributes = next_block_env_attributes(config.chain_spec().as_ref(), block)?;
         let env = ZoneEvmConfig::new(config.chain_spec().clone(), tempo_database, config.portal())
             .next_evm_env(parent, &attributes)
             .map_err(|_| Error::EvmEnvironment)?;
@@ -1238,6 +1243,7 @@ mod tests {
             timestamp: 0,
             timestamp_millis_part: 321,
             beneficiary: Address::ZERO,
+            gas_limit: 30_000_001,
             tempo_import: full_import(witness.tempo_state_witness.initial_tempo_header_rlp.clone()),
             finalize_withdrawal_batch_count: Some(U256::ZERO),
             finalize_withdrawal_batch_encrypted_senders: Vec::new(),
@@ -1245,16 +1251,13 @@ mod tests {
         };
 
         let config = test_config();
-        let attributes = execution::evm::next_block_env_attributes(
-            config.chain_spec().as_ref(),
-            &witness.parent_header,
-            &block,
-        )
-        .unwrap();
+        let attributes =
+            execution::evm::next_block_env_attributes(config.chain_spec().as_ref(), &block)
+                .unwrap();
 
         assert_eq!(attributes.timestamp, 0);
         assert_eq!(attributes.suggested_fee_recipient, Address::ZERO);
-        assert_eq!(attributes.gas_limit, 30_000_000);
+        assert_eq!(attributes.gas_limit, 30_000_001);
         assert_eq!(attributes.general_gas_limit, 0);
         assert_eq!(attributes.shared_gas_limit, 0);
         assert_eq!(attributes.timestamp_millis_part, 321);
@@ -1266,6 +1269,7 @@ mod tests {
             next_block_evm_env(&config, tempo_database, &witness.parent_header, &block).unwrap();
         assert_eq!(env.cfg_env.chain_id, config.chain_spec().chain_id());
         assert_eq!(env.block_env.inner.basefee, 0);
+        assert_eq!(env.block_env.inner.gas_limit, 30_000_001);
     }
 
     #[test]
@@ -1280,6 +1284,7 @@ mod tests {
                 timestamp: 0,
                 timestamp_millis_part: 0,
                 beneficiary: Address::ZERO,
+                gas_limit: 30_000_000,
                 tempo_import: TempoImport::Full {
                     header_rlp: Bytes::from([0x01]),
                     deposits: vec![
@@ -1321,6 +1326,7 @@ mod tests {
             timestamp: 0,
             timestamp_millis_part: 0,
             beneficiary: Address::ZERO,
+            gas_limit: 30_000_000,
             tempo_import: full_import(Bytes::from([0x01])),
             finalize_withdrawal_batch_count: None,
             finalize_withdrawal_batch_encrypted_senders: Vec::new(),
@@ -1350,6 +1356,7 @@ mod tests {
             timestamp: 0,
             timestamp_millis_part: 0,
             beneficiary: Address::ZERO,
+            gas_limit: 30_000_000,
             tempo_import: checkpoint_import(vec![Bytes::from([0x01])]),
             finalize_withdrawal_batch_count: None,
             finalize_withdrawal_batch_encrypted_senders: Vec::new(),
@@ -1368,6 +1375,7 @@ mod tests {
             timestamp: 0,
             timestamp_millis_part: 0,
             beneficiary: Address::ZERO,
+            gas_limit: 30_000_000,
             tempo_import: full_import(Bytes::from([0x01])),
             finalize_withdrawal_batch_count: Some(U256::ZERO),
             finalize_withdrawal_batch_encrypted_senders: Vec::new(),
@@ -1394,6 +1402,7 @@ mod tests {
             timestamp: 0,
             timestamp_millis_part: 0,
             beneficiary: Address::ZERO,
+            gas_limit: 30_000_000,
             tempo_import: full_import(Bytes::from([0x01])),
             finalize_withdrawal_batch_count: Some(U256::ZERO),
             finalize_withdrawal_batch_encrypted_senders: Vec::new(),
