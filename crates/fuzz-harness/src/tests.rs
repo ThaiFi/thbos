@@ -9,7 +9,7 @@ use commonware_codec::Encode as _;
 use revm::{Database as _, database::BundleState};
 use tempo_chainspec::hardfork::{TempoHardfork, TempoHardforks};
 use tempo_contracts::precompiles::{CURRENT_COMMITTEE_ADDRESS, ITIP20, PATH_USD_ADDRESS};
-use tempo_dkg_onchain_artifacts::test_utils::dealt_outcome;
+use tempo_dkg_onchain_artifacts::OnchainDkgOutcome;
 use tempo_evm::{TempoEvmConfig, consensus::TempoConsensus};
 use tempo_fuzz_types::{
     AccountDiff, AccountInput, BlockContextInput, BlockHeaderInput, ChainSpecInput, ErrorClass,
@@ -493,7 +493,7 @@ fn an_epoch_boundary_block_updates_the_committee_after_its_transactions() {
         let block = block(BlockHeaderInput::Context(context), Vec::new());
         run(ChainSpecInput::default(), genesis(), vec![block])
     };
-    let outcome = boundary(dealt_outcome(1, 3).encode().to_vec().into());
+    let outcome = boundary(OnchainDkgOutcome::dealt(1, 3).encode().to_vec().into());
     assert_eq!(outcome.error, ErrorClass::None);
     let committee = |changes: &StateChanges| {
         changes

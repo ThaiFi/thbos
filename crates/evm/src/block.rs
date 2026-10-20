@@ -755,7 +755,7 @@ mod tests {
             ZONE_MESSENGER_RUNTIME, ZONE_PORTAL_RUNTIME, ZONE_VERIFIER_RUNTIME,
         },
     };
-    use tempo_dkg_onchain_artifacts::test_utils::dealt_outcome;
+    use tempo_dkg_onchain_artifacts::OnchainDkgOutcome;
     use tempo_primitives::{
         SubBlockMetadata, TempoSignature, TempoTransaction, TempoTxType,
         subblock::{SubBlockVersion, TEMPO_SUBBLOCK_NONCE_KEY_PREFIX},
@@ -951,7 +951,7 @@ mod tests {
         let mut db = State::builder().with_bundle_update().build();
         let mut previous_keys = Vec::new();
         for epoch in [1, 2] {
-            let outcome = dealt_outcome(epoch, 3);
+            let outcome = OnchainDkgOutcome::dealt(epoch, 3);
             let expected_keys = outcome
                 .players()
                 .iter()
@@ -1489,7 +1489,7 @@ mod tests {
     fn test_current_committee_system_call_writes_boundary_outcome() {
         let chainspec = test_chainspec();
         let mut db = State::builder().with_bundle_update().build();
-        let outcome = dealt_outcome(42, 3);
+        let outcome = OnchainDkgOutcome::dealt(42, 3);
         let expected_public_keys = outcome
             .players()
             .iter()
