@@ -9,11 +9,19 @@ use tempo_primitives::transaction::{
     MULTISIG_ACCOUNT_DOMAIN, MULTISIG_CONFIG_DOMAIN, MULTISIG_SIGNATURE_DOMAIN, MultisigConfig,
     MultisigConfigError, MultisigOwner, MultisigQuorumError, MultisigSignature,
     MultisigSignatureError, MultisigWeightAccumulator, PrimitiveSignature, SIGNATURE_TYPE_MULTISIG,
-    TempoSignature, multisig_digest, tt_signature::WebAuthnSignature,
+    TempoSignature, multisig_digest,
+    tt_signature::{SIGNATURE_TYPE_WEBAUTHN, WebAuthnSignature},
 };
 
 // Deliberately non-production factory fixture: TIP-1110 has not selected its public address.
 const TEST_FACTORY: Address = Address::repeat_byte(0x99);
+
+/// An encoding that multisig signature decoding rejects, with the error it reports.
+struct MalformedEncoding {
+    case: &'static str,
+    encoded: Vec<u8>,
+    error: RlpError,
+}
 
 /// A zero-salt config holding the `(owner, weight)` entries in the order given.
 fn multisig_config(version: u64, threshold: u8, owners: &[(Address, u8)]) -> MultisigConfig {
@@ -45,19 +53,19 @@ fn indexed_owners(count: usize, weight: u8) -> Vec<(Address, u8)> {
 
 /// A secp256k1 owner approval with fixed scalars: decoding checks its shape, not its signer.
 fn owner_approval() -> PrimitiveSignature {
-    PrimitiveSignature::Secp256k1(Signature::new(U256::from(1), U256::from(2), false))
+    PrimitiveSignature::Secp256k1(Signature::new(U256::ONE, U256::from(2), false))
 }
 
-/// A WebAuthn owner approval whose encoding is `encoded_len` bytes: the type byte, the
-/// authenticator data and four 32-byte fields.
+/// The bytes of an all-zero WebAuthn owner approval `encoded_len` bytes long: the type byte,
+/// then the authenticator data and four 32-byte fields.
+fn webauthn_approval_bytes(encoded_len: usize) -> Vec<u8> {
+    [vec![SIGNATURE_TYPE_WEBAUTHN], vec![0; encoded_len - 1]].concat()
+}
+
+/// The WebAuthn owner approval decoded from [`webauthn_approval_bytes`]; decoding accepts
+/// lengths up to the size cap.
 fn webauthn_approval(encoded_len: usize) -> PrimitiveSignature {
-    PrimitiveSignature::WebAuthn(WebAuthnSignature {
-        webauthn_data: Bytes::from(vec![0; encoded_len - 1 - 4 * 32]),
-        r: B256::ZERO,
-        s: B256::ZERO,
-        pub_key_x: B256::ZERO,
-        pub_key_y: B256::ZERO,
-    })
+    PrimitiveSignature::from_bytes(&webauthn_approval_bytes(encoded_len)).unwrap()
 }
 
 fn encoded_multisig(
@@ -99,13 +107,18 @@ fn nested_multisig_encoding(levels: usize) -> Vec<u8> {
     current
 }
 
-/// Encodings that multisig signature decoding rejects, each with the message of its error.
-fn malformed_multisig_encodings() -> Vec<(&'static str, Vec<u8>, String)> {
+/// The error decoding reports for an encoding that breaks `rule`: the rule's message.
+fn decode_error(rule: MultisigSignatureError) -> RlpError {
+    // `RlpError::Custom` holds a `&'static str`, which a variant gives only through `Display`.
+    RlpError::Custom(Box::leak(rule.to_string().into_boxed_str()))
+}
+
+fn malformed_multisig_encodings() -> Vec<MalformedEncoding> {
     let account = indexed_owner(1);
     let config = current_config(indexed_owner(2));
     let approval = owner_approval().to_bytes().to_vec();
     // A nested multisig or keychain approval carries a type byte no primitive signature has.
-    let unknown_type = RlpError::Custom("Unknown signature type identifier").to_string();
+    let unknown_type = RlpError::Custom("Unknown signature type identifier");
     let keychain_owner = |keychain: KeychainSignature| {
         encoded_multisig(
             account,
@@ -114,71 +127,73 @@ fn malformed_multisig_encodings() -> Vec<(&'static str, Vec<u8>, String)> {
         )
     };
     vec![
-        (
-            "a nested multisig owner",
-            nested_multisig_encoding(2),
-            unknown_type.clone(),
-        ),
-        (
-            "two levels of nested multisig owners",
-            nested_multisig_encoding(3),
-            unknown_type.clone(),
-        ),
-        (
-            "4096 levels of nested multisig owners",
-            nested_multisig_encoding(4096),
-            unknown_type.clone(),
-        ),
-        (
-            "a keychain owner",
-            keychain_owner(KeychainSignature::new(indexed_owner(2), owner_approval())),
-            unknown_type.clone(),
-        ),
-        (
-            "a v1 keychain owner",
-            keychain_owner(KeychainSignature::new_v1(
+        MalformedEncoding {
+            case: "a nested multisig owner",
+            encoded: nested_multisig_encoding(2),
+            error: unknown_type,
+        },
+        MalformedEncoding {
+            case: "two levels of nested multisig owners",
+            encoded: nested_multisig_encoding(3),
+            error: unknown_type,
+        },
+        MalformedEncoding {
+            case: "4096 levels of nested multisig owners",
+            encoded: nested_multisig_encoding(4096),
+            error: unknown_type,
+        },
+        MalformedEncoding {
+            case: "a keychain owner",
+            encoded: keychain_owner(KeychainSignature::new(indexed_owner(2), owner_approval())),
+            error: unknown_type,
+        },
+        MalformedEncoding {
+            case: "a v1 keychain owner",
+            encoded: keychain_owner(KeychainSignature::new_v1(
                 indexed_owner(2),
                 owner_approval(),
             )),
-            unknown_type,
-        ),
-        (
-            "an invalid config",
-            encoded_multisig(account, &multisig_config(0, 0, &[]), vec![approval.clone()]),
-            MultisigSignatureError::InvalidConfig(MultisigConfigError::EmptyOwners).to_string(),
-        ),
-        (
-            "more owners than the cap",
-            encoded_multisig(
+            error: unknown_type,
+        },
+        MalformedEncoding {
+            case: "an invalid config",
+            encoded: encoded_multisig(account, &multisig_config(0, 0, &[]), vec![approval.clone()]),
+            error: decode_error(MultisigSignatureError::InvalidConfig(
+                MultisigConfigError::EmptyOwners,
+            )),
+        },
+        MalformedEncoding {
+            case: "more owners than the cap",
+            encoded: encoded_multisig(
                 account,
                 &multisig_config(0, 8, &indexed_owners(MAX_MULTISIG_OWNERS + 1, 1)),
                 vec![approval.clone()],
             ),
-            MultisigSignatureError::InvalidConfig(MultisigConfigError::TooManyOwners).to_string(),
-        ),
-        (
-            "more approvals than the cap",
-            encoded_multisig(
+            error: decode_error(MultisigSignatureError::InvalidConfig(
+                MultisigConfigError::TooManyOwners,
+            )),
+        },
+        MalformedEncoding {
+            case: "more approvals than the cap",
+            encoded: encoded_multisig(
                 account,
                 &config,
                 vec![approval; MAX_MULTISIG_SIGNATURES + 1],
             ),
-            MultisigSignatureError::TooManySignatures.to_string(),
-        ),
+            error: decode_error(MultisigSignatureError::TooManySignatures),
+        },
         // The primitive decoder bounds a WebAuthn approval before the owner size cap applies.
-        (
-            "an approval over the size cap",
-            encoded_multisig(
+        MalformedEncoding {
+            case: "an approval over the size cap",
+            encoded: encoded_multisig(
                 account,
                 &config,
-                vec![
-                    webauthn_approval(MAX_MULTISIG_OWNER_SIGNATURE_BYTES + 1)
-                        .to_bytes()
-                        .to_vec(),
-                ],
+                vec![webauthn_approval_bytes(
+                    MAX_MULTISIG_OWNER_SIGNATURE_BYTES + 1,
+                )],
             ),
-            RlpError::Custom("Invalid WebAuthn signature length").to_string(),
-        ),
+            error: RlpError::Custom("Invalid WebAuthn signature length"),
+        },
     ]
 }
 
@@ -247,140 +262,152 @@ fn config_validation_reports_the_first_broken_rule() {
         owners
     };
 
-    for (case, config, for_account, expected) in [
-        (
-            "no owners, before the threshold",
-            multisig_config(0, 0, &[]),
-            None,
-            Err(MultisigConfigError::EmptyOwners),
-        ),
-        (
-            "more owners than the cap, before the threshold",
-            multisig_config(0, 0, &indexed_owners(MAX_MULTISIG_OWNERS + 1, 1)),
-            None,
-            Err(MultisigConfigError::TooManyOwners),
-        ),
-        (
-            "as many owners as the cap",
-            multisig_config(0, 8, &indexed_owners(MAX_MULTISIG_OWNERS, 1)),
-            None,
-            Ok(48),
-        ),
-        (
-            "a zero threshold, before every owner entry",
-            multisig_config(0, 0, &[(Address::ZERO, 0)]),
-            None,
-            Err(MultisigConfigError::ZeroThreshold),
-        ),
-        (
-            "a zero owner anywhere, before an earlier zero weight",
-            multisig_config(0, 1, &[(low, 0), (Address::ZERO, 1)]),
-            None,
-            Err(MultisigConfigError::ZeroOwner),
-        ),
-        (
-            "a zero weight",
-            multisig_config(0, 1, &[(low, 1), (high, 0)]),
-            None,
-            Err(MultisigConfigError::ZeroWeight),
-        ),
-        (
-            "a zero weight, before ordering",
-            multisig_config(0, 1, &[(high, 1), (low, 0)]),
-            None,
-            Err(MultisigConfigError::ZeroWeight),
-        ),
-        (
-            "an adjacent duplicate",
-            multisig_config(0, 1, &[(low, 1), (low, 1)]),
-            None,
-            Err(MultisigConfigError::DuplicateOwner),
-        ),
-        (
-            "a nonadjacent duplicate",
-            multisig_config(0, 1, &[(low, 1), (high, 1), (low, 1)]),
-            None,
-            Err(MultisigConfigError::DuplicateOwner),
-        ),
-        (
-            "descending owners, before the weight total",
-            multisig_config(0, 1, &[(high, 128), (low, 128)]),
-            None,
-            Err(MultisigConfigError::OwnersNotAscending),
-        ),
-        (
-            "ascending owners",
-            multisig_config(0, 2, &[(low, 1), (high, 2)]),
-            None,
-            Ok(3),
-        ),
-        (
-            "the largest threshold and total weight",
-            multisig_config(0, u8::MAX, &[(low, u8::MAX)]),
-            None,
-            Ok(u8::MAX),
-        ),
+    struct ConfigCase {
+        case: &'static str,
+        config: MultisigConfig,
+        for_account: Option<Address>,
+        expected: Result<u8, MultisigConfigError>,
+    }
+
+    for ConfigCase {
+        case,
+        config,
+        for_account,
+        expected,
+    } in [
+        ConfigCase {
+            case: "no owners, before the threshold",
+            config: multisig_config(0, 0, &[]),
+            for_account: None,
+            expected: Err(MultisigConfigError::EmptyOwners),
+        },
+        ConfigCase {
+            case: "more owners than the cap, before the threshold",
+            config: multisig_config(0, 0, &indexed_owners(MAX_MULTISIG_OWNERS + 1, 1)),
+            for_account: None,
+            expected: Err(MultisigConfigError::TooManyOwners),
+        },
+        ConfigCase {
+            case: "as many owners as the cap",
+            config: multisig_config(0, 8, &indexed_owners(MAX_MULTISIG_OWNERS, 1)),
+            for_account: None,
+            expected: Ok(48),
+        },
+        ConfigCase {
+            case: "a zero threshold, before every owner entry",
+            config: multisig_config(0, 0, &[(Address::ZERO, 0)]),
+            for_account: None,
+            expected: Err(MultisigConfigError::ZeroThreshold),
+        },
+        ConfigCase {
+            case: "a zero owner anywhere, before an earlier zero weight",
+            config: multisig_config(0, 1, &[(low, 0), (Address::ZERO, 1)]),
+            for_account: None,
+            expected: Err(MultisigConfigError::ZeroOwner),
+        },
+        ConfigCase {
+            case: "a zero weight",
+            config: multisig_config(0, 1, &[(low, 1), (high, 0)]),
+            for_account: None,
+            expected: Err(MultisigConfigError::ZeroWeight),
+        },
+        ConfigCase {
+            case: "a zero weight, before ordering",
+            config: multisig_config(0, 1, &[(high, 1), (low, 0)]),
+            for_account: None,
+            expected: Err(MultisigConfigError::ZeroWeight),
+        },
+        ConfigCase {
+            case: "an adjacent duplicate",
+            config: multisig_config(0, 1, &[(low, 1), (low, 1)]),
+            for_account: None,
+            expected: Err(MultisigConfigError::DuplicateOwner),
+        },
+        ConfigCase {
+            case: "a nonadjacent duplicate",
+            config: multisig_config(0, 1, &[(low, 1), (high, 1), (low, 1)]),
+            for_account: None,
+            expected: Err(MultisigConfigError::DuplicateOwner),
+        },
+        ConfigCase {
+            case: "descending owners, before the weight total",
+            config: multisig_config(0, 1, &[(high, 128), (low, 128)]),
+            for_account: None,
+            expected: Err(MultisigConfigError::OwnersNotAscending),
+        },
+        ConfigCase {
+            case: "ascending owners",
+            config: multisig_config(0, 2, &[(low, 1), (high, 2)]),
+            for_account: None,
+            expected: Ok(3),
+        },
+        ConfigCase {
+            case: "the largest threshold and total weight",
+            config: multisig_config(0, u8::MAX, &[(low, u8::MAX)]),
+            for_account: None,
+            expected: Ok(u8::MAX),
+        },
         // The eight heaviest of nine owners of weight 29 cannot reach the threshold either.
-        (
-            "a weight total past u8::MAX, before reachability",
-            multisig_config(0, u8::MAX, &indexed_owners(MAX_MULTISIG_SIGNATURES + 1, 29)),
-            None,
-            Err(MultisigConfigError::TotalWeightExceedsMax),
-        ),
-        (
-            "the eight heaviest owners reach the threshold, light owner first",
-            multisig_config(0, 240, &one_light_owner(0)),
-            None,
-            Ok(241),
-        ),
-        (
-            "the eight heaviest owners reach the threshold, light owner in the middle",
-            multisig_config(0, 240, &one_light_owner(4)),
-            None,
-            Ok(241),
-        ),
-        (
-            "the eight heaviest owners reach the threshold, light owner last",
-            multisig_config(0, 240, &one_light_owner(MAX_MULTISIG_SIGNATURES)),
-            None,
-            Ok(241),
-        ),
-        (
-            "a threshold past the eight heaviest owners",
-            multisig_config(0, 241, &one_light_owner(0)),
-            None,
-            Err(MultisigConfigError::ThresholdExceedsWeight),
-        ),
-        (
-            "an initial config owning its account",
-            multisig_config(0, 1, &[(account, 1)]),
-            Some(account),
-            Err(MultisigConfigError::AccountIsOwner),
-        ),
-        (
-            "self-ownership, before its own zero weight",
-            multisig_config(0, 1, &[(account, 0)]),
-            Some(account),
-            Err(MultisigConfigError::AccountIsOwner),
-        ),
-        (
-            "self-ownership anywhere, before an earlier zero weight",
-            multisig_config(0, 1, &[(high, 0), (account, 1)]),
-            Some(account),
-            Err(MultisigConfigError::AccountIsOwner),
-        ),
-        (
-            "a later version owning its account",
-            multisig_config(1, 1, &[(account, 1)]),
-            Some(account),
-            Ok(1),
-        ),
-        (
-            "the last version owning its account",
-            multisig_config(u64::MAX, 1, &[(account, 1)]),
-            Some(account),
-            Ok(1),
-        ),
+        ConfigCase {
+            case: "a weight total past u8::MAX, before reachability",
+            config: multisig_config(0, u8::MAX, &indexed_owners(MAX_MULTISIG_SIGNATURES + 1, 29)),
+            for_account: None,
+            expected: Err(MultisigConfigError::TotalWeightExceedsMax),
+        },
+        ConfigCase {
+            case: "the eight heaviest owners reach the threshold, light owner first",
+            config: multisig_config(0, 240, &one_light_owner(0)),
+            for_account: None,
+            expected: Ok(241),
+        },
+        ConfigCase {
+            case: "the eight heaviest owners reach the threshold, light owner in the middle",
+            config: multisig_config(0, 240, &one_light_owner(4)),
+            for_account: None,
+            expected: Ok(241),
+        },
+        ConfigCase {
+            case: "the eight heaviest owners reach the threshold, light owner last",
+            config: multisig_config(0, 240, &one_light_owner(MAX_MULTISIG_SIGNATURES)),
+            for_account: None,
+            expected: Ok(241),
+        },
+        ConfigCase {
+            case: "a threshold past the eight heaviest owners",
+            config: multisig_config(0, 241, &one_light_owner(0)),
+            for_account: None,
+            expected: Err(MultisigConfigError::ThresholdExceedsWeight),
+        },
+        ConfigCase {
+            case: "an initial config owning its account",
+            config: multisig_config(0, 1, &[(account, 1)]),
+            for_account: Some(account),
+            expected: Err(MultisigConfigError::AccountIsOwner),
+        },
+        ConfigCase {
+            case: "self-ownership, before its own zero weight",
+            config: multisig_config(0, 1, &[(account, 0)]),
+            for_account: Some(account),
+            expected: Err(MultisigConfigError::AccountIsOwner),
+        },
+        ConfigCase {
+            case: "self-ownership anywhere, before an earlier zero weight",
+            config: multisig_config(0, 1, &[(high, 0), (account, 1)]),
+            for_account: Some(account),
+            expected: Err(MultisigConfigError::AccountIsOwner),
+        },
+        ConfigCase {
+            case: "a later version owning its account",
+            config: current_config(account),
+            for_account: Some(account),
+            expected: Ok(1),
+        },
+        ConfigCase {
+            case: "the last version owning its account",
+            config: multisig_config(u64::MAX, 1, &[(account, 1)]),
+            for_account: Some(account),
+            expected: Ok(1),
+        },
     ] {
         match for_account {
             Some(account) => {
@@ -406,67 +433,88 @@ fn multisig_signature_construction_reports_the_first_broken_rule() {
     let config = current_config(indexed_owner(2));
     let empty_config = multisig_config(0, 0, &[]);
     let largest = webauthn_approval(MAX_MULTISIG_OWNER_SIGNATURE_BYTES);
-    let oversized = webauthn_approval(MAX_MULTISIG_OWNER_SIGNATURE_BYTES + 1);
+    // Decoding rejects an approval over the size cap, so it is built field by field.
+    let oversized = PrimitiveSignature::WebAuthn(WebAuthnSignature {
+        webauthn_data: Bytes::from(vec![0; MAX_MULTISIG_OWNER_SIGNATURE_BYTES - 4 * 32]),
+        r: B256::ZERO,
+        s: B256::ZERO,
+        pub_key_x: B256::ZERO,
+        pub_key_y: B256::ZERO,
+    });
     assert_eq!(largest.encoded_length(), MAX_MULTISIG_OWNER_SIGNATURE_BYTES);
     assert_eq!(
         oversized.encoded_length(),
         MAX_MULTISIG_OWNER_SIGNATURE_BYTES + 1
     );
 
-    for (case, account, config, approvals, expected) in [
-        (
-            "a zero account, before the config and the approvals",
-            Address::ZERO,
-            empty_config.clone(),
-            Vec::new(),
-            Err(MultisigSignatureError::ZeroAccount),
-        ),
-        (
-            "an invalid config, before the approvals",
+    struct ConstructionCase {
+        case: &'static str,
+        account: Address,
+        config: MultisigConfig,
+        approvals: Vec<PrimitiveSignature>,
+        expected: Result<(), MultisigSignatureError>,
+    }
+
+    for ConstructionCase {
+        case,
+        account,
+        config,
+        approvals,
+        expected,
+    } in [
+        ConstructionCase {
+            case: "a zero account, before the config and the approvals",
+            account: Address::ZERO,
+            config: empty_config.clone(),
+            approvals: Vec::new(),
+            expected: Err(MultisigSignatureError::ZeroAccount),
+        },
+        ConstructionCase {
+            case: "an invalid config, before the approvals",
             account,
-            empty_config,
-            Vec::new(),
-            Err(MultisigSignatureError::InvalidConfig(
+            config: empty_config,
+            approvals: Vec::new(),
+            expected: Err(MultisigSignatureError::InvalidConfig(
                 MultisigConfigError::EmptyOwners,
             )),
-        ),
-        (
-            "initial self-ownership of the named account",
+        },
+        ConstructionCase {
+            case: "initial self-ownership of the named account",
             account,
-            multisig_config(0, 1, &[(account, 1)]),
-            vec![owner_approval()],
-            Err(MultisigSignatureError::InvalidConfig(
+            config: multisig_config(0, 1, &[(account, 1)]),
+            approvals: vec![owner_approval()],
+            expected: Err(MultisigSignatureError::InvalidConfig(
                 MultisigConfigError::AccountIsOwner,
             )),
-        ),
-        (
-            "no approvals",
+        },
+        ConstructionCase {
+            case: "no approvals",
             account,
-            config.clone(),
-            Vec::new(),
-            Err(MultisigSignatureError::EmptySignatures),
-        ),
-        (
-            "more approvals than the cap, before their sizes",
+            config: config.clone(),
+            approvals: Vec::new(),
+            expected: Err(MultisigSignatureError::EmptySignatures),
+        },
+        ConstructionCase {
+            case: "more approvals than the cap, before their sizes",
             account,
-            config.clone(),
-            vec![oversized.clone(); MAX_MULTISIG_SIGNATURES + 1],
-            Err(MultisigSignatureError::TooManySignatures),
-        ),
-        (
-            "an approval over the size cap after one within it",
+            config: config.clone(),
+            approvals: vec![oversized.clone(); MAX_MULTISIG_SIGNATURES + 1],
+            expected: Err(MultisigSignatureError::TooManySignatures),
+        },
+        ConstructionCase {
+            case: "an approval over the size cap after one within it",
             account,
-            config.clone(),
-            vec![owner_approval(), oversized],
-            Err(MultisigSignatureError::OwnerSignatureTooLarge),
-        ),
-        (
-            "as many approvals of the largest size as the caps allow",
+            config: config.clone(),
+            approvals: vec![owner_approval(), oversized],
+            expected: Err(MultisigSignatureError::OwnerSignatureTooLarge),
+        },
+        ConstructionCase {
+            case: "as many approvals of the largest size as the caps allow",
             account,
             config,
-            vec![largest; MAX_MULTISIG_SIGNATURES],
-            Ok(()),
-        ),
+            approvals: vec![largest; MAX_MULTISIG_SIGNATURES],
+            expected: Ok(()),
+        },
     ] {
         assert_eq!(
             MultisigSignature::try_new(account, config, approvals.clone())
@@ -502,10 +550,15 @@ fn multisig_signature_rlp_roundtrips_and_rejects_malformed_encodings() {
     );
     assert_eq!(decode_exact::<MultisigSignature>(&encoded), Ok(signature));
 
-    for (case, encoded, expected) in malformed_multisig_encodings() {
+    for MalformedEncoding {
+        case,
+        encoded,
+        error,
+    } in malformed_multisig_encodings()
+    {
         assert_eq!(
-            MultisigSignature::decode(&mut encoded.as_slice()).map_err(|error| error.to_string()),
-            Err(expected),
+            MultisigSignature::decode(&mut encoded.as_slice()),
+            Err(error),
             "{case}"
         );
     }
@@ -685,68 +738,85 @@ fn multisig_quorum_reports_the_first_broken_rule() {
     let light = (first, 1);
     let heavy = (second, 3);
 
-    for (case, threshold, approvals, expected) in [
-        (
-            "a zero threshold",
-            0,
-            Vec::new(),
-            Err(MultisigQuorumError::ZeroThreshold),
-        ),
-        (
-            "no approvals",
-            1,
-            Vec::new(),
-            Err(MultisigQuorumError::EmptySignatures),
-        ),
-        (
-            "a signer of zero weight, read as outside the owner set",
-            2,
-            vec![(first, 0)],
-            Err(MultisigQuorumError::SignerNotOwner),
-        ),
-        (
-            "a repeated owner",
-            2,
-            vec![light, light],
-            Err(MultisigQuorumError::SignersNotAscending),
-        ),
-        (
-            "descending owners",
-            4,
-            vec![heavy, light],
-            Err(MultisigQuorumError::SignersNotAscending),
-        ),
-        (
-            "more approvals than the cap below quorum, before ordering",
-            u8::MAX,
-            [indexed_owners(MAX_MULTISIG_SIGNATURES, 1), vec![light]].concat(),
-            Err(MultisigQuorumError::TooManySignatures),
-        ),
-        (
-            "as many approvals as the cap",
-            u8::try_from(MAX_MULTISIG_SIGNATURES).unwrap(),
-            indexed_owners(MAX_MULTISIG_SIGNATURES, 1),
-            Ok(()),
-        ),
-        (
-            "an approval after quorum",
-            1,
-            vec![light, heavy],
-            Err(MultisigQuorumError::ExcessSignatures),
-        ),
-        (
-            "an approval after quorum, before its entry is checked",
-            1,
-            vec![light, (Address::ZERO, 0)],
-            Err(MultisigQuorumError::ExcessSignatures),
-        ),
-        (
-            "weight below the threshold",
-            4,
-            vec![heavy],
-            Err(MultisigQuorumError::WeightBelowThreshold),
-        ),
-        ("weight at the threshold", 4, vec![light, heavy], Ok(())),
+    struct QuorumCase {
+        case: &'static str,
+        threshold: u8,
+        approvals: Vec<(Address, u8)>,
+        expected: Result<(), MultisigQuorumError>,
+    }
+
+    for QuorumCase {
+        case,
+        threshold,
+        approvals,
+        expected,
+    } in [
+        QuorumCase {
+            case: "a zero threshold",
+            threshold: 0,
+            approvals: Vec::new(),
+            expected: Err(MultisigQuorumError::ZeroThreshold),
+        },
+        QuorumCase {
+            case: "no approvals",
+            threshold: 1,
+            approvals: Vec::new(),
+            expected: Err(MultisigQuorumError::EmptySignatures),
+        },
+        QuorumCase {
+            case: "a signer of zero weight, read as outside the owner set",
+            threshold: 2,
+            approvals: vec![(first, 0)],
+            expected: Err(MultisigQuorumError::SignerNotOwner),
+        },
+        QuorumCase {
+            case: "a repeated owner",
+            threshold: 2,
+            approvals: vec![light, light],
+            expected: Err(MultisigQuorumError::SignersNotAscending),
+        },
+        QuorumCase {
+            case: "descending owners",
+            threshold: 4,
+            approvals: vec![heavy, light],
+            expected: Err(MultisigQuorumError::SignersNotAscending),
+        },
+        QuorumCase {
+            case: "more approvals than the cap below quorum, before ordering",
+            threshold: u8::MAX,
+            approvals: [indexed_owners(MAX_MULTISIG_SIGNATURES, 1), vec![light]].concat(),
+            expected: Err(MultisigQuorumError::TooManySignatures),
+        },
+        QuorumCase {
+            case: "as many approvals as the cap",
+            threshold: u8::try_from(MAX_MULTISIG_SIGNATURES).unwrap(),
+            approvals: indexed_owners(MAX_MULTISIG_SIGNATURES, 1),
+            expected: Ok(()),
+        },
+        QuorumCase {
+            case: "an approval after quorum",
+            threshold: 1,
+            approvals: vec![light, heavy],
+            expected: Err(MultisigQuorumError::ExcessSignatures),
+        },
+        QuorumCase {
+            case: "an approval after quorum, before its entry is checked",
+            threshold: 1,
+            approvals: vec![light, (Address::ZERO, 0)],
+            expected: Err(MultisigQuorumError::ExcessSignatures),
+        },
+        QuorumCase {
+            case: "weight below the threshold",
+            threshold: 4,
+            approvals: vec![heavy],
+            expected: Err(MultisigQuorumError::WeightBelowThreshold),
+        },
+        QuorumCase {
+            case: "weight at the threshold",
+            threshold: 4,
+            approvals: vec![light, heavy],
+            expected: Ok(()),
+        },
     ] {
         assert_eq!(quorum(threshold, approvals), expected, "{case}");
     }
@@ -755,8 +825,8 @@ fn multisig_quorum_reports_the_first_broken_rule() {
 #[cfg(feature = "serde")]
 mod serde_json_and_binary {
     use super::{
-        MultisigSignature, RlpError, current_config, indexed_owner, malformed_multisig_encodings,
-        owner_approval,
+        MalformedEncoding, MultisigSignature, RlpError, current_config, indexed_owner,
+        malformed_multisig_encodings, owner_approval,
     };
     use alloy_primitives::{Address, Bytes};
     use serde::{
@@ -796,10 +866,15 @@ mod serde_json_and_binary {
 
     #[test]
     fn multisig_signature_serde_rejects_malformed_encodings() {
-        for (case, encoded, expected) in malformed_multisig_encodings() {
+        for MalformedEncoding {
+            case,
+            encoded,
+            error,
+        } in malformed_multisig_encodings()
+        {
             assert_eq!(
                 decode_binary_multisig(&encoded),
-                Err(DeError::custom(&expected)),
+                Err(DeError::custom(error)),
                 "{case}"
             );
             let json = to_value(Bytes::from(encoded)).unwrap();
@@ -807,7 +882,7 @@ mod serde_json_and_binary {
                 from_value::<MultisigSignature>(json)
                     .unwrap_err()
                     .to_string(),
-                expected,
+                error.to_string(),
                 "{case}"
             );
         }
