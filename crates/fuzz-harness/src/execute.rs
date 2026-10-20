@@ -10,12 +10,12 @@ use alloy_evm::{
     Evm as _, EvmEnv,
     block::{BlockExecutionError, BlockExecutor, TxResult as _},
 };
-use alloy_primitives::{Address, Bytes};
+use alloy_primitives::Address;
 use reth_consensus::Consensus as _;
 use reth_evm::ConfigureEvm;
 use reth_primitives_traits::{RecoveredBlock, transaction::signed::SignedTransaction as _};
 use revm::{
-    context::result::{ExecutionResult, ResultGas},
+    context::result::ExecutionResult,
     database::{BundleState, states::bundle_state::BundleRetention},
 };
 use tempo_chainspec::{TempoChainSpec, hardfork::TempoHardfork};
@@ -209,14 +209,6 @@ struct BlockOutputs {
     invariant_failures: Vec<InvariantFailure>,
 }
 
-/// What a transaction returned, beyond its receipt.
-struct TxOutput {
-    outcome: TxOutcome,
-    gas: ResultGas,
-    output: Bytes,
-    effective_gas_price: u128,
-}
-
 /// Executes `block` on `db`. Returns its changes and what it produced.
 fn execute_block(
     evm_config: &TempoEvmConfig,
@@ -238,7 +230,7 @@ fn execute_block(
 
     let mut outputs = BlockOutputs::default();
     let mut changes = BundleState::default();
-    let txs = execute_txs(
+    execute_txs(
         &mut executor,
         block,
         block_index,
@@ -246,29 +238,22 @@ fn execute_block(
         &mut outputs,
     )
     .map_err(|err| class(&err))?;
-    let (mut evm, result) = executor.finish().map_err(|err| class(&err))?;
+    let (mut evm, _) = executor.finish().map_err(|err| class(&err))?;
     let post_block = state::drain(evm.db_mut());
     outputs.changes.post_block = state::transition_changes(&post_block, &evm.db().cache.contracts);
     changes.apply_transitions_and_create_reverts(post_block, BundleRetention::PlainState);
-    outputs.receipts = result
-        .receipts
-        .iter()
-        .zip(txs)
-        .enumerate()
-        .map(|(tx_index, (receipt, tx))| receipt_output(block_index, tx_index as u64, receipt, tx))
-        .collect();
     Ok((changes, outputs))
 }
 
-/// Applies the block's pre-execution changes and its transactions, recording each step's changes
-/// and checking invariants after it.
+/// Applies the block's pre-execution changes and its transactions, recording each transaction's
+/// receipt and each step's changes, and checking invariants after each step.
 fn execute_txs<'db, E>(
     executor: &mut E,
     block: &ExecutionBlock,
     block_index: u64,
     changes: &mut BundleState,
     outputs: &mut BlockOutputs,
-) -> Result<Vec<TxOutput>, BlockExecutionError>
+) -> Result<(), BlockExecutionError>
 where
     E: BlockExecutor<
             Transaction = TempoTxEnvelope,
@@ -288,26 +273,37 @@ where
     );
 
     let basefee = block.header().base_fee_per_gas();
-    let mut txs = Vec::with_capacity(block.body().transactions.len());
     for (tx_index, tx) in block.transactions_recovered().enumerate() {
+        let tx_index = tx_index as u64;
         let effective_gas_price = tx.effective_gas_price(basefee);
         let result = executor.execute_transaction_without_commit(tx)?;
         let execution = &result.result().result;
-        let output = TxOutput {
-            outcome: match execution {
-                ExecutionResult::Success { .. } => TxOutcome::Success,
-                ExecutionResult::Revert { .. } => TxOutcome::Revert,
-                ExecutionResult::Halt { reason, .. } => TxOutcome::Halt(reason.clone()),
-            },
-            gas: *execution.gas(),
-            output: execution.output().cloned().unwrap_or_default(),
-            effective_gas_price,
+        let outcome = match execution {
+            ExecutionResult::Success { .. } => TxOutcome::Success,
+            ExecutionResult::Revert { .. } => TxOutcome::Revert,
+            ExecutionResult::Halt { reason, .. } => TxOutcome::Halt(reason.clone()),
         };
+        let gas = *execution.gas();
+        let output = execution.output().cloned().unwrap_or_default();
         executor.commit_transaction(result);
-        txs.push(output);
+        // `finish` returns the receipts the executor records here, unchanged.
+        let receipt = executor
+            .receipts()
+            .last()
+            .expect("committing a transaction records its receipt");
+        outputs.receipts.push(TxReceiptOutput {
+            block_index,
+            tx_index,
+            outcome,
+            gas,
+            cumulative_gas_used: receipt.cumulative_gas_used,
+            effective_gas_price,
+            output,
+            logs: receipt.logs.clone(),
+        });
         let scope = InvariantScope::Transaction {
             block_index,
-            tx_index: tx_index as u64,
+            tx_index,
         };
         let tx_changes = step(
             executor,
@@ -319,7 +315,7 @@ where
         );
         outputs.changes.txs.push(tx_changes);
     }
-    Ok(txs)
+    Ok(())
 }
 
 /// Ends an execution step: applies its transitions to `changes`, checks invariants at `scope` (only
@@ -338,10 +334,8 @@ where
     let db: &mut Db = executor.evm_mut().db_mut();
     let step = state::drain(db);
     let step_changes = state::transition_changes(&step, &db.cache.contracts);
-    let mut changed: Vec<Address> = step.transitions.keys().copied().collect();
-    changed.sort_unstable();
-    let changed = changed_only.then_some(changed.as_slice());
-    invariants::check(db, env, &scope, changed, failures);
+    let selected = |contract: &Address| !changed_only || step.transitions.contains_key(contract);
+    invariants::check(db, env, &scope, selected, failures);
     changes.apply_transitions_and_create_reverts(step, BundleRetention::PlainState);
     step_changes
 }
@@ -351,23 +345,5 @@ fn class(err: &BlockExecutionError) -> ErrorClass {
     match err {
         BlockExecutionError::Validation(_) => ErrorClass::Rejected,
         BlockExecutionError::Internal(_) => ErrorClass::Internal,
-    }
-}
-
-fn receipt_output(
-    block_index: u64,
-    tx_index: u64,
-    receipt: &TempoReceipt,
-    tx: TxOutput,
-) -> TxReceiptOutput {
-    TxReceiptOutput {
-        block_index,
-        tx_index,
-        outcome: tx.outcome,
-        gas: tx.gas,
-        cumulative_gas_used: receipt.cumulative_gas_used,
-        effective_gas_price: tx.effective_gas_price,
-        output: tx.output,
-        logs: receipt.logs.clone(),
     }
 }

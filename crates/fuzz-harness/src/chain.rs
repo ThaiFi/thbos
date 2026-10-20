@@ -10,8 +10,8 @@ use tempo_chainspec::{
 use tempo_fuzz_types::{BlockContextInput, BlockHeaderInput, ChainSpecInput, ErrorClass};
 use tempo_primitives::TempoHeader;
 
-/// The dev chain spec with `input`'s chain ID and hardfork schedule. A hardfork the schedule does
-/// not list activates at its variant index, or with the hardfork before it if that is later.
+/// The dev chain spec with `input`'s chain ID and hardfork schedule, as [`ChainSpecInput`]
+/// describes.
 pub(crate) fn chain_spec(input: &ChainSpecInput) -> Result<TempoChainSpec, ErrorClass> {
     let mut spec = tempo_chainspec::spec::DEV.as_ref().clone();
     spec.inner.chain = input.chain_id.into();

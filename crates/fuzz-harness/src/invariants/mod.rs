@@ -19,13 +19,13 @@ use tempo_primitives::TempoBlockEnv;
 use crate::state::{Db, PreStateDb};
 
 /// Appends to `failures` each invariant `db` breaks, at `scope`. `env` is the block's environment.
-/// `changed`, sorted, limits the check to contracts whose state changed, as no other contract's
-/// invariants can have broken; `None` checks every contract.
+/// Only contracts for which `selected` holds are checked, e.g. those whose state changed, as no
+/// other contract's invariants can have broken.
 pub(crate) fn check(
     db: &Db,
     env: &EvmEnv<TempoHardfork, TempoBlockEnv>,
     scope: &InvariantScope,
-    changed: Option<&[Address]>,
+    selected: impl Fn(&Address) -> bool,
     failures: &mut Vec<InvariantFailure>,
 ) {
     let pre_state = &db.database.0;
@@ -40,9 +40,7 @@ pub(crate) fn check(
     accounts.sort_unstable();
 
     let mut views = Views(TempoEvm::new(WrapDatabaseRef(db), env.clone()));
-    let changed =
-        |contract: &Address| changed.is_none_or(|changed| changed.binary_search(contract).is_ok());
-    for (id, message) in tip20::check(&mut views, &accounts, changed) {
+    for (id, message) in tip20::check(&mut views, &accounts, selected) {
         failures.push(InvariantFailure {
             id: id.to_string(),
             message,

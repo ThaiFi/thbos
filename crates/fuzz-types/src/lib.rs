@@ -2,14 +2,11 @@
 //! that load it. They are exchanged bincode-encoded across the harness's C ABI;
 //! [`TYPED_HARNESS_SCHEMA_VERSION`] changes with their encoding.
 
-use std::{collections::BTreeMap, fmt};
+use std::collections::BTreeMap;
 
 use alloy_primitives::{Address, B256, Bytes, Log, U256};
 use revm::context::result::{HaltReason, ResultGas};
-use serde::{
-    Deserialize, Deserializer, Serialize, Serializer,
-    de::{Error as DeError, SeqAccess, Visitor},
-};
+use serde::{Deserialize, Serialize};
 use tempo_hardfork::{TempoHardfork, constants::moderato::MODERATO_CHAIN_ID};
 
 pub type FuzzStatus = i32;
@@ -33,77 +30,26 @@ pub enum ErrorClass {
     IncompletePreState = 5,
 }
 
-#[derive(Clone, Debug, Eq, Hash, PartialEq)]
-pub struct NonEmpty<T> {
-    items: Vec<T>,
-}
+/// A sequence with at least one element.
+#[derive(Clone, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
+#[serde(try_from = "Vec<T>", bound(deserialize = "T: Deserialize<'de>"))]
+pub struct NonEmpty<T>(Vec<T>);
 
 impl<T> NonEmpty<T> {
-    pub fn new(items: Vec<T>) -> Result<Self, Vec<T>> {
-        if items.is_empty() {
-            Err(items)
-        } else {
-            Ok(Self { items })
-        }
-    }
-
     pub fn as_slice(&self) -> &[T] {
-        &self.items
+        &self.0
     }
 }
 
-impl<'de, T> Deserialize<'de> for NonEmpty<T>
-where
-    T: Deserialize<'de>,
-{
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        struct NonEmptyVisitor<T> {
-            marker: std::marker::PhantomData<T>,
+impl<T> TryFrom<Vec<T>> for NonEmpty<T> {
+    type Error = &'static str;
+
+    fn try_from(items: Vec<T>) -> Result<Self, Self::Error> {
+        if items.is_empty() {
+            Err("expected at least one element")
+        } else {
+            Ok(Self(items))
         }
-
-        impl<'de, T> Visitor<'de> for NonEmptyVisitor<T>
-        where
-            T: Deserialize<'de>,
-        {
-            type Value = NonEmpty<T>;
-
-            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-                formatter.write_str("a non-empty sequence")
-            }
-
-            fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
-            where
-                A: SeqAccess<'de>,
-            {
-                let first = seq
-                    .next_element()?
-                    .ok_or_else(|| A::Error::custom("expected at least one element"))?;
-                let mut items = vec![first];
-                while let Some(item) = seq.next_element()? {
-                    items.push(item);
-                }
-                Ok(NonEmpty { items })
-            }
-        }
-
-        deserializer.deserialize_seq(NonEmptyVisitor {
-            marker: std::marker::PhantomData,
-        })
-    }
-}
-
-impl<T> Serialize for NonEmpty<T>
-where
-    T: Serialize,
-{
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        self.items.serialize(serializer)
     }
 }
 

@@ -1,30 +1,36 @@
 use std::{collections::BTreeMap, sync::Arc};
 
-use alloy_consensus::{Signed, TxLegacy};
+use alloy_consensus::{Signed, TxLegacy, proofs::calculate_transaction_root};
 use alloy_eips::{Decodable2718, Encodable2718};
 use alloy_primitives::{Address, B256, Bytes, Signature, TxKind, U256, address};
 use alloy_sol_types::SolCall;
 use bincode::Options as _;
 use commonware_codec::Encode as _;
 use revm::{Database as _, database::BundleState};
-use tempo_chainspec::hardfork::{TempoHardfork, TempoHardforks};
+use tempo_chainspec::{
+    constants::moderato::MODERATO_CHAIN_ID,
+    hardfork::{TempoHardfork, TempoHardforks},
+};
 use tempo_contracts::precompiles::{CURRENT_COMMITTEE_ADDRESS, ITIP20, PATH_USD_ADDRESS};
 use tempo_dkg_onchain_artifacts::OnchainDkgOutcome;
 use tempo_evm::{TempoEvmConfig, consensus::TempoConsensus};
 use tempo_fuzz_types::{
     AccountDiff, AccountInput, BlockContextInput, BlockHeaderInput, ChainSpecInput, ErrorClass,
     FUZZ_ACCEPT, FUZZ_REJECT, InvariantScope, NonEmpty, PreState, StateChanges, StateInput,
-    TempoBlock, TempoBlockchainInput, TempoExecutionOutcome, TempoHarnessCapabilities,
-    TempoHarnessInput, TempoHarnessOutcome, TempoTransactionInput, TxOutcome,
+    StorageChangeOutput, TempoBlock, TempoBlockchainInput, TempoExecutionOutcome,
+    TempoHarnessCapabilities, TempoHarnessInput, TempoHarnessOutcome, TempoTransactionInput,
+    TxOutcome,
 };
 use tempo_precompiles::tip20::slots::{SUPPLY_CAP, TOTAL_SUPPLY};
-use tempo_primitives::TempoTxEnvelope;
+use tempo_primitives::{TempoHeader, TempoTxEnvelope};
 
 use crate::{bincode_options, chain, execute, state};
 
 /// Dev account 0, funded with pathUSD in the dev genesis.
 const SENDER: Address = address!("f39Fd6e51aad88F6F4ce6aB8827279cffFb92266");
 const RECIPIENT: Address = address!("00000000000000000000000000000000000000aa");
+/// The chain ID of [`ChainSpecInput::default`].
+const CHAIN_ID: u64 = MODERATO_CHAIN_ID;
 
 fn transfer(chain_id: u64, nonce: u64, amount: u64) -> Bytes {
     tip20_transfer(chain_id, nonce, RECIPIENT, U256::from(amount), 1_000_000)
@@ -70,28 +76,56 @@ fn block(header: BlockHeaderInput, txs: Vec<Bytes>) -> TempoBlock {
     }
 }
 
-fn transfer_block() -> TempoBlock {
-    let chain_id = ChainSpecInput::default().chain_id;
+/// A block at T4 holding `txs` from [`SENDER`].
+fn t4_block(txs: Vec<Bytes>) -> TempoBlock {
     block(
         BlockHeaderInput::Context(context(TempoHardfork::T4, 0)),
-        vec![transfer(chain_id, 0, 7)],
+        txs,
     )
 }
 
-fn run(
-    chain: ChainSpecInput,
-    pre_state: PreState,
-    blocks: Vec<TempoBlock>,
-) -> TempoExecutionOutcome {
-    let input = TempoHarnessInput::Blockchain(TempoBlockchainInput {
-        chain_spec: chain,
+fn transfer_block() -> TempoBlock {
+    t4_block(vec![transfer(CHAIN_ID, 0, 7)])
+}
+
+/// The header of `t4_block(vec![tx])`, RLP-encoded after `edit`.
+fn rlp_header(tx: &Bytes, edit: impl FnOnce(&mut TempoHeader)) -> Vec<u8> {
+    let spec = chain::chain_spec(&ChainSpecInput::default()).unwrap();
+    let context = BlockHeaderInput::Context(context(TempoHardfork::T4, 0));
+    let mut header = chain::header(&spec, &context).unwrap();
+    let tx = TempoTxEnvelope::decode_2718_exact(tx).unwrap();
+    header.inner.transactions_root = calculate_transaction_root(&[tx]);
+    edit(&mut header);
+    alloy_rlp::encode(&header)
+}
+
+/// Executes `blocks` on `pre_state` on the default chain.
+fn run(pre_state: PreState, blocks: Vec<TempoBlock>) -> TempoExecutionOutcome {
+    run_input(TempoBlockchainInput {
+        chain_spec: ChainSpecInput::default(),
         pre_state,
-        blocks: NonEmpty::new(blocks).expect("tests execute at least one block"),
-    });
-    let TempoHarnessOutcome::Blockchain(outcome) = execute::run(input) else {
+        blocks: blocks.try_into().expect("tests execute at least one block"),
+    })
+}
+
+fn run_input(input: TempoBlockchainInput) -> TempoExecutionOutcome {
+    let TempoHarnessOutcome::Blockchain(outcome) =
+        execute::run(TempoHarnessInput::Blockchain(input))
+    else {
         panic!("a blockchain input has a blockchain outcome");
     };
     outcome
+}
+
+/// The storage changes `changes` records at `address`.
+fn storage_at(
+    changes: &StateChanges,
+    address: Address,
+) -> impl Iterator<Item = &StorageChangeOutput> {
+    changes
+        .storage
+        .iter()
+        .filter(move |change| change.address == address)
 }
 
 fn genesis() -> PreState {
@@ -187,7 +221,7 @@ fn trie_root(state: &StateInput) -> B256 {
 
 #[test]
 fn a_transfer_reports_its_receipt_changes_and_state_root() {
-    let outcome = run(ChainSpecInput::default(), genesis(), vec![transfer_block()]);
+    let outcome = run(genesis(), vec![transfer_block()]);
 
     assert_eq!(outcome.error, ErrorClass::None);
     assert_eq!(outcome.receipts.len(), 1);
@@ -216,11 +250,8 @@ fn a_transfer_reports_its_receipt_changes_and_state_root() {
         .expect("the transaction bumps the sender's nonce");
     assert_eq!((sender.exists, sender.nonce), (Some(true), Some(1)));
     assert!(outcome.state_diff.total.accounts.contains(sender));
-    let tx_changes = &outcome.state_diff.blocks[0].txs[0].storage;
-    let path_usd: Vec<_> = tx_changes
-        .iter()
-        .filter(|change| change.address == PATH_USD_ADDRESS)
-        .collect();
+    let tx_changes = &outcome.state_diff.blocks[0].txs[0];
+    let path_usd: Vec<_> = storage_at(tx_changes, PATH_USD_ADDRESS).collect();
     assert_eq!(path_usd.len(), 2, "{tx_changes:?}");
     for change in path_usd {
         assert!(outcome.state_diff.total.storage.contains(change));
@@ -234,23 +265,13 @@ fn a_transfer_reports_its_receipt_changes_and_state_root() {
 fn changes_that_cancel_out_within_a_block_are_not_in_the_total() {
     // The recipient sends the transfer straight back: both balances end where
     // they started, so only the nonces change overall.
-    let chain_id = ChainSpecInput::default().chain_id;
-    let back = tip20_transfer(chain_id, 0, SENDER, U256::from(7), 1_000_000);
-    let block = TempoBlock {
-        header: BlockHeaderInput::Context(context(TempoHardfork::T4, 0)),
-        txs: vec![transfer(chain_id, 0, 7), back],
-        senders: vec![SENDER, RECIPIENT],
-    };
-    let outcome = run(ChainSpecInput::default(), genesis(), vec![block]);
+    let back = tip20_transfer(CHAIN_ID, 0, SENDER, U256::from(7), 1_000_000);
+    let mut block = t4_block(vec![transfer(CHAIN_ID, 0, 7), back]);
+    block.senders[1] = RECIPIENT;
+    let outcome = run(genesis(), vec![block]);
     assert_eq!(outcome.error, ErrorClass::None);
 
-    let path_usd = |changes: &tempo_fuzz_types::StateChanges| {
-        changes
-            .storage
-            .iter()
-            .filter(|change| change.address == PATH_USD_ADDRESS)
-            .count()
-    };
+    let path_usd = |changes| storage_at(changes, PATH_USD_ADDRESS).count();
     let txs = &outcome.state_diff.blocks[0].txs;
     assert_eq!((path_usd(&txs[0]), path_usd(&txs[1])), (2, 2));
     assert_eq!(
@@ -270,14 +291,9 @@ fn changes_that_cancel_out_within_a_block_are_not_in_the_total() {
 
 #[test]
 fn receipts_tell_reverts_and_halts_apart() {
-    let chain_id = ChainSpecInput::default().chain_id;
     let outcome = |amount, gas_limit| {
-        let tx = tip20_transfer(chain_id, 0, RECIPIENT, amount, gas_limit);
-        let block = block(
-            BlockHeaderInput::Context(context(TempoHardfork::T4, 0)),
-            vec![tx],
-        );
-        let outcome = run(ChainSpecInput::default(), genesis(), vec![block]);
+        let tx = tip20_transfer(CHAIN_ID, 0, RECIPIENT, amount, gas_limit);
+        let outcome = run(genesis(), vec![t4_block(vec![tx])]);
         assert_eq!(outcome.error, ErrorClass::None);
         outcome.receipts[0].clone()
     };
@@ -297,33 +313,19 @@ fn receipts_tell_reverts_and_halts_apart() {
 #[test]
 fn system_calls_are_reported_apart_from_transactions() {
     // EIP-2935 stores the parent hash before the transactions run.
-    let spec = chain::chain_spec(&ChainSpecInput::default()).unwrap();
-    let tx = transfer(ChainSpecInput::default().chain_id, 0, 7);
-    let mut header = chain::header(
-        &spec,
-        &BlockHeaderInput::Context(context(TempoHardfork::T4, 0)),
-    )
-    .unwrap();
-    header.inner.parent_hash = B256::repeat_byte(1);
-    header.inner.transactions_root =
-        alloy_consensus::proofs::calculate_transaction_root(&[TempoTxEnvelope::decode_2718_exact(
-            &tx,
-        )
-        .unwrap()]);
-    let rlp = BlockHeaderInput::Rlp(alloy_rlp::encode(&header).into());
+    let tx = transfer(CHAIN_ID, 0, 7);
+    let rlp = rlp_header(&tx, |header| {
+        header.inner.parent_hash = B256::repeat_byte(1)
+    });
     let outcome = run(
-        ChainSpecInput::default(),
         genesis(),
-        vec![block(rlp, vec![tx])],
+        vec![block(BlockHeaderInput::Rlp(rlp.into()), vec![tx])],
     );
     assert_eq!(outcome.error, ErrorClass::None);
 
     let history = alloy_eips::eip2935::HISTORY_STORAGE_ADDRESS;
-    let parent = |changes: &tempo_fuzz_types::StateChanges| {
-        changes
-            .storage
-            .iter()
-            .any(|change| change.address == history && change.after == U256::from_be_bytes([1; 32]))
+    let parent = |changes| {
+        storage_at(changes, history).any(|change| change.after == U256::from_be_bytes([1; 32]))
     };
     let steps = &outcome.state_diff.blocks[0];
     assert!(parent(&steps.pre_block), "{:?}", steps.pre_block);
@@ -333,9 +335,8 @@ fn system_calls_are_reported_apart_from_transactions() {
 
 #[test]
 fn an_exact_pre_state_replays_like_the_genesis_it_lists() {
-    let from_genesis = run(ChainSpecInput::default(), genesis(), vec![transfer_block()]);
+    let from_genesis = run(genesis(), vec![transfer_block()]);
     let replayed = run(
-        ChainSpecInput::default(),
         exact(exact_genesis(&[transfer_block()])),
         vec![transfer_block()],
     );
@@ -350,32 +351,22 @@ fn an_exact_pre_state_replays_like_the_genesis_it_lists() {
 #[test]
 fn reading_outside_an_exact_pre_state_is_reported() {
     // The sender's balance slot is one the transfer reads.
-    let from_genesis = run(ChainSpecInput::default(), genesis(), vec![transfer_block()]);
-    let read = from_genesis.state_diff.blocks[0].txs[0]
-        .storage
-        .iter()
-        .find(|change| change.address == PATH_USD_ADDRESS)
+    let from_genesis = run(genesis(), vec![transfer_block()]);
+    let read = storage_at(&from_genesis.state_diff.blocks[0].txs[0], PATH_USD_ADDRESS)
+        .next()
         .expect("the transfer changes pathUSD")
         .slot;
 
     let mut state = exact_genesis(&[transfer_block()]);
     path_usd(&mut state).storage.remove(&read);
-    let outcome = run(
-        ChainSpecInput::default(),
-        exact(state),
-        vec![transfer_block()],
-    );
+    let outcome = run(exact(state), vec![transfer_block()]);
     assert_eq!(outcome.error, ErrorClass::IncompletePreState);
     assert!(outcome.receipts.is_empty());
     let mut unchanged = genesis_state();
     path_usd(&mut unchanged).storage.remove(&read);
     assert_eq!(outcome.final_state, unchanged);
 
-    let missing_account = run(
-        ChainSpecInput::default(),
-        exact(StateInput::default()),
-        vec![transfer_block()],
-    );
+    let missing_account = run(exact(StateInput::default()), vec![transfer_block()]);
     assert_eq!(missing_account.error, ErrorClass::IncompletePreState);
 }
 
@@ -423,21 +414,8 @@ fn an_empty_account_a_transaction_touches_is_destroyed() {
             },
         )]),
     };
-    let touch = call(
-        ChainSpecInput::default().chain_id,
-        0,
-        ghost,
-        Bytes::new(),
-        1_000_000,
-    );
-    let outcome = run(
-        ChainSpecInput::default(),
-        PreState::Genesis(pre_state),
-        vec![block(
-            BlockHeaderInput::Context(context(TempoHardfork::T4, 0)),
-            vec![touch],
-        )],
-    );
+    let touch = call(CHAIN_ID, 0, ghost, Bytes::new(), 1_000_000);
+    let outcome = run(PreState::Genesis(pre_state), vec![t4_block(vec![touch])]);
 
     assert_eq!(outcome.error, ErrorClass::None);
     assert!(!outcome.final_state.accounts.contains_key(&ghost));
@@ -491,15 +469,14 @@ fn an_epoch_boundary_block_updates_the_committee_after_its_transactions() {
         context.block_number = epoch_length.get() - 1;
         context.extra_data = extra_data;
         let block = block(BlockHeaderInput::Context(context), Vec::new());
-        run(ChainSpecInput::default(), genesis(), vec![block])
+        run(genesis(), vec![block])
     };
     let outcome = boundary(OnchainDkgOutcome::dealt(1, 3).encode().to_vec().into());
     assert_eq!(outcome.error, ErrorClass::None);
-    let committee = |changes: &StateChanges| {
-        changes
-            .storage
-            .iter()
-            .any(|change| change.address == CURRENT_COMMITTEE_ADDRESS)
+    let committee = |changes| {
+        storage_at(changes, CURRENT_COMMITTEE_ADDRESS)
+            .next()
+            .is_some()
     };
     let steps = &outcome.state_diff.blocks[0];
     assert!(committee(&steps.post_block), "{:?}", steps.post_block);
@@ -516,11 +493,7 @@ fn broken_invariants_are_reported_without_stopping_execution() {
     let token = path_usd(&mut state);
     token.storage.insert(TOTAL_SUPPLY, U256::from(1));
     token.storage.insert(SUPPLY_CAP, U256::ZERO);
-    let outcome = run(
-        ChainSpecInput::default(),
-        exact(state),
-        vec![transfer_block()],
-    );
+    let outcome = run(exact(state), vec![transfer_block()]);
 
     assert_eq!(outcome.error, ErrorClass::None);
     assert_eq!(outcome.receipts.len(), 1);
@@ -559,11 +532,7 @@ fn invariant_views_of_keys_an_exact_pre_state_lacks_are_skipped() {
         .expect("the dev genesis holds a second token");
     token.storage.insert(TOTAL_SUPPLY, U256::from(1));
     token.storage.insert(SUPPLY_CAP, U256::ZERO);
-    let outcome = run(
-        ChainSpecInput::default(),
-        exact(state),
-        vec![transfer_block()],
-    );
+    let outcome = run(exact(state), vec![transfer_block()]);
 
     assert_eq!(outcome.error, ErrorClass::None);
     let failures: Vec<_> = outcome
@@ -593,72 +562,50 @@ fn the_chain_id_comes_from_the_input() {
         ..Default::default()
     };
     let on = |chain_id| {
-        let block = block(
-            BlockHeaderInput::Context(context(TempoHardfork::T4, 0)),
-            vec![transfer(chain_id, 0, 7)],
-        );
-        run(chain.clone(), genesis(), vec![block]).error
+        run_input(TempoBlockchainInput {
+            chain_spec: chain.clone(),
+            pre_state: genesis(),
+            blocks: vec![t4_block(vec![transfer(chain_id, 0, 7)])]
+                .try_into()
+                .unwrap(),
+        })
+        .error
     };
     assert_eq!(on(1337), ErrorClass::None);
-    assert_eq!(on(ChainSpecInput::default().chain_id), ErrorClass::Rejected);
+    assert_eq!(on(CHAIN_ID), ErrorClass::Rejected);
 }
 
 #[test]
 fn an_rlp_header_executes_exactly_as_given() {
-    let spec = chain::chain_spec(&ChainSpecInput::default()).unwrap();
-    let tx = transfer(ChainSpecInput::default().chain_id, 0, 7);
-    let mut header = chain::header(
-        &spec,
-        &BlockHeaderInput::Context(context(TempoHardfork::T4, 0)),
-    )
-    .unwrap();
-    let decoded = TempoTxEnvelope::decode_2718_exact(&tx).unwrap();
-    header.inner.transactions_root =
-        alloy_consensus::proofs::calculate_transaction_root(&[decoded]);
-    let rlp = |header: &tempo_primitives::TempoHeader| alloy_rlp::encode(header);
+    let tx = transfer(CHAIN_ID, 0, 7);
+    let rlp_block = |rlp: Vec<u8>, txs| block(BlockHeaderInput::Rlp(rlp.into()), txs);
 
-    let from_context = run(ChainSpecInput::default(), genesis(), vec![transfer_block()]);
+    let from_context = run(genesis(), vec![transfer_block()]);
     let from_rlp = run(
-        ChainSpecInput::default(),
         genesis(),
-        vec![block(
-            BlockHeaderInput::Rlp(rlp(&header).into()),
-            vec![tx.clone()],
-        )],
+        vec![rlp_block(rlp_header(&tx, |_| {}), vec![tx.clone()])],
     );
     assert_eq!(from_rlp, from_context);
 
     // The header must commit to the block's transactions.
-    header.inner.transactions_root = B256::ZERO;
-    let wrong_root = run(
-        ChainSpecInput::default(),
-        genesis(),
-        vec![block(BlockHeaderInput::Rlp(rlp(&header).into()), vec![tx])],
-    );
-    assert_eq!(wrong_root.error, ErrorClass::Rejected);
-    assert!(wrong_root.receipts.is_empty());
+    let wrong_root = rlp_header(&tx, |header| header.inner.transactions_root = B256::ZERO);
+    let outcome = run(genesis(), vec![rlp_block(wrong_root.clone(), vec![tx])]);
+    assert_eq!(outcome.error, ErrorClass::Rejected);
+    assert!(outcome.receipts.is_empty());
 
-    let mut trailing = rlp(&header);
+    let mut trailing = wrong_root;
     trailing.push(0);
-    let outcome = run(
-        ChainSpecInput::default(),
-        genesis(),
-        vec![block(BlockHeaderInput::Rlp(trailing.into()), Vec::new())],
-    );
+    let outcome = run(genesis(), vec![rlp_block(trailing, Vec::new())]);
     assert_eq!(outcome.error, ErrorClass::RlpDecode);
 }
 
 #[test]
 fn a_failing_block_leaves_the_state_before_it() {
-    let chain_id = ChainSpecInput::default().chain_id;
     let first = transfer_block();
     // Nonce 0 again: the second block's transaction is invalid.
-    let second = block(
-        BlockHeaderInput::Context(context(TempoHardfork::T4, 0)),
-        vec![transfer(chain_id, 0, 9)],
-    );
-    let only_first = run(ChainSpecInput::default(), genesis(), vec![first.clone()]);
-    let outcome = run(ChainSpecInput::default(), genesis(), vec![first, second]);
+    let second = t4_block(vec![transfer(CHAIN_ID, 0, 9)]);
+    let only_first = run(genesis(), vec![first.clone()]);
+    let outcome = run(genesis(), vec![first, second]);
 
     assert_eq!(outcome.error, ErrorClass::Rejected);
     assert_eq!(outcome.receipts, only_first.receipts);
@@ -669,59 +616,47 @@ fn a_failing_block_leaves_the_state_before_it() {
 
 #[test]
 fn malformed_inputs_are_classified_rather_than_executed() {
-    let default = ChainSpecInput::default;
-    let error = |chain, pre_state, blocks| run(chain, pre_state, blocks).error;
+    let error = |pre_state, blocks| run(pre_state, blocks).error;
 
     // Blocks going back in time.
     let late = block(
         BlockHeaderInput::Context(context(TempoHardfork::T5, 0)),
         Vec::new(),
     );
-    let early = block(
-        BlockHeaderInput::Context(context(TempoHardfork::T4, 0)),
-        Vec::new(),
-    );
+    let early = t4_block(Vec::new());
     assert_eq!(
-        error(default(), genesis(), vec![late, early]),
+        error(genesis(), vec![late, early]),
         ErrorClass::InvalidInput
     );
 
     // A schedule activating T3 after T4.
-    let mut chain = default();
+    let mut chain = ChainSpecInput::default();
     chain.hardforks.insert(TempoHardfork::T3, u64::MAX);
-    assert_eq!(
-        error(chain, genesis(), vec![transfer_block()]),
-        ErrorClass::InvalidInput
-    );
+    let outcome = run_input(TempoBlockchainInput {
+        chain_spec: chain,
+        pre_state: genesis(),
+        blocks: vec![transfer_block()].try_into().unwrap(),
+    });
+    assert_eq!(outcome.error, ErrorClass::InvalidInput);
 
     // A genesis pre-state overriding a genesis account.
     let mut overriding = StateInput::default();
     let token = path_usd(&mut genesis_state()).clone();
     overriding.accounts.insert(PATH_USD_ADDRESS, token);
     assert_eq!(
-        error(
-            default(),
-            PreState::Genesis(overriding),
-            vec![transfer_block()]
-        ),
+        error(PreState::Genesis(overriding), vec![transfer_block()]),
         ErrorClass::InvalidInput
     );
 
     // Senders that do not match the transactions, and transactions that do not decode.
     let mut mismatched = transfer_block();
     mismatched.senders.push(SENDER);
-    assert_eq!(
-        error(default(), genesis(), vec![mismatched]),
-        ErrorClass::InvalidInput
-    );
+    assert_eq!(error(genesis(), vec![mismatched]), ErrorClass::InvalidInput);
     let mut undecodable = transfer_block();
     let mut tx = undecodable.txs[0].to_vec();
     tx.push(0);
     undecodable.txs[0] = tx.into();
-    assert_eq!(
-        error(default(), genesis(), vec![undecodable]),
-        ErrorClass::RlpDecode
-    );
+    assert_eq!(error(genesis(), vec![undecodable]), ErrorClass::RlpDecode);
 }
 
 #[test]
@@ -775,7 +710,7 @@ fn transaction_inputs_decode_and_recover_without_executing() {
         };
         outcome
     };
-    let tx = transfer(ChainSpecInput::default().chain_id, 0, 1);
+    let tx = transfer(CHAIN_ID, 0, 1);
 
     let given = outcome(tx.clone(), Some(SENDER));
     assert_eq!(given.error, ErrorClass::None);
@@ -791,11 +726,25 @@ fn transaction_inputs_decode_and_recover_without_executing() {
 }
 
 #[test]
+fn non_empty_encodes_as_a_sequence_and_rejects_an_empty_one() {
+    let encode = |items: Vec<u8>| bincode_options().serialize(&items).unwrap();
+    let decode = |bytes: &[u8]| bincode_options().deserialize::<NonEmpty<u8>>(bytes);
+
+    let items = decode(&encode(vec![1, 2])).unwrap();
+    assert_eq!(items.as_slice(), [1, 2]);
+    assert_eq!(
+        bincode_options().serialize(&items).unwrap(),
+        encode(vec![1, 2])
+    );
+    assert!(decode(&encode(Vec::new())).is_err());
+}
+
+#[test]
 fn the_c_abi_round_trips_and_rejects_what_does_not_decode() {
     let input = TempoHarnessInput::Blockchain(TempoBlockchainInput {
         chain_spec: ChainSpecInput::default(),
         pre_state: genesis(),
-        blocks: NonEmpty::new(vec![transfer_block()]).unwrap(),
+        blocks: vec![transfer_block()].try_into().unwrap(),
     });
     let bytes = bincode_options().serialize(&input).unwrap();
     let call = |input: &[u8], out: &mut Vec<u8>| {

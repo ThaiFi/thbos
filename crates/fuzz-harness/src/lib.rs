@@ -14,7 +14,7 @@ use bincode::Options as _;
 use core::ffi::c_int;
 use tempo_chainspec::hardfork::TempoHardfork;
 use tempo_fuzz_types::{
-    FUZZ_ACCEPT, FUZZ_REJECT, HarnessInputKind, NonEmpty, TYPED_HARNESS_SCHEMA_VERSION,
+    FUZZ_ACCEPT, FUZZ_REJECT, HarnessInputKind, TYPED_HARNESS_SCHEMA_VERSION,
     TempoHarnessCapabilities, TempoHarnessInput,
 };
 
@@ -67,13 +67,16 @@ pub unsafe extern "C" fn tempo_fuzz_capabilities_v1(
         git_revision: option_env!("TEMPO_GIT_REVISION")
             .unwrap_or("unknown")
             .to_string(),
-        supported_hardforks: NonEmpty::new(TempoHardfork::VARIANTS.to_vec())
+        supported_hardforks: TempoHardfork::VARIANTS
+            .to_vec()
+            .try_into()
             .expect("there are hardforks"),
-        supported_inputs: NonEmpty::new(vec![
+        supported_inputs: vec![
             HarnessInputKind::Transaction,
             HarnessInputKind::State,
             HarnessInputKind::Blockchain,
-        ])
+        ]
+        .try_into()
         .expect("the harness supports inputs"),
     };
     let Ok(capabilities) = bincode_options().serialize(&capabilities) else {

@@ -45,35 +45,32 @@ impl PreStateDb {
         self.missed.set(missed);
     }
 
-    fn miss(&self, key: Missing) -> Result<(), MissingPreState> {
+    fn miss(&self, missing: MissingPreState) -> Result<(), MissingPreState> {
         if !self.exact {
             return Ok(());
         }
         self.missed.set(true);
-        Err(MissingPreState(key))
+        Err(missing)
     }
 }
 
+/// A read of a key an exact pre-state does not hold.
 #[derive(Debug)]
-enum Missing {
+pub(crate) enum MissingPreState {
     Account(Address),
     Storage(Address, U256),
     Code(B256),
     BlockHash(u64),
 }
 
-/// A read of a key an exact pre-state does not hold.
-#[derive(Debug)]
-pub(crate) struct MissingPreState(Missing);
-
 impl fmt::Display for MissingPreState {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("the exact pre-state does not hold ")?;
-        match &self.0 {
-            Missing::Account(address) => write!(f, "account {address}"),
-            Missing::Storage(address, slot) => write!(f, "slot {slot} of {address}"),
-            Missing::Code(hash) => write!(f, "code {hash}"),
-            Missing::BlockHash(number) => write!(f, "the hash of block {number}"),
+        match self {
+            Self::Account(address) => write!(f, "account {address}"),
+            Self::Storage(address, slot) => write!(f, "slot {slot} of {address}"),
+            Self::Code(hash) => write!(f, "code {hash}"),
+            Self::BlockHash(number) => write!(f, "the hash of block {number}"),
         }
     }
 }
@@ -87,25 +84,25 @@ impl DatabaseRef for PreStateDb {
     type Error = MissingPreState;
 
     fn basic_ref(&self, address: Address) -> Result<Option<AccountInfo>, Self::Error> {
-        self.miss(Missing::Account(address))?;
+        self.miss(MissingPreState::Account(address))?;
         let Ok(info) = EmptyDB::new().basic_ref(address);
         Ok(info)
     }
 
     fn code_by_hash_ref(&self, code_hash: B256) -> Result<Bytecode, Self::Error> {
-        self.miss(Missing::Code(code_hash))?;
+        self.miss(MissingPreState::Code(code_hash))?;
         let Ok(code) = EmptyDB::new().code_by_hash_ref(code_hash);
         Ok(code)
     }
 
     fn storage_ref(&self, address: Address, slot: U256) -> Result<U256, Self::Error> {
-        self.miss(Missing::Storage(address, slot))?;
+        self.miss(MissingPreState::Storage(address, slot))?;
         let Ok(value) = EmptyDB::new().storage_ref(address, slot);
         Ok(value)
     }
 
     fn block_hash_ref(&self, number: u64) -> Result<B256, Self::Error> {
-        self.miss(Missing::BlockHash(number))?;
+        self.miss(MissingPreState::BlockHash(number))?;
         let Ok(hash) = EmptyDB::new().block_hash_ref(number);
         Ok(hash)
     }
@@ -116,24 +113,25 @@ impl DatabaseRef for PreStateDb {
 static GENESIS: LazyLock<CacheState> = LazyLock::new(|| {
     let mut cache = CacheState::new();
     for (address, account) in &tempo_chainspec::spec::DEV.inner.genesis.alloc {
-        let info = account_info(
-            account.balance,
-            account.nonce.unwrap_or_default(),
-            account.code.clone().unwrap_or_default(),
-        );
-        let storage = account
-            .storage
-            .iter()
-            .flatten()
-            .map(|(slot, value)| ((*slot).into(), (*value).into()));
-        insert(&mut cache, *address, info, storage);
+        let account = AccountInput {
+            balance: account.balance,
+            nonce: account.nonce.unwrap_or_default(),
+            code: account.code.clone().unwrap_or_default(),
+            storage: account
+                .storage
+                .iter()
+                .flatten()
+                .map(|(slot, value)| ((*slot).into(), (*value).into()))
+                .collect(),
+        };
+        insert(&mut cache, *address, &account);
     }
     cache
 });
 
 /// `pre_state` as a database. `InvalidInput` if a genesis pre-state overrides a genesis account.
 pub(crate) fn seed(pre_state: &PreState) -> Result<Db, ErrorClass> {
-    let (cache, exact) = match pre_state {
+    let (state, mut cache, exact) = match pre_state {
         PreState::Genesis(state) => {
             if state
                 .accounts
@@ -142,20 +140,13 @@ pub(crate) fn seed(pre_state: &PreState) -> Result<Db, ErrorClass> {
             {
                 return Err(ErrorClass::InvalidInput);
             }
-            let mut cache = GENESIS.clone();
-            for (address, account) in &state.accounts {
-                insert_input(&mut cache, *address, account);
-            }
-            (cache, false)
+            (state, GENESIS.clone(), false)
         }
-        PreState::Exact { state, .. } => {
-            let mut cache = CacheState::new();
-            for (address, account) in &state.accounts {
-                insert_input(&mut cache, *address, account);
-            }
-            (cache, true)
-        }
+        PreState::Exact { state, .. } => (state, CacheState::new(), true),
     };
+    for (address, account) in &state.accounts {
+        insert(&mut cache, *address, account);
+    }
     let mut db = State::builder()
         .with_database(WrapDatabaseRef(PreStateDb {
             exact,
@@ -180,34 +171,20 @@ fn is_empty(account: &AccountInput) -> bool {
         && account.storage.values().all(U256::is_zero)
 }
 
-fn account_info(balance: U256, nonce: u64, code: Bytes) -> AccountInfo {
-    AccountInfo::from_balance(balance)
-        .with_nonce(nonce)
-        .with_code(Bytecode::new_raw(code))
-}
-
-/// Inserts `account`, or records that it does not exist if it holds nothing.
-fn insert_input(cache: &mut CacheState, address: Address, account: &AccountInput) {
+/// Inserts `account`, its code and the slots the pre-state holds for it, or records that it does not
+/// exist if it holds nothing. Other slots are read from the database below.
+fn insert(cache: &mut CacheState, address: Address, account: &AccountInput) {
     if is_empty(account) {
         cache.insert_not_existing(address);
         return;
     }
-    let info = account_info(account.balance, account.nonce, account.code.clone());
-    let storage = account.storage.iter().map(|(slot, value)| (*slot, *value));
-    insert(cache, address, info, storage);
-}
-
-/// Inserts an account, its code and the slots the pre-state holds for it. Other slots are read from
-/// the database below.
-fn insert(
-    cache: &mut CacheState,
-    address: Address,
-    info: AccountInfo,
-    storage: impl Iterator<Item = (U256, U256)>,
-) {
+    let info = AccountInfo::from_balance(account.balance)
+        .with_nonce(account.nonce)
+        .with_code(Bytecode::new_raw(account.code.clone()));
     if let Some(code) = &info.code {
         cache.contracts.insert(info.code_hash, code.clone());
     }
+    let storage = account.storage.iter().map(|(slot, value)| (*slot, *value));
     cache.insert_account_with_storage(address, info, storage.collect());
 }
 
