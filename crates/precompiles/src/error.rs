@@ -24,12 +24,13 @@ use tempo_contracts::{
     TempoHardfork,
     precompiles::{
         AccountKeychainError, AddrRegistryError, CurrentCommitteeError, FeeManagerError,
-        NonceError, ReceivePolicyGuardError, RolesAuthError, SignatureVerifierError,
-        StablecoinDEXError, StorageCreditsError, TIP20ChannelReserveError, TIP20FactoryError,
-        TIP403RegistryError, TIPFeeAMMError, UnknownFunctionSelector, ValidatorConfigError,
-        ValidatorConfigV2Error, ZoneFactoryError,
+        NativeMultisigError, NonceError, ReceivePolicyGuardError, RolesAuthError,
+        SignatureVerifierError, StablecoinDEXError, StorageCreditsError, TIP20ChannelReserveError,
+        TIP20FactoryError, TIP403RegistryError, TIPFeeAMMError, UnknownFunctionSelector,
+        ValidatorConfigError, ValidatorConfigV2Error, ZoneFactoryError,
     },
 };
+use tempo_primitives::transaction::MultisigConfigError;
 
 /// Top-level error type for all Tempo precompile operations
 #[derive(
@@ -116,6 +117,9 @@ pub enum TempoPrecompileError {
     #[error("ZoneFactory error: {0:?}")]
     ZoneFactoryError(ZoneFactoryError),
 
+    #[error("native multisig error: {0:?}")]
+    NativeMultisigError(NativeMultisigError),
+
     /// Gas limit exceeded during precompile execution.
     #[error("Gas limit exceeded")]
     OutOfGas,
@@ -172,10 +176,32 @@ impl From<TempoPrecompileError> for HandlerError {
             | TempoPrecompileError::StorageCreditsError(_)
             | TempoPrecompileError::CurrentCommitteeError(_)
             | TempoPrecompileError::ZoneFactoryError(_)
+            | TempoPrecompileError::NativeMultisigError(_)
             | TempoPrecompileError::OutOfGas
             | TempoPrecompileError::StaticCallNotAllowed
             | TempoPrecompileError::UnknownFunctionSelector(_)) => Self::external(error),
         }
+    }
+}
+
+impl From<MultisigConfigError> for TempoPrecompileError {
+    fn from(error: MultisigConfigError) -> Self {
+        match error {
+            MultisigConfigError::EmptyOwners
+            | MultisigConfigError::ZeroOwner
+            | MultisigConfigError::AccountIsOwner => NativeMultisigError::invalid_multisig_owner(),
+            MultisigConfigError::TooManyOwners => NativeMultisigError::too_many_owners(),
+            MultisigConfigError::ZeroThreshold | MultisigConfigError::ThresholdExceedsWeight => {
+                NativeMultisigError::invalid_threshold()
+            }
+            MultisigConfigError::ZeroWeight | MultisigConfigError::TotalWeightExceedsMax => {
+                NativeMultisigError::invalid_weight()
+            }
+            MultisigConfigError::DuplicateOwner => NativeMultisigError::duplicate_owner(),
+            MultisigConfigError::OwnersNotAscending => NativeMultisigError::invalid_owner_order(),
+            MultisigConfigError::DerivedAccountZero => NativeMultisigError::invalid_account(),
+        }
+        .into()
     }
 }
 
@@ -204,6 +230,7 @@ impl TempoPrecompileError {
             Self::StorageCreditsError(e) => e.selector(),
             Self::CurrentCommitteeError(e) => e.selector(),
             Self::ZoneFactoryError(e) => e.selector(),
+            Self::NativeMultisigError(e) => e.selector(),
             Self::UnknownFunctionSelector(selector) => *selector,
             Self::Panic(_) | Self::StorageDeltaUnderflow(_) => Panic::SELECTOR,
             Self::OutOfGas | Self::Database(_) | Self::StaticCallNotAllowed | Self::Fatal(_) => {
@@ -241,6 +268,7 @@ impl TempoPrecompileError {
             | Self::StorageCreditsError(_)
             | Self::CurrentCommitteeError(_)
             | Self::ZoneFactoryError(_)
+            | Self::NativeMultisigError(_)
             | Self::UnknownFunctionSelector(_) => false,
         }
     }
@@ -300,6 +328,7 @@ impl TempoPrecompileError {
             Self::StorageCreditsError(e) => e.abi_encode().into(),
             Self::CurrentCommitteeError(e) => e.abi_encode().into(),
             Self::ZoneFactoryError(e) => e.abi_encode().into(),
+            Self::NativeMultisigError(e) => e.abi_encode().into(),
             Self::OutOfGas => {
                 return Err(PrecompileHalt::OutOfGas.into());
             }
@@ -362,7 +391,6 @@ pub type TempoPrecompileErrorRegistry = HashMap<
 /// Builds a [`TempoPrecompileErrorRegistry`] mapping every known error selector to its decoder.
 pub fn error_decoder_registry() -> TempoPrecompileErrorRegistry {
     let mut registry: TempoPrecompileErrorRegistry = HashMap::new();
-
     add_errors_to_registry(&mut registry, TempoPrecompileError::StablecoinDEX);
     add_errors_to_registry(&mut registry, TempoPrecompileError::TIP20);
     add_errors_to_registry(&mut registry, TempoPrecompileError::TIP20Factory);
@@ -384,6 +412,7 @@ pub fn error_decoder_registry() -> TempoPrecompileErrorRegistry {
     add_errors_to_registry(&mut registry, TempoPrecompileError::StorageCreditsError);
     add_errors_to_registry(&mut registry, TempoPrecompileError::CurrentCommitteeError);
     add_errors_to_registry(&mut registry, TempoPrecompileError::ZoneFactoryError);
+    add_errors_to_registry(&mut registry, TempoPrecompileError::NativeMultisigError);
 
     registry
 }

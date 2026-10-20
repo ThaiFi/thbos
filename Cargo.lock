@@ -14236,6 +14236,7 @@ dependencies = [
  "clap",
  "commonware-codec",
  "commonware-cryptography",
+ "evm2",
  "eyre",
  "once_cell",
  "paste",
@@ -14244,6 +14245,7 @@ dependencies = [
  "reth-network-peers",
  "serde",
  "serde_json",
+ "tempo-contracts",
  "tempo-dkg-onchain-artifacts",
  "tempo-hardfork",
  "tempo-primitives",
@@ -14985,6 +14987,7 @@ dependencies = [
 name = "tempo-zone"
 version = "0.3.5"
 dependencies = [
+ "alloy-primitives",
  "reth-cli-util",
  "reth-node-core",
  "rustls",
@@ -17149,6 +17152,7 @@ version = "0.3.5"
 dependencies = [
  "alloy-consensus",
  "alloy-eip7928",
+ "alloy-eips",
  "alloy-genesis",
  "alloy-primitives",
  "alloy-provider",
