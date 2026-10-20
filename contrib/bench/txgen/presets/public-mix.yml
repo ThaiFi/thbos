@@ -1,12 +1,7 @@
-# Forward-looking public workload, weighted by submitted transactions (not gas).
-# Transaction shares: plain transfer 25%, memo transfer 40%, mint 1%, MPP 15%,
-# zone deposit 5%, zone withdrawal 4%, vault deposit 6%, vault withdrawal 4%.
-# These are benchmark assumptions, not a replay of mainnet activity.
-# Uses native MPP and explicit setup dependencies (tempoxyz/txgen#214).
-# Transfers and mints target prepopulated state-bloat accounts; requires nonzero bloat.
-# The helper combines fixture setup and expands per-user/portal templates.
-# All workload templates use expiring nonces with a 25-second validity window;
-# setup retains ordered nonces and explicit dependencies.
+# Isolated vault deposit/withdrawal execution benchmark.
+# Only vault operations have positive transaction-selection weights (50/50).
+# Other fixtures remain available for setup outside measurement.
+# Uses disposable chain 1337 and synthetic zone settlement.
 include:
   - mpp.yml
   - vault/base.yml
@@ -84,18 +79,18 @@ templates:
 # Zone operations include synthetic settlement through the existing dummy verifier.
 mix:
   - template: public_transfer
-    weight: 25
+    weight: 0
   - template: public_transfer_memo
-    weight: 40
+    weight: 0
   - template: public_mint
-    weight: 1
+    weight: 0
   - sequence: mpp_open_only
-    weight: 15
+    weight: 0
   - template: zone_deposit
-    weight: 5
+    weight: 0
   - template: zone_withdraw
-    weight: 4
+    weight: 0
   - template: vault_deposit
-    weight: 6
+    weight: 50
   - template: vault_withdraw
-    weight: 4
+    weight: 50
