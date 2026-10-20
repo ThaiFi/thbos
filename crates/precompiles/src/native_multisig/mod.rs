@@ -20,8 +20,15 @@ use tempo_primitives::{
     },
 };
 
+/// Native multisig precompile.
+///
+/// Every field is transient transaction context, seeded by the handler before execution.
 #[contract(addr = NATIVE_MULTISIG_ADDRESS)]
 pub struct NativeMultisig {
+    // WARNING: transient storage slots must always be placed at the very end until the `contract`
+    // macro is refactored and has 2 independent layouts (persistent and transient).
+    // If new (persistent) storage fields need to be added to the precompile, they must go above
+    // the fields below.
     tx_origin: Address,
     directly_authorized_account: Address,
     upgrade_eligibility: UpgradeEligibility,
