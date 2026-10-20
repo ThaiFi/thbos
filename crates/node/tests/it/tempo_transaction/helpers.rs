@@ -835,6 +835,7 @@ pub(crate) async fn configure_fee_payer_context(
     // Callers fund the fee payer right before this.
     let balance_before =
         settled_balance(provider, token, fee_payer_addr, |bal| !bal.is_zero()).await?;
+    add_fee_payer_access_gas(tx);
     sign_fee_payer(tx, signer_addr, fee_payer_signer)?;
 
     Ok(Some(FeePayerContext {
@@ -916,6 +917,18 @@ pub(crate) async fn assert_batch_recipient_balances(
     )
     .await?;
     Ok(())
+}
+
+/// Gas that a fee payer signature adds from T14: the sponsor's account is read to check that its
+/// root key is still active, which costs one cold account access.
+const FEE_PAYER_ACCESS_GAS: u64 = 2_600;
+
+/// Raises the gas limit of a transaction that a fee payer is about to sign.
+///
+/// `eth_fillTransaction` estimates without a fee payer, so its gas limit lacks the charge for the
+/// sponsor's account access. Before T14 the extra limit only goes unused.
+pub(crate) fn add_fee_payer_access_gas(tx: &mut TempoTransaction) {
+    tx.gas_limit += FEE_PAYER_ACCESS_GAS;
 }
 
 pub(crate) fn sign_fee_payer(
