@@ -51,6 +51,11 @@ impl BuildPlan {
         self.multiplier_scaled as f64 / BUILD_TIME_MULTIPLIER_SCALE as f64
     }
 
+    /// The validation latency estimate in use.
+    pub fn validation_latency(&self) -> Option<ValidationLatencyEstimate> {
+        self.validation_latency
+    }
+
     /// Computes what the proposal still has to reserve.
     ///
     /// `elapsed` is wall-clock time spent in the builder so far, `idle_elapsed` the
