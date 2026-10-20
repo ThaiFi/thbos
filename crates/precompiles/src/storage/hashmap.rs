@@ -1,3 +1,4 @@
+use super::{ConfigCommitmentWriteGas, ensure_config_commitment_writable};
 use alloy::primitives::{Address, B256, LogData, U256};
 use revm::{
     context::{BlockEnv, journaled_state::JournalCheckpoint},
@@ -22,6 +23,7 @@ pub struct HashMapStorageProvider {
     internals: HashMap<(Address, U256), U256>,
     transient: HashMap<(Address, U256), U256>,
     accounts: HashMap<Address, AccountInfo>,
+    config_commitments: HashMap<Address, B256>,
     fail_on_sload: Option<(Address, U256)>,
     chain_id: u64,
     block_env: TempoBlockEnv,
@@ -44,6 +46,7 @@ pub struct HashMapStorageProvider {
 ///
 /// PERF: naive cloning strategy due to its limited usage.
 struct Snapshot {
+    config_commitments: HashMap<Address, B256>,
     internals: HashMap<(Address, U256), U256>,
     transient: HashMap<(Address, U256), U256>,
     events: HashMap<Address, Vec<LogData>>,
@@ -61,6 +64,7 @@ impl HashMapStorageProvider {
             internals: HashMap::new(),
             transient: HashMap::new(),
             accounts: HashMap::new(),
+            config_commitments: HashMap::new(),
             fail_on_sload: None,
             events: HashMap::new(),
             snapshots: Vec::new(),
@@ -102,6 +106,12 @@ impl HashMapStorageProvider {
     pub fn with_amsterdam_eip8037_enabled(mut self, enabled: bool) -> Self {
         self.amsterdam_eip8037_enabled = enabled;
         self.gas_params = GasParams::new_spec(self.spec.into());
+        self
+    }
+
+    /// Returns self with the static-call context overridden (builder pattern).
+    pub fn with_is_static(mut self, is_static: bool) -> Self {
+        self.is_static = is_static;
         self
     }
 }
@@ -251,6 +261,7 @@ impl PrecompileStorageProvider for HashMapStorageProvider {
     fn checkpoint(&mut self) -> JournalCheckpoint {
         let idx = self.snapshots.len();
         self.snapshots.push(Snapshot {
+            config_commitments: self.config_commitments.clone(),
             internals: self.internals.clone(),
             transient: self.transient.clone(),
             events: self.events.clone(),
@@ -278,6 +289,7 @@ impl PrecompileStorageProvider for HashMapStorageProvider {
             "out-of-order checkpoint revert (expected top of stack)"
         );
         if let Some(snapshot) = self.snapshots.drain(checkpoint.journal_i..).next() {
+            self.config_commitments = snapshot.config_commitments;
             self.internals = snapshot.internals;
             self.transient = snapshot.transient;
             self.events = snapshot.events;
@@ -286,6 +298,27 @@ impl PrecompileStorageProvider for HashMapStorageProvider {
 
     fn set_tip1060_storage_credits(&mut self, enabled: bool) {
         self.tip1060_storage_credits_enabled = self.spec.is_t7() && enabled;
+    }
+
+    fn config_commitment(&mut self, address: Address) -> Result<B256, TempoPrecompileError> {
+        Ok(self
+            .config_commitments
+            .get(&address)
+            .copied()
+            .unwrap_or(B256::ZERO))
+    }
+
+    fn set_config_commitment(
+        &mut self,
+        address: Address,
+        commitment: B256,
+        gas: ConfigCommitmentWriteGas,
+    ) -> Result<(), TempoPrecompileError> {
+        ensure_config_commitment_writable(self.spec, self.is_static, commitment)?;
+        let previous = self.config_commitment(address)?;
+        self.deduct_gas(gas.cost(previous)?)?;
+        self.config_commitments.insert(address, commitment);
+        Ok(())
     }
 }
 
