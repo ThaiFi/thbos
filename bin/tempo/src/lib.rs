@@ -549,7 +549,7 @@ pub fn tempo_main_with(mut overrides: TempoOverrides) -> eyre::Result<()> {
             url => Some(url.to_string()),
         };
 
-        let estimator = tempo_node::Estimator::new(args.node_args.builder_build_time_multiplier);
+        let estimator = tempo_node::Estimator::new(tempo_node::EstimatorConfig::default().with_build_time_multiplier(args.node_args.builder_build_time_multiplier)).map_err(|reason| eyre::eyre!("invalid proposal budget flags: {reason}"))?;
         let tempo_node = overrides.apply_tempo_node({
             let node = TempoNode::new(&args.node_args, validator_key);
             match gossip_protocol_handler {
@@ -1185,7 +1185,7 @@ mod tests {
             node_cmd.ext.consensus.network_budget.into_duration(),
             Duration::from_millis(50)
         );
-        assert_eq!(node_cmd.ext.node_args.builder_build_time_multiplier, 1.35);
+        assert_eq!(node_cmd.ext.node_args.builder_build_time_multiplier, 1.15);
 
         let mut cli = TempoCli::try_parse_from([
             "tempo",

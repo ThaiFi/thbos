@@ -14,7 +14,7 @@ pub use budget::{
     ValidationLatencyEstimate, ValidationLatencyEstimator, ValidationLatencyWorkload,
 };
 pub use build_plan::{BUILD_TIME_MULTIPLIER_SCALE, BuildPlan, PayloadBudgetDecision};
-pub use estimator::{DEFAULT_BUILD_TIME_MULTIPLIER, Estimator};
+pub use estimator::{DEFAULT_BUILD_TIME_MULTIPLIER, Estimator, EstimatorConfig, FinishedBuild};
 use std::{
     sync::{Arc, OnceLock},
     time::Duration,

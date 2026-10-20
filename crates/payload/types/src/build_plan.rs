@@ -15,8 +15,9 @@ pub const BUILD_TIME_MULTIPLIER_SCALE: u64 = 1_000_000;
 pub struct BuildPlan {
     /// Remaining proposal budget handed to this build.
     pub build_budget: Duration,
-    multiplier_scaled: u64,
-    validation_latency: Option<ValidationLatencyEstimate>,
+    pub(crate) multiplier_scaled: u64,
+    pub(crate) dry_finish: Duration,
+    pub(crate) validation_latency: Option<ValidationLatencyEstimate>,
 }
 
 /// Breakdown of the time a build must still reserve at a given moment.
@@ -42,6 +43,7 @@ impl BuildPlan {
         Self {
             build_budget,
             multiplier_scaled,
+            dry_finish: Duration::ZERO,
             validation_latency,
         }
     }
@@ -49,6 +51,11 @@ impl BuildPlan {
     /// The build time multiplier in use.
     pub fn build_time_multiplier(&self) -> f64 {
         self.multiplier_scaled as f64 / BUILD_TIME_MULTIPLIER_SCALE as f64
+    }
+
+    /// The finish reserved after this build has waited for transactions.
+    pub fn dry_finish(&self) -> Duration {
+        self.dry_finish
     }
 
     /// The validation latency estimate in use.
@@ -60,8 +67,8 @@ impl BuildPlan {
     ///
     /// `elapsed` is wall-clock time spent in the builder so far, `idle_elapsed` the
     /// part of it spent waiting for transactions, which validators do not replay.
-    /// Builder work is projected with the multiplier; validator work comes from
-    /// feedback, capped at the builder projection.
+    /// Builder work is projected with the multiplier, with a fixed finish floor
+    /// after waiting for transactions. Validator feedback is capped at that projection.
     pub fn decision(
         &self,
         elapsed: Duration,
@@ -69,7 +76,11 @@ impl BuildPlan {
         current_workload: ValidationLatencyWorkload,
     ) -> PayloadBudgetDecision {
         let work_elapsed = elapsed.saturating_sub(idle_elapsed);
-        let predicted_builder_work = scaled_duration(work_elapsed, self.multiplier_scaled);
+        let mut predicted_builder_work = scaled_duration(work_elapsed, self.multiplier_scaled);
+        if !idle_elapsed.is_zero() {
+            predicted_builder_work =
+                predicted_builder_work.max(work_elapsed.saturating_add(self.dry_finish));
+        }
 
         let predicted_validator_work = self
             .validation_latency
