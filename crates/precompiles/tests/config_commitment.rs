@@ -1,6 +1,6 @@
 //! Account config-commitment reads and writes through precompile storage.
 
-use alloy_primitives::{Address, B256, Bytes};
+use alloy_primitives::{Address, B256, Bytes, U256};
 use evm2::{
     BaseEvmConfigSelector, Evm, EvmTypesHost, ExecutionConfig, SpecId, Version,
     evm::{InMemoryDB, precompile::NoPrecompiles},
@@ -247,9 +247,26 @@ fn evm_storage_reads_and_writes_commitments() {
     }
 
     // The commitment lives in the journaled account extension, not in a storage slot.
-    let account = evm.state_mut().account(&ACCOUNT).unwrap();
-    let info = account.get().unwrap();
-    assert_eq!(&info.extension[..], &encode_config_commitment(ROTATED)[..]);
+    {
+        let account = evm.state_mut().account(&ACCOUNT).unwrap();
+        let info = account.get().unwrap();
+        assert_eq!(&info.extension[..], &encode_config_commitment(ROTATED)[..]);
+    }
+
+    // An account holding only a commitment is not empty, so empty-account cleanup keeps it.
+    {
+        let fresh = evm.state_mut().account(&Address::repeat_byte(4)).unwrap();
+        assert!(!fresh.get().unwrap().is_empty());
+    }
+
+    // Balance and nonce changes keep the commitment.
+    {
+        let mut account = evm.state_mut().account(&ACCOUNT).unwrap();
+        account.set_balance(U256::from(7));
+        assert!(account.bump_nonce());
+    }
+    let mut storage = EvmPrecompileStorageProvider::new_max_gas(&mut evm, spec);
+    assert_eq!(storage.config_commitment(ACCOUNT).unwrap(), ROTATED);
 }
 
 #[test]
