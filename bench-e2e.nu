@@ -1160,7 +1160,7 @@ def run-local-e2e-phase [run: record, ctx: record] {
                 --accounts $ctx.accounts
                 --max-concurrent-requests $ctx.max_concurrent_requests
                 --bench-args $ctx.bench_args
-                --bench-env $ctx.bench_env
+                --bench-env (if ($phase | str starts-with "feature-") { "RUST_LOG=error" } else { $ctx.bench_env })
                 --git-ref $run.ref
                 --git-ref-label ($run | get -o ref_label | default $run.ref)
                 --build-profile $ctx.profile
@@ -1395,7 +1395,7 @@ def "main e2e" [
     --bench-args: string = ""                           # Additional txgen generate arguments
     --baseline-env: string = ""                         # Environment vars for baseline node phases
     --feature-env: string = ""                          # Environment vars for feature node phases
-    --bench-env: string = "RUST_LOG=error"              # Environment vars for the sender process
+    --bench-env: string = ""                            # Environment vars for the sender process
     --baseline-name: string = ""                         # Baseline display name for summary
     --feature-name: string = ""                          # Feature display name for summary
     --baseline-hardfork: string = ""                     # Latest active hardfork for baseline phases
