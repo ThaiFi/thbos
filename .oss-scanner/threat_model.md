@@ -52,16 +52,35 @@ upstream).
 
 ## How you rate severity
 
-- **Critical**: theft, minting or permanent freezing of funds; bypass of TIP-403 policies or keychain spending
-  limits; a chain split or state-root divergence reachable by an unprivileged transaction, block or message; a
-  remote crash or halt of the network (not just one node); forging finalization.
-- **High**: crashing or wedging any node remotely without validator privileges (malformed transaction, RPC call or
-  P2P message); temporary freezing of funds; fee or AMM accounting errors that lose value; a minority of Byzantine
-  validators stalling consensus.
-- **Medium**: remote resource exhaustion that degrades a node without stopping it; pool admission bugs that let
-  spam bypass fees or payment-lane limits; incorrect RPC results that could mislead wallets.
-- **Low**: issues that need operator access, a malicious local config, or a majority of validators; panics only
-  reachable from trusted admin RPC or the CLI.
+The same scale our internal reviews use, calibrated on the severities external auditors gave this repository.
+
+| Impact | Severity |
+| --- | --- |
+| Execution, transfer or replay under another account, key or sponsor on a live path | Critical |
+| Unbounded value drain, e.g. a profitable AMM round trip | Critical |
+| Consensus split reachable by ordinary transactions | Critical |
+| One small request crashes any node, or a permissionless trigger wipes the mempool | Critical |
+| Theft or replay needing an uncommon precondition, such as a shared access key | High |
+| Spending-limit bypass, or paused or blacklisted value escaping through a side path | High |
+| Missing charge for account creation or other state growth | High |
+| Liveness failure that needs intervention, or proposer-forced heavy work before rejection | High |
+| Whole class of valid transactions rejected, or expired keys admitted | High |
+| Bounded accounting drift, pool or RPC resource leaks, mispriced gas constants | Medium |
+| Validator-reachable corruption of the validator set | Medium |
+| Narrow edge cases, misclassified transactions, restart-recoverable liveness, wrong error semantics | Low |
+| Spec or documentation divergence, hardening, efficiency, latent defects with no caller | Informational |
+
+Adjust for:
+- The same defect rates higher when the vulnerable path is live on mainnet, and lower when it sits only behind an
+  inactive fork or in pre-fork history.
+- An ungated consensus-visible change is a chain split; severity tracks how easily an ordinary transaction triggers it.
+- Misconfiguration reachable only by the config owner or a validator is Medium or Low, unless it crashes or splits
+  honest nodes.
+- A Byzantine proposer is in scope; forcing every validator to do large work before rejecting a block is High.
+- Free, permissionless and repeatable attacks rate one level higher than equivalent paid attacks.
+- A per-node slowdown needing sustained traffic is Medium or Low; network-wide mempool unavailability is High.
+- A fault that clears on restart is Low; one that leaves a stale peer set for an epoch or needs manual repair is High.
+- Latent storage, packing and encoding defects take the severity of their first reachable use.
 
 A report should include a reproducer (a test in the affected crate is ideal) and the hardfork it applies to.
 
