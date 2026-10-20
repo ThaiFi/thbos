@@ -64,7 +64,7 @@ impl TempoBlockEnv {
     }
 
     /// Returns the configurable account recovery factory, treating the zero address as unset.
-    pub fn configured_configurable_account_recovery_factory(&self) -> Option<Address> {
+    pub fn configurable_account_recovery_factory(&self) -> Option<Address> {
         self.configurable_account_recovery_factory
             .filter(|factory| !factory.is_zero())
     }

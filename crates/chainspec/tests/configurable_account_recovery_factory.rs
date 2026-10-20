@@ -9,7 +9,7 @@ use tempo_chainspec::{
 };
 
 #[test]
-fn genesis_info_reads_the_configured_configurable_account_recovery_factory() {
+fn genesis_info_reads_the_configurable_account_recovery_factory() {
     let factory = Address::repeat_byte(0x71);
     let mut genesis = MODERATO.genesis().clone();
     genesis
