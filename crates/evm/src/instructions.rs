@@ -110,10 +110,7 @@ pub(crate) fn sstore_inner(
 
     if state.host().config_spec_id().is_t7() {
         sstore_storage_credits(
-            &mut StorageCreditsContext {
-                gas: gas,
-                state: state,
-            },
+            &mut StorageCreditsContext { gas, state },
             destination,
             None,
             &state_load,
