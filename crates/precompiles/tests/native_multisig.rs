@@ -482,7 +482,7 @@ fn native_config_error_precedence_through_abi() {
 }
 
 #[test]
-fn native_factory_is_required_but_getter_remains_available() {
+fn native_factory_is_only_required_to_derive_accounts() {
     let mut storage = HashMapStorageProvider::new_with_spec(1, TempoHardfork::T14);
     StorageCtx::enter(&mut storage, || {
         let owners = weighted_owners(&[(OWNER, 1)]);
@@ -513,17 +513,19 @@ fn native_factory_is_required_but_getter_remains_available() {
             threshold: 1,
             owners: owners.clone(),
         };
-        assert_reverts(
-            update(account, &current, 1, &owners),
-            NativeMultisigError::invalid_config(),
+        returns::<INativeMultisig::updateConfigCall>(update(account, &current, 1, &owners));
+        assert_eq!(
+            commitment_of(account),
+            config(B256::ZERO, 1, 1, &owners).commitment().unwrap()
         );
 
         seed_authority(EOA, EOA, UpgradeEligibility::PrimitiveRoot);
-        assert_reverts(
-            upgrade(EOA, 1, &owners),
-            NativeMultisigError::invalid_config(),
+        returns::<INativeMultisig::upgradeAccountCall>(upgrade(EOA, 1, &owners));
+        let salt = keccak256([MULTISIG_UPGRADE_DOMAIN, EOA.as_slice()].concat());
+        assert_eq!(
+            commitment_of(EOA),
+            config(salt, 1, 1, &owners).commitment().unwrap()
         );
-        assert_eq!(commitment_of(EOA), B256::ZERO);
     });
 }
 

@@ -80,7 +80,6 @@ impl NativeMultisig {
         {
             return Err(NativeMultisigError::unauthorized_multisig_caller().into());
         }
-        self.factory()?;
         let current = config(
             current.salt,
             current.version,
@@ -141,7 +140,6 @@ impl NativeMultisig {
         if !commitment.is_zero() {
             return Err(NativeMultisigError::account_already_configurable().into());
         }
-        self.factory()?;
         let salt = self
             .storage
             .keccak256(&[MULTISIG_UPGRADE_DOMAIN, sender.as_slice()].concat())?;
