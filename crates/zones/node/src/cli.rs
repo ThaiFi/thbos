@@ -10,7 +10,6 @@ use reth_chainspec::EthChainSpec as _;
 use reth_ethereum::cli::Cli;
 use reth_tracing::tracing::{info, warn};
 use tempo_alloy::TempoNetwork;
-use tempo_evm::consensus::TempoConsensus;
 use tempo_precompiles::zone_factory::portal_address;
 use zeroize::Zeroizing;
 use zone_chainspec::{ZoneChainSpec, ZoneChainSpecParser};
@@ -20,7 +19,8 @@ use zone_p2p::{MAX_TRANSACTION_MESSAGE_SIZE, P2pConfig, Role};
 use zone_payload::DEFAULT_WITHDRAWAL_BATCH_INTERVAL_BLOCKS;
 
 use crate::{
-    DepositAllowlist, ZoneNode, ZoneProverConfig, ZoneRedactedRpcConfig, ZoneSequencerAddOnsConfig,
+    DepositAllowlist, ZoneConsensus, ZoneNode, ZoneProverConfig, ZoneRedactedRpcConfig,
+    ZoneSequencerAddOnsConfig,
     deposit_allowlist::{DEPOSIT_ALLOWLIST_FILE_NAME, DepositAllowlistAdmin},
     dev::DevCommand,
     rpc::auth::DEFAULT_MAX_AUTH_TOKEN_VALIDITY_SECS,
@@ -161,10 +161,7 @@ fn run_node(
 
     let components = move |spec: Arc<ZoneChainSpec>| {
         let evm_config = cli_evm_config(spec.clone(), l1_rpc_url.clone());
-        (
-            evm_config,
-            TempoConsensus::new(spec).with_allow_equal_timestamps(true),
-        )
+        (evm_config, ZoneConsensus::new(spec))
     };
 
     cli.run_with_components::<ZoneNode>(components, async move |mut builder, args| {
