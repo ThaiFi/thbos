@@ -105,7 +105,7 @@ name = "config_commitment"
 required-features = ["test-utils"]
 
 [[test]]
-name = "native_multisig"
+name = "configurable_account"
 required-features = ["test-utils"]
 
 [[bench]]

@@ -1,12 +1,12 @@
-//! ABI dispatch for the [`NativeMultisig`] precompile.
+//! ABI dispatch for the [`ConfigurableAccount`] precompile.
 
-use super::NativeMultisig;
+use super::ConfigurableAccount;
 use crate::{Precompile, charge_input_cost, dispatch, mutate, view};
 use alloy::primitives::Address;
 use revm::precompile::PrecompileResult;
-use tempo_contracts::precompiles::INativeMultisig;
+use tempo_contracts::precompiles::IConfigurableAccount;
 
-impl Precompile for NativeMultisig {
+impl Precompile for ConfigurableAccount {
     fn call(&mut self, calldata: &[u8], msg_sender: Address) -> PrecompileResult {
         if let Some(err) = charge_input_cost(&mut self.storage, calldata) {
             return err;
@@ -15,7 +15,7 @@ impl Precompile for NativeMultisig {
         dispatch!(
             calldata,
             |call| match call {
-                INativeMultisig::INativeMultisigCalls {
+                IConfigurableAccount::IConfigurableAccountCalls {
                     deriveAccount(call) => view(call, |c| {
                         self.derive_account(c.salt, c.threshold, &c.owners)
                     }),

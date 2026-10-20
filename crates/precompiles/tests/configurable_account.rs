@@ -1,4 +1,4 @@
-//! Native multisig precompile calls through its ABI.
+//! Configurable account precompile calls through its ABI.
 
 use alloy::{
     primitives::{Address, B256, Bytes, address, keccak256},
@@ -13,13 +13,16 @@ use revm::{
     state::Bytecode,
 };
 use tempo_chainspec::hardfork::TempoHardfork;
-use tempo_contracts::precompiles::{INativeMultisig, NATIVE_MULTISIG_ADDRESS, NativeMultisigError};
+use tempo_contracts::precompiles::{
+    CONFIGURABLE_ACCOUNT_ADDRESS, ConfigurableAccountError, IConfigurableAccount,
+};
 use tempo_evm::{TempoBlockEnv, evm::TempoEvm};
 use tempo_precompiles::{
-    Precompile, input_cost,
-    native_multisig::{
-        NativeMultisig, UpgradeEligibility, initial_account_proof_gas, valid_account,
+    Precompile,
+    configurable_account::{
+        ConfigurableAccount, UpgradeEligibility, initial_account_proof_gas, valid_account,
     },
+    input_cost,
     storage::{
         ConfigCommitmentWriteGas, StorageActions, StorageCtx, hashmap::HashMapStorageProvider,
     },
@@ -27,9 +30,10 @@ use tempo_precompiles::{
 use tempo_primitives::{
     MasterId, TempoAddressExt, UserTag,
     transaction::{
-        MultisigConfig, MultisigOwner,
-        multisig::{
-            MAX_MULTISIG_OWNERS, MULTISIG_ACCOUNT_CREATE2_PREIMAGE_LEN, MULTISIG_UPGRADE_DOMAIN,
+        ConfigurableAccountConfig, ConfigurableAccountOwner,
+        configurable_account::{
+            CONFIGURABLE_ACCOUNT_CREATE2_PREIMAGE_LEN, CONFIGURABLE_ACCOUNT_UPGRADE_DOMAIN,
+            MAX_CONFIGURABLE_ACCOUNT_OWNERS,
         },
     },
 };
@@ -40,14 +44,16 @@ const EOA: Address = Address::repeat_byte(0x33);
 
 fn t14_storage() -> HashMapStorageProvider {
     let mut storage = HashMapStorageProvider::new_with_spec(1, TempoHardfork::T14);
-    storage.set_multisig_recovery_factory(FACTORY);
+    storage.set_configurable_account_recovery_factory(FACTORY);
     storage
 }
 
-fn weighted_owners(entries: &[(Address, u8)]) -> Vec<INativeMultisig::MultisigOwner> {
+fn weighted_owners(
+    entries: &[(Address, u8)],
+) -> Vec<IConfigurableAccount::ConfigurableAccountOwner> {
     entries
         .iter()
-        .map(|&(owner, weight)| INativeMultisig::MultisigOwner { owner, weight })
+        .map(|&(owner, weight)| IConfigurableAccount::ConfigurableAccountOwner { owner, weight })
         .collect()
 }
 
@@ -55,15 +61,15 @@ fn config(
     salt: B256,
     version: u64,
     threshold: u8,
-    owners: &[INativeMultisig::MultisigOwner],
-) -> MultisigConfig {
-    MultisigConfig {
+    owners: &[IConfigurableAccount::ConfigurableAccountOwner],
+) -> ConfigurableAccountConfig {
+    ConfigurableAccountConfig {
         salt,
         version,
         threshold,
         owners: owners
             .iter()
-            .map(|owner| MultisigOwner {
+            .map(|owner| ConfigurableAccountOwner {
                 owner: owner.owner,
                 weight: owner.weight,
             })
@@ -72,9 +78,9 @@ fn config(
 }
 
 fn call(sender: Address, call: impl SolCall) -> PrecompileOutput {
-    NativeMultisig::new()
+    ConfigurableAccount::new()
         .call(&call.abi_encode(), sender)
-        .expect("native multisig calls never fail the frame")
+        .expect("configurable account calls never fail the frame")
 }
 
 fn returns<C: SolCall>(output: PrecompileOutput) -> C::Return {
@@ -83,7 +89,7 @@ fn returns<C: SolCall>(output: PrecompileOutput) -> C::Return {
 }
 
 #[track_caller]
-fn assert_reverts(output: PrecompileOutput, expected: NativeMultisigError) {
+fn assert_reverts(output: PrecompileOutput, expected: ConfigurableAccountError) {
     assert_eq!(output.status, PrecompileStatus::Revert, "{expected:?}");
     assert_eq!(
         output.bytes,
@@ -92,10 +98,14 @@ fn assert_reverts(output: PrecompileOutput, expected: NativeMultisigError) {
     );
 }
 
-fn derive(salt: B256, threshold: u8, owners: &[INativeMultisig::MultisigOwner]) -> Address {
-    returns::<INativeMultisig::deriveAccountCall>(call(
+fn derive(
+    salt: B256,
+    threshold: u8,
+    owners: &[IConfigurableAccount::ConfigurableAccountOwner],
+) -> Address {
+    returns::<IConfigurableAccount::deriveAccountCall>(call(
         Address::ZERO,
-        INativeMultisig::deriveAccountCall {
+        IConfigurableAccount::deriveAccountCall {
             salt,
             threshold,
             owners: owners.to_vec(),
@@ -104,21 +114,21 @@ fn derive(salt: B256, threshold: u8, owners: &[INativeMultisig::MultisigOwner]) 
 }
 
 fn commitment_of(account: Address) -> B256 {
-    returns::<INativeMultisig::getConfigCommitmentCall>(call(
+    returns::<IConfigurableAccount::getConfigCommitmentCall>(call(
         Address::ZERO,
-        INativeMultisig::getConfigCommitmentCall { account },
+        IConfigurableAccount::getConfigCommitmentCall { account },
     ))
 }
 
 fn update(
     sender: Address,
-    current: &INativeMultisig::MultisigConfig,
+    current: &IConfigurableAccount::ConfigurableAccountConfig,
     threshold: u8,
-    owners: &[INativeMultisig::MultisigOwner],
+    owners: &[IConfigurableAccount::ConfigurableAccountOwner],
 ) -> PrecompileOutput {
     call(
         sender,
-        INativeMultisig::updateConfigCall {
+        IConfigurableAccount::updateConfigCall {
             current: current.clone(),
             threshold,
             owners: owners.to_vec(),
@@ -129,11 +139,11 @@ fn update(
 fn upgrade(
     sender: Address,
     threshold: u8,
-    owners: &[INativeMultisig::MultisigOwner],
+    owners: &[IConfigurableAccount::ConfigurableAccountOwner],
 ) -> PrecompileOutput {
     call(
         sender,
-        INativeMultisig::upgradeAccountCall {
+        IConfigurableAccount::upgradeAccountCall {
             threshold,
             owners: owners.to_vec(),
         },
@@ -141,7 +151,7 @@ fn upgrade(
 }
 
 fn seed_authority(origin: Address, directly_authorized: Address, eligibility: UpgradeEligibility) {
-    NativeMultisig::new()
+    ConfigurableAccount::new()
         .set_authority(origin, directly_authorized, eligibility)
         .unwrap();
 }
@@ -210,21 +220,21 @@ fn derive_account_charges_input_and_proof_hashing_gas() {
         ] {
             let config = config(B256::ZERO, 0, 1, &owners);
             let proof_gas = keccak(config.account_salt_preimage_len())
-                + keccak(MULTISIG_ACCOUNT_CREATE2_PREIMAGE_LEN);
+                + keccak(CONFIGURABLE_ACCOUNT_CREATE2_PREIMAGE_LEN);
             assert_eq!(initial_account_proof_gas(&config).unwrap(), proof_gas);
 
-            let calldata = INativeMultisig::deriveAccountCall {
+            let calldata = IConfigurableAccount::deriveAccountCall {
                 salt: B256::ZERO,
                 threshold: 1,
                 owners,
             }
             .abi_encode();
             let before = StorageCtx.gas_used();
-            let output = NativeMultisig::new()
+            let output = ConfigurableAccount::new()
                 .call(&calldata, Address::ZERO)
                 .unwrap();
             assert_eq!(
-                INativeMultisig::deriveAccountCall::abi_decode_returns(&output.bytes).unwrap(),
+                IConfigurableAccount::deriveAccountCall::abi_decode_returns(&output.bytes).unwrap(),
                 config.derive_account(FACTORY).unwrap()
             );
             assert_eq!(
@@ -234,17 +244,17 @@ fn derive_account_charges_input_and_proof_hashing_gas() {
         }
 
         // An invalid configuration is rejected before the hashing charge.
-        let calldata = INativeMultisig::deriveAccountCall {
+        let calldata = IConfigurableAccount::deriveAccountCall {
             salt: B256::ZERO,
             threshold: 0,
             owners: weighted_owners(&[(OWNER, 1)]),
         }
         .abi_encode();
         let before = StorageCtx.gas_used();
-        let output = NativeMultisig::new()
+        let output = ConfigurableAccount::new()
             .call(&calldata, Address::ZERO)
             .unwrap();
-        assert_reverts(output, NativeMultisigError::invalid_threshold());
+        assert_reverts(output, ConfigurableAccountError::invalid_threshold());
         assert_eq!(
             StorageCtx.gas_used() - before,
             input_cost(TempoHardfork::T14, calldata.len()).unwrap()
@@ -258,7 +268,7 @@ fn native_rotation_requires_registered_current_leaf_and_direct_authority() {
     let (account, owners) = StorageCtx::enter(&mut storage, || {
         let owners = weighted_owners(&[(OWNER, 1)]);
         let account = derive(B256::ZERO, 1, &owners);
-        let mut current = INativeMultisig::MultisigConfig {
+        let mut current = IConfigurableAccount::ConfigurableAccountConfig {
             salt: B256::ZERO,
             version: 0,
             threshold: 1,
@@ -267,24 +277,24 @@ fn native_rotation_requires_registered_current_leaf_and_direct_authority() {
         assert_eq!(commitment_of(account), B256::ZERO);
         assert_reverts(
             update(account, &current, 1, &owners),
-            NativeMultisigError::unauthorized_multisig_caller(),
+            ConfigurableAccountError::unauthorized_configurable_account_caller(),
         );
         seed_authority(account, account, UpgradeEligibility::NotSoleCall);
         assert_reverts(
             update(account, &current, 1, &owners),
-            NativeMultisigError::invalid_config(),
+            ConfigurableAccountError::invalid_config(),
         );
         seed_commitment(
             account,
             config(B256::ZERO, 0, 1, &owners).commitment().unwrap(),
         );
-        returns::<INativeMultisig::updateConfigCall>(update(account, &current, 1, &owners));
+        returns::<IConfigurableAccount::updateConfigCall>(update(account, &current, 1, &owners));
         assert_reverts(
             update(account, &current, 1, &owners),
-            NativeMultisigError::invalid_config(),
+            ConfigurableAccountError::invalid_config(),
         );
         current.version = 1;
-        returns::<INativeMultisig::updateConfigCall>(update(account, &current, 1, &owners));
+        returns::<IConfigurableAccount::updateConfigCall>(update(account, &current, 1, &owners));
         assert_eq!(
             commitment_of(account),
             config(B256::ZERO, 2, 1, &owners).commitment().unwrap()
@@ -294,7 +304,7 @@ fn native_rotation_requires_registered_current_leaf_and_direct_authority() {
 
     let events: Vec<_> = (1..=2)
         .map(|version| {
-            INativeMultisig::MultisigConfigUpdated {
+            IConfigurableAccount::ConfigurableAccountConfigUpdated {
                 account,
                 salt: B256::ZERO,
                 version,
@@ -304,7 +314,7 @@ fn native_rotation_requires_registered_current_leaf_and_direct_authority() {
             .encode_log_data()
         })
         .collect();
-    assert_eq!(storage.get_events(NATIVE_MULTISIG_ADDRESS), &events);
+    assert_eq!(storage.get_events(CONFIGURABLE_ACCOUNT_ADDRESS), &events);
 }
 
 #[test]
@@ -313,7 +323,7 @@ fn update_config_requires_the_sender_as_origin_and_direct_authority() {
     StorageCtx::enter(&mut storage, || {
         let owners = weighted_owners(&[(OWNER, 1)]);
         let account = derive(B256::ZERO, 1, &owners);
-        let current = INativeMultisig::MultisigConfig {
+        let current = IConfigurableAccount::ConfigurableAccountConfig {
             salt: B256::ZERO,
             version: 0,
             threshold: 1,
@@ -335,11 +345,11 @@ fn update_config_requires_the_sender_as_origin_and_direct_authority() {
             );
             assert_reverts(
                 update(sender, &current, 1, &owners),
-                NativeMultisigError::unauthorized_multisig_caller(),
+                ConfigurableAccountError::unauthorized_configurable_account_caller(),
             );
         }
         seed_authority(account, account, UpgradeEligibility::NotSoleCall);
-        returns::<INativeMultisig::updateConfigCall>(update(account, &current, 1, &owners));
+        returns::<IConfigurableAccount::updateConfigCall>(update(account, &current, 1, &owners));
     });
 }
 
@@ -355,7 +365,7 @@ fn update_config_rejects_invalid_current_and_next_configs() {
 
         // A current configuration that fails validation is stale, so it gets `InvalidConfig`.
         let self_owned = weighted_owners(&[(account, 1)]);
-        let current = INativeMultisig::MultisigConfig {
+        let current = IConfigurableAccount::ConfigurableAccountConfig {
             salt: B256::ZERO,
             version: 0,
             threshold: 1,
@@ -363,17 +373,17 @@ fn update_config_rejects_invalid_current_and_next_configs() {
         };
         assert_reverts(
             update(account, &current, 1, &owners),
-            NativeMultisigError::invalid_config(),
+            ConfigurableAccountError::invalid_config(),
         );
 
         // So does one with too many owners to encode.
-        let too_many = (0..=MAX_MULTISIG_OWNERS)
-            .map(|i| INativeMultisig::MultisigOwner {
+        let too_many = (0..=MAX_CONFIGURABLE_ACCOUNT_OWNERS)
+            .map(|i| IConfigurableAccount::ConfigurableAccountOwner {
                 owner: Address::with_last_byte(i as u8 + 1),
                 weight: 1,
             })
             .collect();
-        let current = INativeMultisig::MultisigConfig {
+        let current = IConfigurableAccount::ConfigurableAccountConfig {
             salt: B256::ZERO,
             version: 0,
             threshold: 1,
@@ -381,10 +391,10 @@ fn update_config_rejects_invalid_current_and_next_configs() {
         };
         assert_reverts(
             update(account, &current, 1, &owners),
-            NativeMultisigError::invalid_config(),
+            ConfigurableAccountError::invalid_config(),
         );
 
-        let current = INativeMultisig::MultisigConfig {
+        let current = IConfigurableAccount::ConfigurableAccountConfig {
             salt: B256::ZERO,
             version: 0,
             threshold: 1,
@@ -392,15 +402,15 @@ fn update_config_rejects_invalid_current_and_next_configs() {
         };
         assert_reverts(
             update(account, &current, 0, &owners),
-            NativeMultisigError::invalid_threshold(),
+            ConfigurableAccountError::invalid_threshold(),
         );
         assert_reverts(
             update(account, &current, 1, &[]),
-            NativeMultisigError::invalid_multisig_owner(),
+            ConfigurableAccountError::invalid_configurable_account_owner(),
         );
         assert_eq!(commitment_of(account), initial);
 
-        let last = INativeMultisig::MultisigConfig {
+        let last = IConfigurableAccount::ConfigurableAccountConfig {
             salt: B256::ZERO,
             version: u64::MAX,
             threshold: 1,
@@ -417,7 +427,7 @@ fn update_config_rejects_invalid_current_and_next_configs() {
             .unwrap();
         assert_reverts(
             update(account, &last, 1, &owners),
-            NativeMultisigError::invalid_config(),
+            ConfigurableAccountError::invalid_config(),
         );
     });
 }
@@ -430,7 +440,7 @@ fn native_config_error_precedence_through_abi() {
             name: &'static str,
             threshold: u8,
             owners: Vec<(u8, u8)>,
-            expected: NativeMultisigError,
+            expected: ConfigurableAccountError,
         }
         for Case {
             name: case,
@@ -442,57 +452,59 @@ fn native_config_error_precedence_through_abi() {
                 name: "empty before threshold",
                 threshold: 0,
                 owners: vec![],
-                expected: NativeMultisigError::invalid_multisig_owner(),
+                expected: ConfigurableAccountError::invalid_configurable_account_owner(),
             },
             Case {
                 name: "count before threshold",
                 threshold: 0,
                 owners: vec![(0, 0); 49],
-                expected: NativeMultisigError::too_many_owners(),
+                expected: ConfigurableAccountError::too_many_owners(),
             },
             Case {
                 name: "threshold before address",
                 threshold: 0,
                 owners: vec![(0, 0)],
-                expected: NativeMultisigError::invalid_threshold(),
+                expected: ConfigurableAccountError::invalid_threshold(),
             },
             Case {
                 name: "address before weight",
                 threshold: 1,
                 owners: vec![(0x11, 0), (0, 1)],
-                expected: NativeMultisigError::invalid_multisig_owner(),
+                expected: ConfigurableAccountError::invalid_configurable_account_owner(),
             },
             Case {
                 name: "weight before duplicate",
                 threshold: 1,
                 owners: vec![(0x11, 1), (0x11, 1), (0x22, 0)],
-                expected: NativeMultisigError::invalid_weight(),
+                expected: ConfigurableAccountError::invalid_weight(),
             },
             Case {
                 name: "nonadjacent duplicate before order",
                 threshold: 1,
                 owners: vec![(0x22, 1), (0x11, 1), (0x22, 1)],
-                expected: NativeMultisigError::duplicate_owner(),
+                expected: ConfigurableAccountError::duplicate_owner(),
             },
             Case {
                 name: "order before total weight",
                 threshold: 1,
                 owners: vec![(0x22, 128), (0x11, 128)],
-                expected: NativeMultisigError::invalid_owner_order(),
+                expected: ConfigurableAccountError::invalid_owner_order(),
             },
         ] {
-            let call = INativeMultisig::deriveAccountCall {
+            let call = IConfigurableAccount::deriveAccountCall {
                 salt: B256::ZERO,
                 threshold,
                 owners: owners
                     .into_iter()
-                    .map(|(owner, weight)| INativeMultisig::MultisigOwner {
-                        owner: Address::repeat_byte(owner),
-                        weight,
-                    })
+                    .map(
+                        |(owner, weight)| IConfigurableAccount::ConfigurableAccountOwner {
+                            owner: Address::repeat_byte(owner),
+                            weight,
+                        },
+                    )
                     .collect(),
             };
-            let result = NativeMultisig::new()
+            let result = ConfigurableAccount::new()
                 .call(&call.abi_encode(), Address::ZERO)
                 .unwrap();
             assert_eq!(result.status, PrecompileStatus::Revert, "{case}");
@@ -510,13 +522,13 @@ fn native_factory_is_only_required_to_derive_accounts() {
         assert_reverts(
             call(
                 Address::ZERO,
-                INativeMultisig::deriveAccountCall {
+                IConfigurableAccount::deriveAccountCall {
                     salt: B256::ZERO,
                     threshold: 1,
                     owners: owners.clone(),
                 },
             ),
-            NativeMultisigError::invalid_config(),
+            ConfigurableAccountError::invalid_config(),
         );
 
         let account = config(B256::ZERO, 0, 1, &owners)
@@ -527,21 +539,21 @@ fn native_factory_is_only_required_to_derive_accounts() {
             config(B256::ZERO, 0, 1, &owners).commitment().unwrap(),
         );
         seed_authority(account, account, UpgradeEligibility::NotSoleCall);
-        let current = INativeMultisig::MultisigConfig {
+        let current = IConfigurableAccount::ConfigurableAccountConfig {
             salt: B256::ZERO,
             version: 0,
             threshold: 1,
             owners: owners.clone(),
         };
-        returns::<INativeMultisig::updateConfigCall>(update(account, &current, 1, &owners));
+        returns::<IConfigurableAccount::updateConfigCall>(update(account, &current, 1, &owners));
         assert_eq!(
             commitment_of(account),
             config(B256::ZERO, 1, 1, &owners).commitment().unwrap()
         );
 
         seed_authority(EOA, EOA, UpgradeEligibility::PrimitiveRoot);
-        returns::<INativeMultisig::upgradeAccountCall>(upgrade(EOA, 1, &owners));
-        let salt = keccak256([MULTISIG_UPGRADE_DOMAIN, EOA.as_slice()].concat());
+        returns::<IConfigurableAccount::upgradeAccountCall>(upgrade(EOA, 1, &owners));
+        let salt = keccak256([CONFIGURABLE_ACCOUNT_UPGRADE_DOMAIN, EOA.as_slice()].concat());
         assert_eq!(
             commitment_of(EOA),
             config(salt, 1, 1, &owners).commitment().unwrap()
@@ -557,7 +569,7 @@ fn mutating_calls_reject_static_context() {
         let owners = weighted_owners(&[(OWNER, 1)]);
         let account = derive(B256::ZERO, 1, &owners);
         assert_eq!(commitment_of(account), B256::ZERO);
-        let current = INativeMultisig::MultisigConfig {
+        let current = IConfigurableAccount::ConfigurableAccountConfig {
             salt: B256::ZERO,
             version: 0,
             threshold: 1,
@@ -592,28 +604,28 @@ fn upgrade_account_checks_eligibility_code_and_commitment_in_order() {
         // An unseeded context rejects every migration.
         assert_reverts(
             upgrade(EOA, 1, &owners),
-            NativeMultisigError::upgrade_must_be_only_call(),
+            ConfigurableAccountError::upgrade_must_be_only_call(),
         );
         for (sender, eligibility, expected) in [
             (
                 with_code,
                 UpgradeEligibility::NotSoleCall,
-                NativeMultisigError::upgrade_must_be_only_call(),
+                ConfigurableAccountError::upgrade_must_be_only_call(),
             ),
             (
                 with_code,
                 UpgradeEligibility::NotPrimitiveRoot,
-                NativeMultisigError::primitive_root_required(),
+                ConfigurableAccountError::primitive_root_required(),
             ),
             (
                 with_code,
                 UpgradeEligibility::PrimitiveRoot,
-                NativeMultisigError::account_has_code(),
+                ConfigurableAccountError::account_has_code(),
             ),
             (
                 configured,
                 UpgradeEligibility::PrimitiveRoot,
-                NativeMultisigError::account_already_configurable(),
+                ConfigurableAccountError::account_already_configurable(),
             ),
         ] {
             seed_authority(sender, sender, eligibility);
@@ -628,7 +640,7 @@ fn upgrade_account_checks_eligibility_code_and_commitment_in_order() {
             seed_authority(OWNER, EOA, eligibility);
             assert_reverts(
                 upgrade(EOA, 1, &owners),
-                NativeMultisigError::upgrade_must_be_only_call(),
+                ConfigurableAccountError::upgrade_must_be_only_call(),
             );
         }
 
@@ -645,7 +657,7 @@ fn upgrade_account_checks_eligibility_code_and_commitment_in_order() {
         ] {
             assert_reverts(
                 upgrade(EOA, threshold, &owners),
-                NativeMultisigError::invalid_config(),
+                ConfigurableAccountError::invalid_config(),
             );
         }
         assert_eq!(commitment_of(EOA), B256::ZERO);
@@ -657,35 +669,35 @@ fn upgrade_account_installs_a_version_one_commitment() {
     let mut storage = t14_storage();
     // The root key may also be listed as an owner.
     let owners = weighted_owners(&[(OWNER, 1), (EOA, 1)]);
-    let salt = keccak256([MULTISIG_UPGRADE_DOMAIN, EOA.as_slice()].concat());
+    let salt = keccak256([CONFIGURABLE_ACCOUNT_UPGRADE_DOMAIN, EOA.as_slice()].concat());
     let expected = config(salt, 1, 2, &owners).commitment().unwrap();
     StorageCtx::enter(&mut storage, || {
         seed_authority(EOA, EOA, UpgradeEligibility::PrimitiveRoot);
         assert_eq!(
-            returns::<INativeMultisig::upgradeAccountCall>(upgrade(EOA, 2, &owners)),
+            returns::<IConfigurableAccount::upgradeAccountCall>(upgrade(EOA, 2, &owners)),
             expected
         );
         assert_eq!(commitment_of(EOA), expected);
         assert_reverts(
             upgrade(EOA, 2, &owners),
-            NativeMultisigError::account_already_configurable(),
+            ConfigurableAccountError::account_already_configurable(),
         );
 
         // The upgraded account rotates like any registered one.
-        let current = INativeMultisig::MultisigConfig {
+        let current = IConfigurableAccount::ConfigurableAccountConfig {
             salt,
             version: 1,
             threshold: 2,
             owners: owners.clone(),
         };
-        returns::<INativeMultisig::updateConfigCall>(update(EOA, &current, 1, &owners));
+        returns::<IConfigurableAccount::updateConfigCall>(update(EOA, &current, 1, &owners));
         assert_eq!(
             commitment_of(EOA),
             config(salt, 2, 1, &owners).commitment().unwrap()
         );
     });
 
-    let upgraded = INativeMultisig::AccountUpgraded {
+    let upgraded = IConfigurableAccount::AccountUpgraded {
         account: EOA,
         commitment: expected,
         salt,
@@ -693,7 +705,7 @@ fn upgrade_account_installs_a_version_one_commitment() {
         owners: owners.clone(),
     }
     .encode_log_data();
-    let updated = INativeMultisig::MultisigConfigUpdated {
+    let updated = IConfigurableAccount::ConfigurableAccountConfigUpdated {
         account: EOA,
         salt,
         version: 2,
@@ -702,7 +714,7 @@ fn upgrade_account_installs_a_version_one_commitment() {
     }
     .encode_log_data();
     assert_eq!(
-        storage.get_events(NATIVE_MULTISIG_ADDRESS),
+        storage.get_events(CONFIGURABLE_ACCOUNT_ADDRESS),
         &[upgraded, updated]
     );
 }
