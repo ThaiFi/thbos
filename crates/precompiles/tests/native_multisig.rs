@@ -600,6 +600,18 @@ fn upgrade_account_checks_eligibility_code_and_commitment_in_order() {
             assert_reverts(upgrade(sender, 1, &owners), expected);
         }
 
+        // The sender must be the transaction origin, whatever the eligibility says.
+        for eligibility in [
+            UpgradeEligibility::NotPrimitiveRoot,
+            UpgradeEligibility::PrimitiveRoot,
+        ] {
+            seed_authority(OWNER, EOA, eligibility);
+            assert_reverts(
+                upgrade(EOA, 1, &owners),
+                NativeMultisigError::upgrade_must_be_only_call(),
+            );
+        }
+
         // Configuration errors are all reported as an invalid config.
         seed_authority(EOA, EOA, UpgradeEligibility::PrimitiveRoot);
         for (threshold, owners) in [

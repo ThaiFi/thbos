@@ -122,7 +122,10 @@ impl NativeMultisig {
         threshold: u8,
         owners: Vec<INativeMultisig::MultisigOwner>,
     ) -> Result<B256> {
-        // A sole call means `sender` is the tx caller; whoever seeds the eligibility enforces it.
+        // Only the transaction's own sender may migrate itself.
+        if self.tx_origin.t_read()? != sender {
+            return Err(NativeMultisigError::upgrade_must_be_only_call().into());
+        }
         let eligibility = self.upgrade_eligibility.t_read()?;
         if eligibility == UpgradeEligibility::NotSoleCall {
             return Err(NativeMultisigError::upgrade_must_be_only_call().into());
