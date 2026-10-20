@@ -80,57 +80,59 @@ impl StorageCreditsBackend for StorageCreditsContext<'_, '_, '_> {
 /// SSTORE with Tempo's TIP-1060 storage-credit accounting.
 #[instruction(EvmTypes = TempoEvmTypes, dynamic_gas)]
 pub fn sstore(cx: _, [key, value]: [Word]) -> Result {
-    if cx.state.is_static() {
+    sstore_inner(cx.gas, cx.state, key, value)
+}
+
+pub(crate) fn sstore_inner(
+    gas: &mut Gas,
+    state: &mut InterpreterState<'_, '_, TempoEvmTypes>,
+    key: &U256,
+    value: &U256,
+) -> Result {
+    if state.is_static() {
         return Err(InstrStop::StateChangeDuringStaticCall);
     }
 
-    let is_eip2200 = cx.state.feature(EvmFeatures::EIP2200);
-    if is_eip2200 && cx.gas.remaining() <= u64::from(cx.state.gas_params().get(GasId::CallStipend))
-    {
+    let is_eip2200 = state.feature(EvmFeatures::EIP2200);
+    if is_eip2200 && gas.remaining() <= u64::from(state.gas_params().get(GasId::CallStipend)) {
         return Err(InstrStop::ReentrancySentryOOG);
     }
 
-    cx.gas
-        .spend(cx.state.gas_params().get(GasId::SstoreStatic).into())?;
+    gas.spend(state.gas_params().get(GasId::SstoreStatic).into())?;
 
-    let skip_cold_load = cx.state.feature(EvmFeatures::EIP2929)
-        && cx.gas.remaining()
-            < u64::from(cx.state.gas_params().get(GasId::ColdStorageAdditionalCost));
-    let destination = cx.state.message().destination;
-    let state_load = cx
-        .state
+    let skip_cold_load = state.feature(EvmFeatures::EIP2929)
+        && gas.remaining() < u64::from(state.gas_params().get(GasId::ColdStorageAdditionalCost));
+    let destination = state.message().destination;
+    let state_load = state
         .host()
         .sstore(&destination, key, value, skip_cold_load)
-        .map_err(|error| cx.state.fail(error))?;
+        .map_err(|error| state.fail(error))?;
 
-    if cx.state.host().config_spec_id().is_t7() {
+    if state.host().config_spec_id().is_t7() {
         sstore_storage_credits(
             &mut StorageCreditsContext {
-                gas: cx.gas,
-                state: cx.state,
+                gas: gas,
+                state: state,
             },
             destination,
             None,
             &state_load,
         )
-        .map_err(|error| cx.state.fail(error))?;
+        .map_err(|error| state.fail(error))?;
     }
 
-    cx.gas.spend(
-        cx.state
+    gas.spend(
+        state
             .gas_params()
             .sstore_dynamic_gas(is_eip2200, &state_load),
     )?;
 
-    if cx.state.feature(EvmFeatures::EIP8037) {
-        cx.gas
-            .spend_state(cx.state.gas_params().sstore_state_gas(&state_load))?;
-        cx.gas
-            .refill_reservoir(cx.state.gas_params().sstore_state_gas_refill(&state_load));
+    if state.feature(EvmFeatures::EIP8037) {
+        gas.spend_state(state.gas_params().sstore_state_gas(&state_load))?;
+        gas.refill_reservoir(state.gas_params().sstore_state_gas_refill(&state_load));
     }
 
-    cx.gas
-        .record_refund(cx.state.gas_params().sstore_refund(is_eip2200, &state_load));
+    gas.record_refund(state.gas_params().sstore_refund(is_eip2200, &state_load));
     Ok(())
 }
 
@@ -168,6 +170,32 @@ mod tests {
         initial_credit: u64,
         expected_credit: u64,
     ) {
+        run_sstore_storage_credit(
+            initial_value,
+            new_value,
+            initial_credit,
+            expected_credit,
+            false,
+        );
+    }
+
+    #[cfg(feature = "jit")]
+    #[test]
+    fn jit_sstore_matches_storage_credits_and_gas() {
+        for (initial, value, credit, expected) in [(0, 1, 1, 0), (1, 0, 0, 1)] {
+            let interpreted = run_sstore_storage_credit(initial, value, credit, expected, false);
+            let compiled = run_sstore_storage_credit(initial, value, credit, expected, true);
+            assert_eq!(compiled, interpreted);
+        }
+    }
+
+    fn run_sstore_storage_credit(
+        initial_value: u8,
+        new_value: u8,
+        initial_credit: u64,
+        expected_credit: u64,
+        _jit: bool,
+    ) -> evm2::TxResultWithState<TempoEvmTypes> {
         let caller = Address::repeat_byte(0x11);
         let contract = Address::repeat_byte(0x22);
         let credit_slot = StorageCredits::slot(contract);
@@ -199,6 +227,23 @@ mod tests {
             NoPrecompiles::default(),
             TempoEvmExt::default(),
         );
+        #[cfg(feature = "jit")]
+        let jit_backend = if _jit {
+            let backend = crate::jit::JitBackend::new(crate::jit::RuntimeConfig {
+                blocking: true,
+                single_error: false,
+                gas_params: Some(evm.version().gas_params),
+                host: crate::jit::host_config(),
+                ..Default::default()
+            })
+            .unwrap();
+            evm.set_interpreter_runner(evm2_jit_runtime::evm2_evm::JitInterpreterRunner::new(
+                backend.clone(),
+            ));
+            Some(backend)
+        } else {
+            None
+        };
         let tx = TempoTxEnv::from(Recovered::new_unchecked(
             TempoTxEnvelope::Legacy(Signed::new_unhashed(
                 TxLegacy {
@@ -219,6 +264,13 @@ mod tests {
             .unwrap()
             .detach();
         assert!(result.result.status);
+        #[cfg(feature = "jit")]
+        if let Some(backend) = jit_backend {
+            assert!(
+                backend.stats().lookup_hits > 0,
+                "the transaction must execute compiled code"
+            );
+        }
 
         // Check the persisted block output: correct slot values alone do not guarantee that
         // the storage-owning precompile retains its account metadata across this conversion.
@@ -244,6 +296,7 @@ mod tests {
             native_account(account.original_info.as_ref().unwrap()),
             credit_account,
         );
+        result
     }
 
     #[test]

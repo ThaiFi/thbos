@@ -206,6 +206,25 @@ impl ConfigureEvm for TempoEvmConfig {
         &self.block_assembler
     }
 
+    fn supports_prewarm_reuse(&self) -> bool {
+        true
+    }
+
+    fn prewarm_transaction(
+        &self,
+        evm: &mut reth_evm::EvmFor<'_, Self>,
+        mut transaction: reth_evm::TxEnvFor<Self>,
+    ) -> Result<Option<reth_evm::execute::PrewarmResult>, reth_evm::execute::BlockExecutionError>
+    {
+        transaction.inner_mut().set_expiring_nonce_idx(None);
+        let hash = transaction.inner().tx_hash();
+        let output = reth_evm::Evm::transact(evm, &transaction)?;
+        Ok(Some(reth_evm::execute::PrewarmResult {
+            state: output.pending_state,
+            result: Box::new((hash, output.result)),
+        }))
+    }
+
     fn evm_env(&self, header: &TempoHeader) -> Result<EvmEnvFor<Self>, Self::Error> {
         let blob_params = self.chain_spec.blob_params_at_timestamp(header.timestamp());
         let tempo_spec = self.chain_spec.tempo_hardfork_at(header.timestamp());
@@ -668,3 +687,6 @@ mod tests {
         );
     }
 }
+
+#[cfg(feature = "jit")]
+pub mod jit;
