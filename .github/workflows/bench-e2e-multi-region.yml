@@ -289,6 +289,8 @@ jobs:
     timeout-minutes: 360
 
     env:
+      TEMPO_BUILD_JIT: "true"
+      LLVM_SYS_221_PREFIX: /usr/lib/llvm-22
       RUSTC_WRAPPER: sccache
       CARGO_INCREMENTAL: "0"
       # Stable paths let sccache reuse Rust compilations across fresh Depot runners.
@@ -329,7 +331,7 @@ jobs:
       BENCH_INPUT_BASELINE_ARGS: ${{ inputs['baseline-args'] || '' }}
       BENCH_INPUT_FEATURE_ARGS: ${{ inputs['feature-args'] || '' }}
       BENCH_INPUT_GAS_LIMIT: ${{ inputs['gas-limit'] || '5000000000' }}
-      BENCH_INPUT_GENERAL_GAS_LIMIT: ${{ inputs['general-gas-limit'] || '1500000000' }}
+      BENCH_INPUT_GENERAL_GAS_LIMIT: ${{ inputs['general-gas-limit'] || '1000000000000' }}
       BENCH_INPUT_NO_CACHE: ${{ github.event_name == 'workflow_dispatch' && (inputs['no-cache'] == true || inputs['no-cache'] == 'true') && 'true' || 'false' }}
       BENCH_INPUT_BENCH_ARGS: ${{ inputs['bench-args'] || '' }}
       BENCH_INPUT_RUN_PAIRS: ${{ inputs['run-pairs'] || '1' }}
@@ -414,7 +416,7 @@ jobs:
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           repository: tempoxyz/tempo-multi-region-benchmark
-          ref: ${{ github.repository == 'tempoxyz/tempo-multi-region-benchmark' && github.sha || 'main' }}
+          ref: f3799c4
           path: ${{ env.BENCH_REPO_DIR }}
           token: ${{ steps.github-sts.outputs.token }}
           persist-credentials: false
@@ -518,6 +520,9 @@ jobs:
 
       - name: Setup sccache
         uses: tempoxyz/gh-actions/vendor/mozilla-actions/sccache-action@35019557465e3c38ee3468be171771fd73577584 # 2026-10-20T06-22-38Z-35019557
+
+      - name: Install LLVM 22 for native EVM2 JIT
+        run: sudo bash "$BENCH_REPO_DIR/scripts/install_llvm_ubuntu.sh"
 
       - name: Configure AWS credentials
         if: env.BENCH_INPUT_CLOUD == 'aws'
