@@ -292,13 +292,14 @@ temporary leader disconnections.
 
 Sequencers started with `--deposits.allowlist` serve the `zoneAdmin` allowlist methods on their
 operator RPC. Each write carries an EIP-712 signature from the `--deposits.allowlist.admin`
-address with a deadline at most 10 minutes ahead; a sequencer rejects any other write. An
-rpc-follower serves the same methods and relays each request unchanged to every quorum member on
-a dedicated channel, so it needs no key. Each member checks the signature, applies the write to its
-own persisted list, and acknowledges it. The call returns only after every member acknowledges,
-and fails naming the members that did not; members that already applied a failed write keep it.
-Callers must send writes one at a time, because concurrent writes may apply in different orders
-on different members.
+address, a nonce that must exceed the last applied one, and a deadline at most 10 minutes ahead;
+a sequencer rejects any other write. An rpc-follower started with `--deposits.allowlist.admin`
+serves the same methods: it checks the signature and deadline, then relays each request unchanged
+to every quorum member on a dedicated channel, so it needs no key. Each member applies the write
+to its own persisted list and acknowledges it. The call returns only after every member
+acknowledges, and fails naming the members that did not; members that already applied a failed
+write keep it, so callers retry the same write, which those members acknowledge without
+reapplying. Callers must send writes one at a time.
 
 Requests and acknowledgements must fit in one 4 MiB frame, so the list is capped at 80,000
 addresses. Senders check sizes before sending, because a receiver blocks a peer that sends an

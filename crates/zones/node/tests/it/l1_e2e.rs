@@ -2515,17 +2515,15 @@ async fn test_deposit_allowlist_bounces_unlisted_senders() -> eyre::Result<()> {
     let listed_signer = l1.signer_at(3);
     let unlisted_signer = l1.signer_at(4);
     let datadir = tempfile::tempdir()?;
-    let seed = datadir.path().join("seed.json");
-    std::fs::write(&seed, serde_json::to_vec(&[listed_signer.address()])?)?;
     // This test changes the list in process, so no admin signs RPC writes.
     let allowlist = DepositAllowlist::load(
         datadir.path().join("deposit-allowlist.json"),
-        Some(&seed),
         DepositAllowlistAdmin {
             address: Address::ZERO,
             zone_chain_id: 0,
         },
     )?;
+    allowlist.replace(vec![listed_signer.address()])?;
 
     let zone = ZoneTestNode::start_from_l1_with_deposit_allowlist(
         l1.http_url(),
@@ -2596,19 +2594,29 @@ mod allowlist_admin {
         struct SetDepositAllowed {
             address[] addresses;
             bool allowed;
+            uint64 nonce;
             uint64 deadline;
         }
     }
 }
 
-/// Call `zoneAdmin_setDepositAllowed` with a write `signer` authorizes for the next minute.
-async fn set_deposit_allowed(
-    node: &ZoneTestNode,
+/// `zoneAdmin_setDepositAllowed` parameters, signed independently of the node's encoding.
+struct SignedSet {
+    addresses: Vec<Address>,
+    allowed: bool,
+    nonce: u64,
+    deadline: u64,
+    signature: alloy::primitives::Bytes,
+}
+
+/// A write `signer` authorizes for the next minute.
+fn sign_set(
     signer: &alloy::signers::local::PrivateKeySigner,
     zone_chain_id: u64,
     addresses: &[Address],
     allowed: bool,
-) -> eyre::Result<()> {
+    nonce: u64,
+) -> eyre::Result<SignedSet> {
     use alloy::{signers::SignerSync as _, sol_types::SolStruct as _};
 
     let deadline = std::time::SystemTime::now()
@@ -2623,15 +2631,32 @@ async fn set_deposit_allowed(
     let hash = allowlist_admin::SetDepositAllowed {
         addresses: addresses.to_vec(),
         allowed,
+        nonce,
         deadline,
     }
     .eip712_signing_hash(&domain);
-    let signature =
-        alloy::primitives::Bytes::copy_from_slice(&signer.sign_hash_sync(&hash)?.as_bytes());
+    Ok(SignedSet {
+        addresses: addresses.to_vec(),
+        allowed,
+        nonce,
+        deadline,
+        signature: alloy::primitives::Bytes::copy_from_slice(
+            &signer.sign_hash_sync(&hash)?.as_bytes(),
+        ),
+    })
+}
+
+async fn send_set(node: &ZoneTestNode, write: &SignedSet) -> eyre::Result<()> {
     node.provider()
         .raw_request::<_, ()>(
             "zoneAdmin_setDepositAllowed".into(),
-            (addresses, allowed, deadline, signature),
+            (
+                &write.addresses,
+                write.allowed,
+                write.nonce,
+                write.deadline,
+                &write.signature,
+            ),
         )
         .await?;
     Ok(())
@@ -2662,23 +2687,42 @@ async fn test_rpc_node_relays_deposit_allowlist_to_every_sequencer() -> eyre::Re
     .await?;
     assert_eq!(listed, vec![first]);
 
-    // A write not signed by the admin is rejected by every sequencer.
-    let error = set_deposit_allowed(rpc, &second_signer, zone_chain_id, &[second], true)
+    // The RPC node rejects a write not signed by the admin before relaying it.
+    let forged = sign_set(&second_signer, zone_chain_id, &[second], true, 1)?;
+    let error = send_set(rpc, &forged)
         .await
         .expect_err("a write signed by a non-admin must fail")
         .to_string();
-    assert_eq!(
-        error.matches("not the allowlist admin").count(),
-        3,
-        "every sequencer must reject the write: {error}"
-    );
+    assert!(error.contains("not the allowlist admin"), "{error}");
+    // Each sequencer rejects it too when called directly.
     for node in &cluster.nodes {
+        let error = send_set(node, &forged)
+            .await
+            .expect_err("a sequencer must reject a non-admin write")
+            .to_string();
+        assert!(error.contains("not the allowlist admin"), "{error}");
         assert_eq!(get_deposit_allowlist(node).await?, vec![first]);
     }
 
     // Swap the listed sender in one write each way, so the expected list is unambiguous.
-    set_deposit_allowed(rpc, &admin, zone_chain_id, &[second], true).await?;
-    set_deposit_allowed(rpc, &admin, zone_chain_id, &[first], false).await?;
+    send_set(rpc, &sign_set(&admin, zone_chain_id, &[second], true, 1)?).await?;
+    let remove_first = sign_set(&admin, zone_chain_id, &[first], false, 2)?;
+    send_set(rpc, &remove_first).await?;
+    // Retrying the last write unchanged succeeds without changing anything.
+    send_set(rpc, &remove_first).await?;
+    // An admin write with an older nonce, such as a replayed one, cannot re-add the removed
+    // sender on any sequencer.
+    let error = send_set(rpc, &sign_set(&admin, zone_chain_id, &[first], true, 1)?)
+        .await
+        .expect_err("a write with a stale nonce must fail")
+        .to_string();
+    assert_eq!(
+        error
+            .matches("does not exceed the last applied nonce 2")
+            .count(),
+        3,
+        "every sequencer must reject the stale write: {error}"
+    );
     for (index, node) in cluster.nodes.iter().enumerate() {
         assert_eq!(
             get_deposit_allowlist(node).await?,
@@ -2738,19 +2782,26 @@ async fn test_rpc_node_allowlist_write_fails_with_offline_sequencer() -> eyre::R
     let added = crate::utils::signer_at(4).address();
     let fixture = start_real_p2p_cluster_with_deposit_allowlist(4, 2, &[]).await?;
     let (cluster, rpc) = (&fixture.cluster, &fixture.rpc_node);
-    let admin = deposit_allowlist_admin();
+    let write = sign_set(
+        &deposit_allowlist_admin(),
+        fixture.zone_chain_id,
+        &[added],
+        true,
+        1,
+    )?;
 
-    // Until the RPC node connects to both online sequencers, the error lists them as well.
+    // Retry the same write, as a caller would, until the RPC node has connected to both online
+    // sequencers; until then the error lists them as well.
     let error = poll_until(
         Duration::from_secs(60),
         Duration::from_millis(500),
         "relayed write missing only the offline sequencer",
         || async {
-            let error = set_deposit_allowed(rpc, &admin, fixture.zone_chain_id, &[added], true)
+            let error = send_set(rpc, &write)
                 .await
                 .expect_err("a write cannot reach the offline sequencer")
                 .to_string();
-            Ok((!error.contains(", ")).then_some(error))
+            Ok((!error.contains(", ") && !error.contains(';')).then_some(error))
         },
     )
     .await?;

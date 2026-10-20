@@ -2,6 +2,7 @@
 
 use std::{net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
 
+use alloy_primitives::Address;
 use alloy_provider::{Provider, ProviderBuilder};
 use alloy_signer_local::PrivateKeySigner;
 use clap::{Arg, ArgAction, Args, CommandFactory, FromArgMatches};
@@ -369,21 +370,11 @@ async fn configure_sequencing(
         !args.deposit_allowlist || should_sequence_blocks,
         "--deposits.allowlist requires a sequencer"
     );
+    let enforced_allowlist_admin = enforced_allowlist_admin(args, zone_chain_id)?;
     if should_sequence_blocks {
         let sequencer_signer = load_sequencer_signer(args.sequencer_key_file.as_deref()).await?;
-        // `clap` sets the admin exactly when `--deposits.allowlist` is set.
-        let deposit_allowlist = args
-            .deposit_allowlist_admin
-            .map(|address| {
-                DepositAllowlist::load(
-                    data_dir.join(DEPOSIT_ALLOWLIST_FILE_NAME),
-                    args.deposit_allowlist_seed.as_deref(),
-                    DepositAllowlistAdmin {
-                        address,
-                        zone_chain_id,
-                    },
-                )
-            })
+        let deposit_allowlist = enforced_allowlist_admin
+            .map(|admin| DepositAllowlist::load(data_dir.join(DEPOSIT_ALLOWLIST_FILE_NAME), admin))
             .transpose()?;
         node = node.with_sequencer(ZoneSequencerAddOnsConfig {
             sequencer_signer,
@@ -403,6 +394,12 @@ async fn configure_sequencing(
             deposit_allowlist,
         });
     }
+    if rpc_only && let Some(address) = args.deposit_allowlist_admin {
+        node = node.with_deposit_allowlist_relay(DepositAllowlistAdmin {
+            address,
+            zone_chain_id,
+        });
+    }
     if let Some(config) = prover_config {
         node = node.with_prover(config);
     }
@@ -410,6 +407,24 @@ async fn configure_sequencing(
         node = node.with_p2p(config);
     }
     Ok(node)
+}
+
+/// The admin of the allowlist this sequencer enforces. Keyed on `--deposits.allowlist` alone, so
+/// a leftover admin setting never enables enforcement.
+fn enforced_allowlist_admin(
+    args: &ZoneArgs,
+    zone_chain_id: u64,
+) -> eyre::Result<Option<DepositAllowlistAdmin>> {
+    if !args.deposit_allowlist {
+        return Ok(None);
+    }
+    let address = args
+        .deposit_allowlist_admin
+        .ok_or_else(|| eyre::eyre!("--deposits.allowlist requires --deposits.allowlist.admin"))?;
+    Ok(Some(DepositAllowlistAdmin {
+        address,
+        zone_chain_id,
+    }))
 }
 
 async fn load_sequencer_signer(
@@ -703,31 +718,18 @@ pub struct ZoneArgs {
     pub shadow_prover_pcrs: Option<zone_prover::ShadowProofVerifier>,
 
     /// Bounce deposits whose L1 sender is not on the allowlist persisted at
-    /// `<datadir>/deposit-allowlist.json`. Startup fails if that file and the seed are both
-    /// missing.
-    #[arg(
-        long = "deposits.allowlist",
-        env = "DEPOSITS_ALLOWLIST",
-        requires = "deposit_allowlist_admin"
-    )]
+    /// `<datadir>/deposit-allowlist.json`, which starts empty. Requires
+    /// `--deposits.allowlist.admin`.
+    #[arg(long = "deposits.allowlist", env = "DEPOSITS_ALLOWLIST")]
     pub deposit_allowlist: bool,
 
-    /// JSON array of depositor addresses used to create the persisted allowlist when it does
-    /// not exist yet. Ignored once the persisted allowlist exists.
-    #[arg(
-        long = "deposits.allowlist.seed",
-        env = "DEPOSITS_ALLOWLIST_SEED",
-        value_name = "PATH",
-        requires = "deposit_allowlist"
-    )]
-    pub deposit_allowlist_seed: Option<PathBuf>,
-
-    /// Address whose EIP-712 signatures authorize `zoneAdmin` allowlist writes.
+    /// Address whose EIP-712 signatures authorize `zoneAdmin` allowlist writes. On a sequencer it
+    /// applies with `--deposits.allowlist`; on an rpc_only node it enables relaying those writes
+    /// to the sequencers.
     #[arg(
         long = "deposits.allowlist.admin",
         env = "DEPOSITS_ALLOWLIST_ADMIN",
-        value_name = "ADDRESS",
-        requires = "deposit_allowlist"
+        value_name = "ADDRESS"
     )]
     pub deposit_allowlist_admin: Option<Address>,
 }
@@ -1298,44 +1300,40 @@ mod tests {
     }
 
     #[test]
-    fn deposit_allowlist_requires_an_admin() {
-        let common = [
-            "tempo-zone",
-            "--l1.rpc-url",
-            "ws://localhost:8546",
-            "--l1.portal-address",
-            "0x0000000000000000000000000000000000000001",
-        ];
-        let admin = "0x00000000000000000000000000000000000000ad";
+    fn deposit_allowlist_is_enforced_only_when_enabled() {
+        let common = ["tempo-zone", "--l1.rpc-url", "ws://localhost:8546"];
+        let admin: Address = "0x00000000000000000000000000000000000000ad"
+            .parse()
+            .unwrap();
+        let admin_arg = admin.to_string();
+        let parse = |extra: &[&str]| {
+            ZoneArgsParser::try_parse_from(common.iter().chain(extra))
+                .unwrap()
+                .zone
+        };
 
-        let error =
-            ZoneArgsParser::try_parse_from(common.into_iter().chain(["--deposits.allowlist"]))
-                .unwrap_err();
+        let error = enforced_allowlist_admin(&parse(&["--deposits.allowlist"]), 1).unwrap_err();
         assert_eq!(
-            error.kind(),
-            clap::error::ErrorKind::MissingRequiredArgument
+            error.to_string(),
+            "--deposits.allowlist requires --deposits.allowlist.admin"
         );
-        let error = ZoneArgsParser::try_parse_from(
-            common
-                .into_iter()
-                .chain(["--deposits.allowlist.admin", admin]),
+        // An admin left configured after disabling the allowlist does not re-enable it.
+        assert!(
+            enforced_allowlist_admin(&parse(&["--deposits.allowlist.admin", &admin_arg]), 1)
+                .unwrap()
+                .is_none()
+        );
+        let enforced = enforced_allowlist_admin(
+            &parse(&[
+                "--deposits.allowlist",
+                "--deposits.allowlist.admin",
+                &admin_arg,
+            ]),
+            7,
         )
-        .unwrap_err();
-        assert_eq!(
-            error.kind(),
-            clap::error::ErrorKind::MissingRequiredArgument
-        );
-
-        let parsed = ZoneArgsParser::try_parse_from(common.into_iter().chain([
-            "--deposits.allowlist",
-            "--deposits.allowlist.admin",
-            admin,
-        ]))
+        .unwrap()
         .unwrap();
-        assert_eq!(
-            parsed.zone.deposit_allowlist_admin,
-            Some(admin.parse().unwrap())
-        );
+        assert_eq!((enforced.address, enforced.zone_chain_id), (admin, 7));
     }
 
     #[test]

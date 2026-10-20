@@ -229,15 +229,18 @@ fn prepare_deposit(
         amount = %d.amount,
         "Encrypted deposit has invalid ephemeral pubkey, using zeroed DecryptionData"
     );
-    (
-        queued,
-        Some(abi::DecryptionData {
-            sharedSecret: B256::ZERO,
-            sharedSecretYParity: 0x02,
-            cpProof: abi::ChaumPedersenProof {
-                s: B256::ZERO,
-                c: B256::ZERO,
-            },
-        }),
-    )
+    (queued, Some(failed_decryption()))
+}
+
+/// Decryption data whose shared secret is not a curve point, so the inbox's Chaum-Pedersen check
+/// fails and the deposit is bounced back to its Tempo refund recipient.
+pub fn failed_decryption() -> abi::DecryptionData {
+    abi::DecryptionData {
+        sharedSecret: B256::ZERO,
+        sharedSecretYParity: 0x02,
+        cpProof: abi::ChaumPedersenProof {
+            s: B256::ZERO,
+            c: B256::ZERO,
+        },
+    }
 }

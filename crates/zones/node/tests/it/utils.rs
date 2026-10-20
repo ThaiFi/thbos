@@ -1097,6 +1097,7 @@ impl ZoneTestNode {
             additional_decryption_keys,
             None,
             None,
+            None,
         )
         .await
     }
@@ -1123,6 +1124,7 @@ impl ZoneTestNode {
             Vec::new(),
             None,
             Some(deposit_allowlist),
+            None,
         )
         .await
     }
@@ -1305,6 +1307,7 @@ impl ZoneTestNode {
             Vec::new(),
             None,
             None,
+            None,
         )
         .await
     }
@@ -1322,6 +1325,7 @@ impl ZoneTestNode {
         additional_decryption_keys: Vec<SecretKey>,
         prover_config: Option<ZoneProverConfig>,
         deposit_allowlist: Option<zone_node::DepositAllowlist>,
+        deposit_allowlist_relay: Option<zone_node::DepositAllowlistAdmin>,
     ) -> eyre::Result<Self> {
         let tasks = Runtime::test();
         let is_local_dummy_l1 = l1_ws_url == DUMMY_L1_URL;
@@ -1404,6 +1408,9 @@ impl ZoneTestNode {
             let zone_id = p2p_config.zone_id();
             let rpc_only = p2p_config.is_rpc_only();
             zone_node = zone_node.with_p2p(p2p_config);
+            if let Some(admin) = deposit_allowlist_relay {
+                zone_node = zone_node.with_deposit_allowlist_relay(admin);
+            }
             // Every quorum member holds complete sequencer resources; the role controller
             // decides at runtime whether this node's engine and sequencer background tasks are
             // active. An RPC-only node never sequences, so it holds none.
@@ -4269,22 +4276,18 @@ async fn start_real_p2p_cluster_inner(
         zone_chain_id: zone_chain_id(l1.provider().get_chain_id().await?, zone_id)?,
     };
     let deposit_allowlists = match deposit_allowlist_seed {
-        Some(seed) => {
-            let seed_path = allowlist_datadir.path().join("seed.json");
-            std::fs::write(&seed_path, serde_json::to_vec(seed)?)?;
-            (0..active_nodes)
-                .map(|index| {
-                    zone_node::DepositAllowlist::load(
-                        allowlist_datadir
-                            .path()
-                            .join(format!("node-{index}-deposit-allowlist.json")),
-                        Some(&seed_path),
-                        allowlist_admin,
-                    )
-                    .map(Some)
-                })
-                .collect::<eyre::Result<Vec<_>>>()?
-        }
+        Some(seed) => (0..active_nodes)
+            .map(|index| {
+                let allowlist = zone_node::DepositAllowlist::load(
+                    allowlist_datadir
+                        .path()
+                        .join(format!("node-{index}-deposit-allowlist.json")),
+                    allowlist_admin,
+                )?;
+                allowlist.replace(seed.to_vec())?;
+                Ok(Some(allowlist))
+            })
+            .collect::<eyre::Result<Vec<_>>>()?,
         None => vec![None; active_nodes],
     };
 
@@ -4307,6 +4310,7 @@ async fn start_real_p2p_cluster_inner(
                 additional_decryption_keys,
                 prover_config.clone(),
                 deposit_allowlists[index].clone(),
+                None,
             )
         },
     ))
@@ -4327,6 +4331,7 @@ async fn start_real_p2p_cluster_inner(
                     vec![SecretKey::from(attestation_signers[0].credential())],
                     None,
                     None,
+                    Some(allowlist_admin),
                 )
                 .await?,
             zone_chain_id: allowlist_admin.zone_chain_id,

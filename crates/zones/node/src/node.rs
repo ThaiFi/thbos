@@ -4,7 +4,7 @@
 //! It reuses Tempo's EVM, primitives, and pool, but with noop consensus/network/payload.
 
 use crate::{
-    DepositAllowlist, ZoneEngine,
+    DepositAllowlist, DepositAllowlistAdmin, ZoneEngine,
     deposit_allowlist::{AllowlistRelay, DepositAllowlistApiServer as _, apply_relayed_updates},
     follower::PeerTipRegistry,
     replication::{BACKFILL_SERVE_QUEUE_CAPACITY, serve_backfill_requests},
@@ -290,6 +290,8 @@ pub struct ZoneNode {
     prover_config: Option<ZoneProverConfig>,
     /// Optional static Zone P2P networking config.
     p2p_config: Option<P2pConfig>,
+    /// Admin whose signed allowlist writes an RPC-only node relays to the sequencers.
+    deposit_allowlist_admin: Option<DepositAllowlistAdmin>,
     /// Whether a consumer outside this builder drains the deposit queue.
     external_deposit_consumer: bool,
 }
@@ -338,8 +340,16 @@ impl ZoneNode {
             sequencer_config: None,
             prover_config: None,
             p2p_config: None,
+            deposit_allowlist_admin: None,
             external_deposit_consumer: false,
         }
+    }
+
+    /// On an RPC-only node, serve the `zoneAdmin` allowlist methods and relay writes signed by
+    /// `admin` to every sequencer. Without it, the node does not serve those methods.
+    pub fn with_deposit_allowlist_relay(mut self, admin: DepositAllowlistAdmin) -> Self {
+        self.deposit_allowlist_admin = Some(admin);
+        self
     }
 
     /// Set the redacted RPC configuration.
@@ -504,6 +514,8 @@ where
     prover_config: Option<ZoneProverConfig>,
     /// Static Zone P2P networking configuration.
     p2p_config: Option<P2pConfig>,
+    /// Admin whose signed allowlist writes an RPC-only node relays to the sequencers.
+    deposit_allowlist_admin: Option<DepositAllowlistAdmin>,
     /// Whether a consumer outside this builder drains the deposit queue.
     external_deposit_consumer: bool,
 }
@@ -535,6 +547,7 @@ where
         sequencer_config: Option<ZoneSequencerAddOnsConfig>,
         prover_config: Option<ZoneProverConfig>,
         p2p_config: Option<P2pConfig>,
+        deposit_allowlist_admin: Option<DepositAllowlistAdmin>,
         external_deposit_consumer: bool,
     ) -> Self {
         Self {
@@ -557,6 +570,7 @@ where
             sequencer_config,
             prover_config,
             p2p_config,
+            deposit_allowlist_admin,
             external_deposit_consumer,
         }
     }
@@ -813,8 +827,8 @@ where
         let debug_l1_provider = l1_provider.clone();
         let evm_chain_spec = ctx.node.evm_config().chain_spec().clone();
         let datadir = ctx.config.datadir().data_dir().to_path_buf();
-        // A sequencer serves its own allowlist; an RPC-only node relays each call to every
-        // sequencer over P2P.
+        // A sequencer serves its own allowlist; an RPC-only node configured with the admin relays
+        // each call to every sequencer over P2P.
         let local_allowlist = self
             .sequencer_config
             .as_ref()
@@ -830,10 +844,11 @@ where
                     "zone-deposit-allowlist-applier",
                     apply_relayed_updates(local_allowlist, events, runtime.commands.clone()),
                 );
-            } else {
+            } else if let Some(admin) = self.deposit_allowlist_admin {
                 let relay = AllowlistRelay::new(
                     runtime.allowlist_relay_targets.clone(),
                     runtime.commands.clone(),
+                    admin,
                 );
                 let router = relay.clone();
                 task_executor.spawn_critical_task("zone-deposit-allowlist-relay", async move {
@@ -1816,6 +1831,7 @@ where
             self.sequencer_config.clone(),
             self.prover_config.clone(),
             self.p2p_config.clone(),
+            self.deposit_allowlist_admin,
             self.external_deposit_consumer,
         )
     }
