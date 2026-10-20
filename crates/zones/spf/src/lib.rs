@@ -7,6 +7,7 @@
 use alloy_consensus::{BlockHeader as _, Sealable as _};
 use alloy_primitives::{B256, U256, keccak256};
 use reth_chainspec::EthChainSpec as _;
+use reth_consensus_common::validation::validate_against_parent_gas_limit;
 use reth_evm::execute::BlockAssemblerInput;
 use reth_primitives_traits::SealedHeader;
 use reth_storage_api::noop::NoopProvider;
@@ -148,6 +149,7 @@ pub fn prove_zone_batch(config: &SpfConfig, witness: BatchWitness) -> Result<Bat
             });
         }
         validate_zone_block_timestamp(block, block_index, &previous_header)?;
+        validate_zone_block_gas_limit(block, block_index, &previous_header, config.chain_spec())?;
 
         validate_system_inputs(block, block_index)?;
         let is_last = block_index + 1 == witness.zone_blocks.len();
@@ -346,6 +348,29 @@ fn validate_zone_block_timestamp(
     }
 
     Ok(())
+}
+
+/// Validates the witness-controlled gas limit using the same parent-relative rule as Zone nodes.
+fn validate_zone_block_gas_limit(
+    block: &ZoneBlock,
+    block_index: usize,
+    parent: &TempoHeader,
+    chain_spec: &zone_chainspec::ZoneChainSpec,
+) -> Result<(), Error> {
+    let mut child = parent.clone();
+    child.inner.number = block.number;
+    child.inner.timestamp = block.timestamp;
+    child.inner.gas_limit = block.gas_limit;
+    let child = SealedHeader::new_unhashed(child);
+    let parent = SealedHeader::new_unhashed(parent.clone());
+
+    validate_against_parent_gas_limit(&child, &parent, chain_spec).map_err(|_| {
+        Error::InvalidGasLimit {
+            block_index,
+            parent: parent.inner.gas_limit,
+            actual: block.gas_limit,
+        }
+    })
 }
 
 fn read_zone_storage(
@@ -563,6 +588,15 @@ pub enum Error {
     /// A Zone block's full millisecond timestamp regressed from its predecessor.
     #[error("zone block millisecond timestamp regressed: previous {previous}, got {actual}")]
     BlockTimestampRegression { previous: u64, actual: u64 },
+    /// A witness-controlled Zone gas limit violates Tempo's parent-relative adjustment bound.
+    #[error(
+        "zone block {block_index} gas limit {actual} is invalid relative to parent gas limit {parent}"
+    )]
+    InvalidGasLimit {
+        block_index: usize,
+        parent: u64,
+        actual: u64,
+    },
     /// Tempo-dependent inputs appeared without a Tempo header import.
     #[error("zone block {block_index} has Tempo inputs without a Tempo header")]
     TempoInputsWithoutHeader { block_index: usize },
@@ -692,6 +726,7 @@ mod tests {
     use alloy_eips::eip2935::{HISTORY_SERVE_WINDOW, HISTORY_STORAGE_ADDRESS};
     use alloy_primitives::{Address, B256, Bytes, U256, keccak256};
     use reth_evm::ConfigureEvm;
+    use reth_primitives_traits::constants::GAS_LIMIT_BOUND_DIVISOR;
     use reth_trie_common::{
         EMPTY_ROOT_HASH, LeafNode, Nibbles, TrieAccount, TrieNode, root::state_root_unhashed,
     };
@@ -905,6 +940,47 @@ mod tests {
             validate_zone_block_timestamp(&empty_zone_block(100, 501), 3, &parent),
             Ok(())
         );
+    }
+
+    #[test]
+    fn validates_parent_relative_gas_limit_before_execution() {
+        let config = test_config();
+        let parent_gas_limit = 30_000_000;
+        let parent = TempoHeader {
+            inner: Header {
+                gas_limit: parent_gas_limit,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let adjustment_bound = parent_gas_limit / GAS_LIMIT_BOUND_DIVISOR;
+        let mut block = empty_zone_block(0, 0);
+
+        for gas_limit in [
+            parent_gas_limit - adjustment_bound + 1,
+            parent_gas_limit + adjustment_bound - 1,
+        ] {
+            block.gas_limit = gas_limit;
+            assert_eq!(
+                validate_zone_block_gas_limit(&block, 3, &parent, config.chain_spec().as_ref()),
+                Ok(())
+            );
+        }
+
+        for gas_limit in [
+            parent_gas_limit - adjustment_bound,
+            parent_gas_limit + adjustment_bound,
+        ] {
+            block.gas_limit = gas_limit;
+            assert_eq!(
+                validate_zone_block_gas_limit(&block, 3, &parent, config.chain_spec().as_ref()),
+                Err(Error::InvalidGasLimit {
+                    block_index: 3,
+                    parent: parent_gas_limit,
+                    actual: gas_limit,
+                })
+            );
+        }
     }
 
     #[test]
