@@ -82,8 +82,8 @@ impl ConfigurableAccount {
         threshold: u8,
         owners: Vec<IConfigurableAccount::ConfigurableAccountOwner>,
     ) -> Result<()> {
-        // The wrapper rejects delegatecall; a validated configurable account origin cannot have code.
-        // Together these conditions restrict authority to protocol-created batch calls.
+        // The wrapper rejects delegatecall; a validated configurable account origin cannot have
+        // code. Together these conditions restrict authority to protocol-created batch calls.
         if sender.is_zero()
             || self.tx_origin.t_read()? != sender
             || self.directly_authorized_account.t_read()? != sender
