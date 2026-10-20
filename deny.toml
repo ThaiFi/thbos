@@ -22,6 +22,11 @@ ignore = [
   # https://rustsec.org/advisories/RUSTSEC-2024-0449
   # It is used only by serde_yaml in xtask to parse local benchmark scenarios.
   "RUSTSEC-2024-0449",
+  # The 0.26.11 compatibility crates only re-export their patched 1.x dependencies.
+  # These advisories mark only >=1.0.10 as patched; bans below reject every
+  # affected version except those re-export-only compatibility crates.
+  "RUSTSEC-2026-0381",
+  "RUSTSEC-2026-0383",
 ]
 
 # This section is considered when running `cargo deny check bans`.
@@ -34,7 +39,14 @@ multiple-versions = "warn"
 wildcards = "allow"
 highlight = "all"
 # List of crates to deny
-deny = [{ name = "openssl" }]
+deny = [
+  { name = "openssl" },
+  # Keep certificate data patched while allowing the 0.26.11 re-exports above.
+  { name = "webpki-roots", version = "<0.26.11" },
+  { name = "webpki-roots", version = ">0.26.11, <1.0.10" },
+  { name = "webpki-root-certs", version = "<0.26.11" },
+  { name = "webpki-root-certs", version = ">0.26.11, <1.0.10" },
+]
 # Certain crates/versions that will be skipped when doing duplicate detection.
 skip = []
 # Similarly to `skip` allows you to skip certain crates during duplicate
