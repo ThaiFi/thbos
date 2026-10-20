@@ -33,8 +33,8 @@ pub(crate) fn primitive_signature_verification_gas(signature: &PrimitiveSignatur
 pub(crate) fn account_signature_verification_gas(signature: &AccountSignature) -> u64 {
     match signature {
         AccountSignature::Primitive(signature) => primitive_signature_verification_gas(signature),
-        // TODO: Multisig verification gas is implemented in #7578.
-        AccountSignature::Multisig(_) => 0,
+        // TODO: Configurable account verification gas is implemented in #7578.
+        AccountSignature::ConfigurableAccount(_) => 0,
     }
 }
 
@@ -49,8 +49,8 @@ pub(crate) fn tempo_signature_verification_gas(signature: &TempoSignature) -> u6
         TempoSignature::Keychain(keychain_sig) => {
             account_signature_verification_gas(&keychain_sig.signature) + KEYCHAIN_VALIDATION_GAS
         }
-        // TODO: Multisig verification gas is implemented in #7578.
-        TempoSignature::Multisig(_) => 0,
+        // TODO: Configurable account verification gas is implemented in #7578.
+        TempoSignature::ConfigurableAccount(_) => 0,
     }
 }
 

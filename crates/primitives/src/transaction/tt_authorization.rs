@@ -430,16 +430,20 @@ pub mod tests {
         assert!(bad_lazy.authority().is_some());
         assert_ne!(bad_lazy.authority().unwrap(), expected_address);
 
-        // Neither direct nor delegated multisig may supply an authorization-list authority.
-        let multisig = ConfigurableAccountSignature::try_new(
+        // Neither direct nor delegated configurable account may supply an authorization-list
+        // authority.
+        let configurable_account = ConfigurableAccountSignature::try_new(
             Address::repeat_byte(0x22),
             current_config(expected_address),
             vec![PrimitiveSignature::default()],
         )
         .unwrap();
         for signature in [
-            TempoSignature::Multisig(multisig.clone()),
-            TempoSignature::Keychain(KeychainSignature::new(expected_address, multisig)),
+            TempoSignature::ConfigurableAccount(configurable_account.clone()),
+            TempoSignature::Keychain(KeychainSignature::new(
+                expected_address,
+                configurable_account,
+            )),
         ] {
             let signed =
                 TempoSignedAuthorization::new_unchecked(bad_lazy.inner().clone(), signature);

@@ -103,9 +103,9 @@ mod tests {
     }
 
     #[test]
-    fn keychain_verification_rejects_multisig() -> eyre::Result<()> {
+    fn keychain_verification_rejects_configurable_account() -> eyre::Result<()> {
         let account = Address::repeat_byte(1);
-        let multisig = ConfigurableAccountSignature::try_new(
+        let configurable_account = ConfigurableAccountSignature::try_new(
             Address::repeat_byte(2),
             ConfigurableAccountConfig {
                 salt: B256::ZERO,
@@ -119,7 +119,8 @@ mod tests {
             vec![PrimitiveSignature::default()],
         )
         .unwrap();
-        let signature = TempoSignature::Keychain(KeychainSignature::new(account, multisig));
+        let signature =
+            TempoSignature::Keychain(KeychainSignature::new(account, configurable_account));
         let mut storage = HashMapStorageProvider::new_with_spec(1, TempoHardfork::T14);
         StorageCtx::enter(&mut storage, || {
             let verifier = SignatureVerifier::new();

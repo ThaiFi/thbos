@@ -25,15 +25,15 @@ fn aa_request(key_type: SignatureType) -> TempoTransactionRequest {
 }
 
 #[test]
-fn multisig_key_type_cannot_fabricate_a_primitive_simulation_signature() {
+fn configurable_account_key_type_cannot_fabricate_a_primitive_simulation_signature() {
     let env = TempoEvmEnv::default();
 
     aa_request(SignatureType::Secp256k1)
         .try_into_tx_env(&env)
         .expect("a primitive key type converts");
 
-    let error = aa_request(SignatureType::Multisig)
+    let error = aa_request(SignatureType::ConfigurableAccount)
         .try_into_tx_env(&env)
-        .expect_err("a multisig key type has no primitive stand-in");
+        .expect_err("a configurable account key type has no primitive stand-in");
     assert!(error.to_string().contains("configuration witness"));
 }

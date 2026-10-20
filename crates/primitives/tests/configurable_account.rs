@@ -21,7 +21,7 @@ use tempo_primitives::transaction::{
     ConfigurableAccountWeightAccumulator, KeychainSignature, KeychainVersion,
     MAX_CONFIGURABLE_ACCOUNT_OWNER_SIGNATURE_BYTES, MAX_CONFIGURABLE_ACCOUNT_OWNERS,
     MAX_CONFIGURABLE_ACCOUNT_SIGNATURES, PrimitiveSignature, SIGNATURE_TYPE_CONFIGURABLE_ACCOUNT,
-    TempoSignature, configurable_account_digest, derive_p256_address,
+    SignatureType, TempoSignature, configurable_account_digest, derive_p256_address,
     tt_signature::{
         P256SignatureWithPreHash, SIGNATURE_TYPE_KEYCHAIN, SIGNATURE_TYPE_WEBAUTHN,
         WebAuthnSignature, normalize_p256_s,
@@ -1246,7 +1246,7 @@ fn tempo_signature_size_counts_each_allocation_once() {
             .unwrap();
 
             assert_eq!(
-                TempoSignature::Multisig(signature).size(),
+                TempoSignature::ConfigurableAccount(signature).size(),
                 1 + size_of::<ConfigurableAccountSignature>()
                     + owners_capacity * size_of::<ConfigurableAccountOwner>()
                     + approvals_capacity * size_of::<PrimitiveSignature>()
@@ -1274,7 +1274,7 @@ fn bounded_access_key_envelope_roundtrips_and_rejects_v1() {
     assert!(keychain.key_id(&B256::ZERO).is_err());
     assert!(matches!(
         envelope.as_keychain().unwrap().signature,
-        AccountSignature::Multisig(_)
+        AccountSignature::ConfigurableAccount(_)
     ));
     let mut legacy = encoded.to_vec();
     legacy[0] = SIGNATURE_TYPE_KEYCHAIN;
@@ -1355,9 +1355,24 @@ fn noncanonical_p256_owner_prehash_flag_canonicalizes() {
         "noncanonical owner approval re-encodes to the canonical configurable account envelope"
     );
     assert_eq!(
-        decoded.as_multisig().unwrap().signatures()[0]
+        decoded.as_configurable_account().unwrap().signatures()[0]
             .recover_signer(&digest)
             .unwrap(),
         owner
     );
+}
+
+#[cfg(feature = "serde")]
+#[test]
+fn configurable_account_signature_type_serializes_under_its_name() {
+    use serde_json::{from_value, json, to_value};
+
+    let key_type = AccountSignature::from(initial_signature()).key_type();
+    assert_eq!(key_type, SignatureType::ConfigurableAccount);
+    assert_eq!(to_value(key_type).unwrap(), json!("configurableAccount"));
+    assert_eq!(
+        from_value::<SignatureType>(json!("configurableAccount")).unwrap(),
+        SignatureType::ConfigurableAccount
+    );
+    assert!(from_value::<SignatureType>(json!("multisig")).is_err());
 }

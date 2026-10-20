@@ -420,7 +420,7 @@ pub struct SignedKeyAuthorization {
     #[deref]
     pub authorization: KeyAuthorization,
 
-    /// Direct primitive or multisig signature authorizing this key.
+    /// Direct primitive or configurable account signature authorizing this key.
     pub signature: AccountSignature,
 
     /// Cached signer recovered from `signature`.
@@ -442,7 +442,8 @@ impl SignedKeyAuthorization {
         }
     }
 
-    /// Cryptographically verifies a primitive signature; multisig requires stateful validation.
+    /// Cryptographically verifies a primitive signature; a configurable account requires
+    /// stateful validation.
     pub fn recover_signer(&self) -> Result<Address, RecoveryError> {
         let AccountSignature::Primitive(signature) = &self.signature else {
             return Err(RecoveryError::new());
@@ -457,14 +458,14 @@ impl SignedKeyAuthorization {
         Ok(signer)
     }
 
-    /// Recovers a primitive signer or returns the named multisig account.
+    /// Recovers a primitive signer or returns the named configurable account.
     ///
-    /// For multisig results, callers must verify the parent account, configuration and owner
-    /// quorum against state. Primitive results still require grant-authority checks.
+    /// For configurable account results, callers must verify the parent account, configuration and
+    /// owner quorum against state. Primitive results still require grant-authority checks.
     pub fn recover_account(&self) -> Result<Address, RecoveryError> {
         match &self.signature {
             AccountSignature::Primitive(_) => self.recover_signer(),
-            AccountSignature::Multisig(signature) => Ok(signature.account()),
+            AccountSignature::ConfigurableAccount(signature) => Ok(signature.account()),
         }
     }
 
@@ -788,9 +789,12 @@ mod tests {
     }
 
     #[test]
-    fn test_multisig_delegate_key_type_roundtrip() {
-        let auth =
-            KeyAuthorization::unrestricted(1, SignatureType::Multisig, Address::repeat_byte(1));
+    fn test_configurable_account_delegate_key_type_roundtrip() {
+        let auth = KeyAuthorization::unrestricted(
+            1,
+            SignatureType::ConfigurableAccount,
+            Address::repeat_byte(1),
+        );
         let encoded = alloy_rlp::encode(&auth);
         assert_eq!(
             KeyAuthorization::decode(&mut encoded.as_slice()).unwrap(),
@@ -799,7 +803,7 @@ mod tests {
         assert_eq!(u8::from(auth.key_type), 3);
         assert_eq!(
             SignatureType::try_from(
-                tempo_contracts::precompiles::IAccountKeychain::SignatureType::Multisig
+                tempo_contracts::precompiles::IAccountKeychain::SignatureType::ConfigurableAccount
             ),
             Ok(auth.key_type)
         );
@@ -811,7 +815,7 @@ mod tests {
         #[cfg(feature = "serde")]
         {
             let json = serde_json::to_value(&auth).unwrap();
-            assert_eq!(json["keyType"], "multisig");
+            assert_eq!(json["keyType"], "configurableAccount");
             assert_eq!(
                 serde_json::from_value::<KeyAuthorization>(json).unwrap(),
                 auth
@@ -997,14 +1001,14 @@ mod tests {
             version: 0,
             ..current_config(Address::repeat_byte(0x22))
         };
-        let multisig =
+        let configurable_account =
             ConfigurableAccountSignature::try_new(account, config, vec![primitive.clone()])
                 .unwrap();
         let previous = WireAuthorization {
             authorization: auth.clone(),
-            signature: TempoSignature::Multisig(multisig.clone()),
+            signature: TempoSignature::ConfigurableAccount(configurable_account.clone()),
         };
-        let signed = auth.clone().into_signed(multisig);
+        let signed = auth.clone().into_signed(configurable_account);
         assert_eq!(signed.recover_account().unwrap(), account);
         assert!(signed.recover_signer().is_err());
         let encoded = alloy_rlp::encode(&signed);

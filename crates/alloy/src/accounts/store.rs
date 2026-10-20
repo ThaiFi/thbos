@@ -2486,7 +2486,8 @@ fn writable_b256(value: B256) -> String {
 fn writable_signature(
     signature: &AccountSignature,
 ) -> Result<WritablePrimitiveSignature, TempoAccountsError> {
-    // TODO: #7579 adds multisig persistence and removes this primitive-only restriction.
+    // TODO: #7579 adds configurable account persistence and removes this primitive-only
+    // restriction.
     let AccountSignature::Primitive(signature) = signature else {
         return Err(TempoAccountsError::InvalidAuthorization(
             "the Accounts store does not support nonprimitive authorization signatures",

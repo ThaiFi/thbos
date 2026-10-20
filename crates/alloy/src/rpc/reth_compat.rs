@@ -131,7 +131,7 @@ impl TryIntoTxEnv<Recovered<TempoTxEnv>, TempoEvmEnv> for TempoTransactionReques
         )
         .ok_or_else(|| {
             EthApiError::InvalidParams(
-                "multisig simulation requires a configuration witness".into(),
+                "configurable account simulation requires a configuration witness".into(),
             )
         })?;
         let has_fee_payer_signature = self.fee_payer_signature.is_some();
@@ -188,7 +188,7 @@ fn create_mock_primitive_signature(
     };
 
     Some(match sig_type {
-        SignatureType::Multisig => return None,
+        SignatureType::ConfigurableAccount => return None,
         SignatureType::Secp256k1 => {
             PrimitiveSignature::Secp256k1(Signature::new(U256::ZERO, U256::ZERO, false))
         }

@@ -407,7 +407,7 @@ impl alloy_consensus::transaction::SignerRecoverable for AASigned {
     fn recover_signer_unchecked(
         &self,
     ) -> Result<alloy_primitives::Address, alloy_consensus::crypto::RecoveryError> {
-        // Both paths identify the sender. Multisig and keychain authority
+        // Both paths identify the sender. Configurable account and keychain authority
         // require separate stateful validation.
         self.recover_signer()
     }
