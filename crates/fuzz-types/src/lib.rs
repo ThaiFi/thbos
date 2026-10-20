@@ -9,21 +9,33 @@ use revm::context::result::{HaltReason, ResultGas};
 use serde::{Deserialize, Serialize};
 use tempo_hardfork::{TempoHardfork, constants::moderato::MODERATO_CHAIN_ID};
 
+/// What a C ABI function returns.
 pub type FuzzStatus = i32;
 
+/// The input did not decode, or the output buffer was too small. The output buffer is unchanged.
 pub const FUZZ_REJECT: FuzzStatus = 0;
+/// The output was written.
 pub const FUZZ_ACCEPT: FuzzStatus = 1;
 
+/// The version of these types' encoding, reported in [`TempoHarnessCapabilities`].
 pub const TYPED_HARNESS_SCHEMA_VERSION: u32 = 3;
 
+/// Why an input, or part of it, did not execute.
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, Hash, PartialEq, Serialize)]
 pub enum ErrorClass {
+    /// Everything executed.
     #[default]
     None = 0,
+    /// The input contradicts itself or this harness's contract, e.g. a decreasing hardfork
+    /// schedule, senders that do not match the transactions, or blocks out of timestamp order.
     InvalidInput = 1,
+    /// A transaction or header does not decode, or has trailing bytes.
     RlpDecode = 2,
+    /// The node would reject it: a sender does not recover, a header or block fails validation, or
+    /// a transaction is invalid.
     Rejected = 3,
+    /// The executor failed for a reason other than the block being invalid.
     Internal = 4,
     /// Execution read an account, storage slot, code or block hash that an exact pre-state
     /// ([`PreState::Exact`]) does not hold.
@@ -98,9 +110,13 @@ impl Default for BlockContextInput {
 }
 
 /// The chain to execute on: the dev genesis configuration with this chain ID and these hardfork
-/// activation timestamps. A hardfork the schedule does not list activates at its
-/// [`TempoHardfork::variant_index`], or with the hardfork before it if that is later. Listed
-/// activations must not decrease in hardfork order.
+/// activation timestamps. Everything else comes from the dev genesis, including its epoch length,
+/// so a network block at one of that network's epoch boundaries does not replay faithfully.
+///
+/// A hardfork the schedule does not list activates at its [`TempoHardfork::variant_index`], or with
+/// the hardfork before it if that is later. A listed activation must not be earlier than that of
+/// any hardfork before it, listed or not: `{T3: 0}` is invalid, as the unlisted T0 to T2 activate
+/// after 0.
 #[derive(Clone, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
 pub struct ChainSpecInput {
     pub chain_id: u64,
@@ -133,6 +149,7 @@ impl Default for ChainSpecInput {
     }
 }
 
+/// An input mode, as [`TempoHarnessCapabilities`] lists the ones a harness accepts.
 #[derive(Clone, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
 pub enum HarnessInputKind {
     Transaction,
@@ -140,6 +157,7 @@ pub enum HarnessInputKind {
     Blockchain,
 }
 
+/// What to execute. Each mode has the [`TempoHarnessOutcome`] variant of the same name.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub enum TempoHarnessInput {
     Transaction(TempoTransactionInput),
@@ -147,6 +165,7 @@ pub enum TempoHarnessInput {
     Blockchain(TempoBlockchainInput),
 }
 
+/// A transaction to decode and recover the sender of, without executing it.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct TempoTransactionInput {
     pub tx: Bytes,
@@ -154,6 +173,8 @@ pub struct TempoTransactionInput {
     pub sender: Option<Address>,
 }
 
+/// One transaction, executed in a block described by `block_context` on the dev genesis plus
+/// `pre_state`.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct TempoStateInput {
     pub chain_spec: ChainSpecInput,
@@ -164,6 +185,7 @@ pub struct TempoStateInput {
     pub sender: Option<Address>,
 }
 
+/// Blocks executed in order on `pre_state`, stopping at the first that fails.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct TempoBlockchainInput {
     pub chain_spec: ChainSpecInput,
@@ -208,6 +230,8 @@ pub enum BlockHeaderInput {
     Rlp(Bytes),
 }
 
+/// The outcome of [`TempoTransactionInput`]. `sender` and `tx_type` are `None` when the transaction
+/// does not decode; `sender` is also `None` when it cannot be recovered.
 #[derive(Clone, Debug, Default, Deserialize, Eq, Hash, PartialEq, Serialize)]
 pub struct TransactionOutcome {
     pub error: ErrorClass,
@@ -215,6 +239,8 @@ pub struct TransactionOutcome {
     pub tx_type: Option<u8>,
 }
 
+/// A protocol invariant broken at `scope`. `id` names the invariant, e.g. `TEMPO-TIP20-SUPPLY-CAP`;
+/// `message` describes this instance.
 #[derive(Clone, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
 pub struct InvariantFailure {
     pub id: String,
@@ -229,6 +255,7 @@ pub enum InvariantScope {
     Execution,
 }
 
+/// The outcome of a [`TempoHarnessInput`], in the variant of the same name.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub enum TempoHarnessOutcome {
     Transaction(TransactionOutcome),
@@ -256,6 +283,8 @@ pub struct TempoExecutionOutcome {
     pub invariant_failures: Vec<InvariantFailure>,
 }
 
+/// What a harness build accepts, so a runner that loads several builds can generate inputs all of
+/// them support.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct TempoHarnessCapabilities {
     pub schema_version: u32,
