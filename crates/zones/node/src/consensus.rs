@@ -224,7 +224,7 @@ mod tests {
                     extra_data: Bytes::from_static(b"malicious"),
                     ..header.inner.clone()
                 },
-                ..header.clone()
+                ..header
             },
             ZoneConsensusError::ExtraData,
         );
@@ -237,7 +237,7 @@ mod tests {
                     mix_hash,
                     ..header.inner.clone()
                 },
-                ..header.clone()
+                ..header
             },
             ZoneConsensusError::MixHash { actual: mix_hash },
         );

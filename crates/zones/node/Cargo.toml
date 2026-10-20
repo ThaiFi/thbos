@@ -160,6 +160,7 @@ keccak-cache-global = [
 ]
 test-utils = [
   "reth-chainspec/test-utils",
+  "reth-consensus/test-utils",
   "reth-ethereum?/test-utils",
   "reth-node-builder/test-utils",
   "reth-payload-builder/test-utils",
