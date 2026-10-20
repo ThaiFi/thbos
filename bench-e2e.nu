@@ -673,10 +673,12 @@ def build-e2e-consensus-args [node_dir: string, trusted_peers: string, port: int
         "--consensus.listen-address" $"($ip):($port)"
         "--consensus.metrics-address" $"($ip):($metrics_port)"
         "--trusted-peers" $trusted_peers
+        "--addr" $ip
         "--port" $"($execution_p2p_port)"
         "--discovery.port" $"($execution_p2p_port)"
         "--discovery.v5.port" $"($discv5_port)"
         "--p2p-secret-key" $enode_key
+        "--authrpc.addr" $ip
         "--authrpc.port" $"($authrpc_port)"
         "--consensus.use-local-defaults"
         "--consensus.bypass-ip-check"
@@ -1056,9 +1058,9 @@ def run-local-e2e-phase [run: record, ctx: record] {
     if ("report.json" | path exists) { rm report.json }
     let tuning_state = if $ctx.tune { apply-system-tuning } else { { tuned: false } }
 
-    let a_rpc = "http://127.0.0.1:8545"
-    let b_rpc = "http://127.0.0.1:8645"
-    let a_base_args = (build-base-args $genesis $ctx.a.datadir $a_log_dir "0.0.0.0" 8545 19001)
+    let a_rpc = $"http://($ctx.a.ip):8545"
+    let b_rpc = $"http://($ctx.b.ip):8645"
+    let a_base_args = (build-base-args $genesis $ctx.a.datadir $a_log_dir $ctx.a.ip 8545 19001)
         | append ["--log.file.format" "json"]
         | append (build-e2e-consensus-args $ctx.a.node_dir $ctx.trusted_peers $ctx.a.consensus_port $ctx.a.ip)
         | append $local_reth_args
@@ -1067,7 +1069,7 @@ def run-local-e2e-phase [run: record, ctx: record] {
         | append (if $ctx.samply { ["--log.samply"] } else { [] })
         | append (if $ctx.tracy != "off" { ["--log.tracy" "--log.tracy.filter" $ctx.tracy_filter] } else { [] })
         | append (benchmark-otlp-args $ctx.tracing_otlp)
-    let b_base_args = (build-base-args $genesis $ctx.b.datadir $b_log_dir "0.0.0.0" 8645 19101)
+    let b_base_args = (build-base-args $genesis $ctx.b.datadir $b_log_dir $ctx.b.ip 8645 19101)
         | append ["--log.file.format" "json"]
         | append (build-e2e-consensus-args $ctx.b.node_dir $ctx.trusted_peers $ctx.b.consensus_port $ctx.b.ip)
         | append $local_reth_args
@@ -1141,7 +1143,7 @@ def run-local-e2e-phase [run: record, ctx: record] {
     } else {
         ""
     }
-    let metrics_urls = ["a:http://127.0.0.1:19001/metrics" "b:http://127.0.0.1:19101/metrics"]
+    let metrics_urls = [$"a:http://($ctx.a.ip):19001/metrics" $"b:http://($ctx.b.ip):19101/metrics"]
         | append (if $ctx.runner_metrics_url != "" { [$"runner:($ctx.runner_metrics_url)"] } else { [] })
     let submit_rpc_url = [$a_rpc $b_rpc] | str join ","
 
