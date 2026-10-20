@@ -667,11 +667,7 @@ impl BuildTimeTracker {
             self.dry_finish.observe(now, nanos(finish));
             return Some(BuildSample::DryFinish(finish));
         }
-        let Some(observed) =
-            observed_build_time_multiplier(build.total_work, build.work_at_tx_cutoff)
-        else {
-            return None;
-        };
+        let observed = observed_build_time_multiplier(build.total_work, build.work_at_tx_cutoff)?;
         self.multiplier.observe(now, observed);
         Some(BuildSample::Ratio(observed))
     }
