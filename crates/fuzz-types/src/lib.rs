@@ -51,6 +51,16 @@ impl<T> NonEmpty<T> {
     pub fn as_slice(&self) -> &[T] {
         &self.0
     }
+
+    /// The elements, to change in place; their number stays the same.
+    pub fn as_mut_slice(&mut self) -> &mut [T] {
+        &mut self.0
+    }
+
+    /// Appends `item`.
+    pub fn push(&mut self, item: T) {
+        self.0.push(item);
+    }
 }
 
 impl<T> TryFrom<Vec<T>> for NonEmpty<T> {
@@ -150,7 +160,7 @@ impl Default for ChainSpecInput {
 }
 
 /// An input mode, as [`TempoHarnessCapabilities`] lists the ones a harness accepts.
-#[derive(Clone, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
 pub enum HarnessInputKind {
     Transaction,
     State,
@@ -158,7 +168,7 @@ pub enum HarnessInputKind {
 }
 
 /// What to execute. Each mode has the [`TempoHarnessOutcome`] variant of the same name.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
 pub enum TempoHarnessInput {
     Transaction(TempoTransactionInput),
     State(TempoStateInput),
@@ -166,7 +176,7 @@ pub enum TempoHarnessInput {
 }
 
 /// A transaction to decode and recover the sender of, without executing it.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
 pub struct TempoTransactionInput {
     pub tx: Bytes,
     /// Sender verified by the ingress boundary. `None` asks the harness to recover it.
@@ -175,7 +185,7 @@ pub struct TempoTransactionInput {
 
 /// One transaction, executed in a block described by `block_context` on the dev genesis plus
 /// `pre_state`.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
 pub struct TempoStateInput {
     pub chain_spec: ChainSpecInput,
     pub pre_state: StateInput,
@@ -186,7 +196,7 @@ pub struct TempoStateInput {
 }
 
 /// Blocks executed in order on `pre_state`, stopping at the first that fails.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
 pub struct TempoBlockchainInput {
     pub chain_spec: ChainSpecInput,
     pub pre_state: PreState,
@@ -194,7 +204,7 @@ pub struct TempoBlockchainInput {
 }
 
 /// The state blocks execute on.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
 pub enum PreState {
     /// The dev genesis allocation plus these accounts, which must not be genesis accounts. Anything
     /// else reads as empty.
