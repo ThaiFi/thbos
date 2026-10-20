@@ -428,6 +428,15 @@ jobs:
           sudo rm -rf "$GITHUB_WORKSPACE"
           sudo -u actions-runner mkdir -p "$GITHUB_WORKSPACE"
 
+      - name: Check benchmark disk headroom
+        run: |
+          df -h / /tmp /opt/actions-runner
+          available_kib=$(df -Pk /opt/actions-runner | awk 'NR == 2 { print $4 }')
+          if [ "$available_kib" -lt 20971520 ]; then
+            echo "::error::Benchmark runner needs at least 20 GiB free for profiles and reports"
+            exit 1
+          fi
+
       - name: Configure OTLP telemetry
         if: env.BENCH_OTLP == 'true'
         env:
