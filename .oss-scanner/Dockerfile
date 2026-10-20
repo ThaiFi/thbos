@@ -17,6 +17,11 @@ ARG NEXTEST_VERSION=0.9.127
 RUN curl -fsSL "https://get.nexte.st/${NEXTEST_VERSION}/linux" | tar -xzf - -C "${CARGO_HOME}/bin" \
     && cargo nextest --version
 
+# Nightly and cargo-fuzz for crates/nitro-attestation/fuzz, the repository's fuzz harness.
+ARG CARGO_FUZZ_VERSION=0.13.2
+RUN rustup toolchain install nightly --profile minimal \
+    && cargo install --locked cargo-fuzz --version "${CARGO_FUZZ_VERSION}"
+
 # scanner contract: the checkout lives inside the image, at /src
 COPY . /src
 WORKDIR /src
@@ -35,13 +40,19 @@ RUN printf '%s\n' \
       '[profile.dev.package."*"]' 'debug = 0' \
       > "${CARGO_HOME}/config.toml"
 
-RUN cargo fetch --locked
+# The fuzz crate's lockfile lags the workspace version of its path dependency after each release, so it is fetched
+# without --locked; cargo then only bumps that entry and keeps registry crates pinned.
+RUN cargo fetch --locked \
+    && cargo fetch --manifest-path crates/nitro-attestation/fuzz/Cargo.toml
 
-# Every test binary in the workspace (as CI's test and e2e jobs build them), then the binaries, including
-# tempo-localnet for a dev node. Always --workspace: -p changes feature unification and rebuilds hundreds of crates.
-# A step that fails fails the build.
-RUN cargo nextest run --locked --workspace --lib --bins --tests --no-run \
+# Every test binary and example in the workspace (cargo's default test targets, so the commands in threat_model.md
+# rebuild nothing), then the binaries, including tempo-localnet for a dev node. Always --workspace: -p changes
+# feature unification and rebuilds hundreds of crates. A step that fails fails the build.
+RUN cargo nextest run --locked --workspace --no-run \
     && cargo build --locked --workspace --bins --features tempo/localnet
+
+# The fuzz target, with cargo-fuzz's default address sanitizer.
+RUN cd crates/nitro-attestation && cargo +nightly fuzz build parse_attestation
 
 # A cheap slice of the tests so the log shows the image works, without letting a failure abort the build.
 RUN timeout 600 cargo nextest run --locked --workspace --lib --no-fail-fast \

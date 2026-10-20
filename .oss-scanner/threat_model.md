@@ -30,8 +30,9 @@ Most important:
 
 In scope but lower priority: `crates/zones` and `bin/tempo-zone` (Tempo Zones L2), `bin/tempo-sidecar`.
 
-Out of scope: `xtask`, `crates/state-bloat`, `crates/faucet` (testnets only), `scripts/`, `contrib/`, benchmark
-tooling, and bugs in upstream Reth, Revm, Alloy or Commonware that do not depend on Tempo's code (report those
+Out of scope: `xtask`, `crates/state-bloat`, `crates/faucet` (testnets only), `contrib/`, benchmark tooling,
+development scripts in `scripts/` (but not `publish-crates.sh` and the `sanitize_*.py` it runs, which handle the
+crates.io token in release CI), and bugs in upstream Reth, Revm, Alloy or Commonware that do not depend on Tempo's code (report those
 upstream).
 
 ## How to exercise it
@@ -45,14 +46,14 @@ upstream).
 - A dev chain: `target/debug/tempo node --dev` serves RPC on `127.0.0.1:8545`; `target/debug/tempo-localnet` also
   funds the dev accounts and seeds Fee AMM and DEX liquidity (see `docs/localnet.md`). Rebuild them with
   `cargo build --workspace --bins --features tempo/localnet`.
+- Fuzzing: `cd crates/nitro-attestation && cargo +nightly fuzz run parse_attestation -- -max_len=24577` (prebuilt;
+  see its README).
 - Behaviour is gated by hardfork (`crates/hardfork`, `crates/chainspec`). Report against the fork active on mainnet
   unless the bug is in an unreleased fork's code path, and say which.
 - Zones tests that load Solidity artifacts from `crates/zones/contracts/out` fail here: building them needs a private
   repository. That is expected.
 
 ## How you rate severity
-
-The same scale our internal reviews use, calibrated on the severities external auditors gave this repository.
 
 | Impact | Severity |
 | --- | --- |
@@ -70,6 +71,8 @@ The same scale our internal reviews use, calibrated on the severities external a
 | Narrow edge cases, misclassified transactions, restart-recoverable liveness, wrong error semantics | Low |
 | Spec or documentation divergence, hardening, efficiency, latent defects with no caller | Informational |
 
+The table wins: the adjustments below move a finding within what its row intends, never out of it.
+
 Adjust for:
 - The same defect rates higher when the vulnerable path is live on mainnet, and lower when it sits only behind an
   inactive fork or in pre-fork history.
@@ -79,7 +82,8 @@ Adjust for:
 - A Byzantine proposer is in scope; forcing every validator to do large work before rejecting a block is High.
 - Free, permissionless and repeatable attacks rate one level higher than equivalent paid attacks.
 - A per-node slowdown needing sustained traffic is Medium or Low; network-wide mempool unavailability is High.
-- A fault that clears on restart is Low; one that leaves a stale peer set for an epoch or needs manual repair is High.
+- A fault that clears on restart and cannot simply be triggered again is Low (a crash any remote caller can repeat
+  is the table's Critical row); one that leaves a stale peer set for an epoch or needs manual repair is High.
 - Latent storage, packing and encoding defects take the severity of their first reachable use.
 
 A report should include a reproducer (a test in the affected crate is ideal) and the hardfork it applies to.
