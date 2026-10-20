@@ -959,3 +959,24 @@ jobs:
               jq '{updated_at,runner_elapsed_secs,phases:[.phases[] | {name,status,elapsed_secs,completed_at}]}' "$RUNNER_TEMP/benchmark-timings.json"
             fi
           done
+
+      - name: Read owned benchmark VM error signals
+        run: |
+          [[ "$BENCHMARK_RUN_IDS" =~ ^[0-9]+(,[0-9]+)*$ ]]
+          IFS=',' read -ra benchmark_runs <<< "$BENCHMARK_RUN_IDS"
+          for benchmark_run_id in "${benchmark_runs[@]}"; do
+            gcloud compute instances list \
+              --filter="name~tempo-e2e-bench-e2e-multi-region-$benchmark_run_id-1-" \
+              --format='value(name,zone.basename())' > "$RUNNER_TEMP/benchmark-instances.tsv"
+            while read -r benchmark_instance benchmark_zone; do
+              [[ -n "$benchmark_instance" ]] || continue
+              echo "Runtime error signals: $benchmark_instance"
+              if gcloud compute instances get-serial-port-output "$benchmark_instance" \
+                --zone="$benchmark_zone" > "$RUNNER_TEMP/benchmark-serial.log" 2>/dev/null; then
+                rg -i 'out of memory|oom-kill|killed process|kernel panic|benchmark.*failed|failed.*benchmark' \
+                  "$RUNNER_TEMP/benchmark-serial.log" | tail -n 10 || true
+              else
+                echo "Serial output unavailable"
+              fi
+            done < "$RUNNER_TEMP/benchmark-instances.tsv"
+          done
