@@ -36,13 +36,13 @@ impl HeaderValidator<TempoHeader> for ZoneConsensus {
 
         let header = header.header();
         if header.consensus_context.is_some() {
-            return Err(ConsensusError::other(Error::ConsensusContext));
+            return Err(ConsensusError::other(ZoneConsensusError::ConsensusContext));
         }
         if !header.inner.extra_data.is_empty() {
-            return Err(ConsensusError::other(Error::ExtraData));
+            return Err(ConsensusError::other(ZoneConsensusError::ExtraData));
         }
         if header.inner.mix_hash != B256::ZERO {
-            return Err(ConsensusError::other(Error::MixHash {
+            return Err(ConsensusError::other(ZoneConsensusError::MixHash {
                 actual: header.inner.mix_hash,
             }));
         }
@@ -52,10 +52,12 @@ impl HeaderValidator<TempoHeader> for ZoneConsensus {
             .is_cancun_active_at_timestamp(header.inner.timestamp)
             .then_some(B256::ZERO);
         if header.inner.parent_beacon_block_root != expected_parent_beacon_block_root {
-            return Err(ConsensusError::other(Error::ParentBeaconBlockRoot {
-                expected: expected_parent_beacon_block_root,
-                actual: header.inner.parent_beacon_block_root,
-            }));
+            return Err(ConsensusError::other(
+                ZoneConsensusError::ParentBeaconBlockRoot {
+                    expected: expected_parent_beacon_block_root,
+                    actual: header.inner.parent_beacon_block_root,
+                },
+            ));
         }
 
         Ok(())
@@ -66,7 +68,16 @@ impl HeaderValidator<TempoHeader> for ZoneConsensus {
         header: &SealedHeader<TempoHeader>,
         parent: &SealedHeader<TempoHeader>,
     ) -> Result<(), ConsensusError> {
-        self.inner.validate_header_against_parent(header, parent)
+        self.inner.validate_header_against_parent(header, parent)?;
+
+        if header.inner.gas_limit != parent.inner.gas_limit {
+            return Err(ConsensusError::other(ZoneConsensusError::GasLimit {
+                expected: parent.inner.gas_limit,
+                actual: header.inner.gas_limit,
+            }));
+        }
+
+        Ok(())
     }
 }
 
@@ -118,7 +129,7 @@ impl FullConsensus<TempoPrimitives> for ZoneConsensus {
 }
 
 #[derive(Debug, PartialEq, Eq, thiserror::Error)]
-enum Error {
+enum ZoneConsensusError {
     #[error("zone header consensus context must be absent")]
     ConsensusContext,
     #[error("zone header extra data must be empty")]
@@ -130,6 +141,8 @@ enum Error {
         expected: Option<B256>,
         actual: Option<B256>,
     },
+    #[error("zone header gas limit must equal its parent's {expected}, got {actual}")]
+    GasLimit { expected: u64, actual: u64 },
 }
 
 #[cfg(test)]
@@ -170,7 +183,11 @@ mod tests {
         (consensus, parent, header)
     }
 
-    fn assert_zone_header_error(consensus: &ZoneConsensus, header: TempoHeader, expected: Error) {
+    fn assert_zone_header_error(
+        consensus: &ZoneConsensus,
+        header: TempoHeader,
+        expected: ZoneConsensusError,
+    ) {
         let header = SealedHeader::seal_slow(header);
         consensus.inner.validate_header(&header).unwrap();
         let error = consensus.validate_header(&header).unwrap_err();
@@ -198,7 +215,7 @@ mod tests {
                 }),
                 ..header.clone()
             },
-            Error::ConsensusContext,
+            ZoneConsensusError::ConsensusContext,
         );
         assert_zone_header_error(
             &consensus,
@@ -209,7 +226,7 @@ mod tests {
                 },
                 ..header
             },
-            Error::ExtraData,
+            ZoneConsensusError::ExtraData,
         );
 
         let mix_hash = B256::repeat_byte(0x11);
@@ -222,7 +239,7 @@ mod tests {
                 },
                 ..header
             },
-            Error::MixHash { actual: mix_hash },
+            ZoneConsensusError::MixHash { actual: mix_hash },
         );
 
         let parent_beacon_block_root = Some(B256::repeat_byte(0x22));
@@ -235,10 +252,32 @@ mod tests {
                 },
                 ..header
             },
-            Error::ParentBeaconBlockRoot {
+            ZoneConsensusError::ParentBeaconBlockRoot {
                 expected: Some(B256::ZERO),
                 actual: parent_beacon_block_root,
             },
+        );
+    }
+
+    #[test]
+    fn rejects_gas_limit_that_differs_from_the_parent() {
+        let (consensus, parent, mut header) = fixture();
+        header.inner.gas_limit += 1;
+        let header = SealedHeader::seal_slow(header);
+
+        consensus
+            .inner
+            .validate_header_against_parent(&header, &parent)
+            .unwrap();
+        let error = consensus
+            .validate_header_against_parent(&header, &parent)
+            .unwrap_err();
+        assert_eq!(
+            error.downcast_other_ref(),
+            Some(&ZoneConsensusError::GasLimit {
+                expected: parent.inner.gas_limit,
+                actual: parent.inner.gas_limit + 1,
+            })
         );
     }
 }

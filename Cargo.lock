@@ -17408,7 +17408,6 @@ dependencies = [
  "alloy-rlp",
  "alloy-sol-types",
  "reth-chainspec",
- "reth-consensus-common",
  "reth-evm",
  "reth-primitives-traits",
  "reth-storage-api",

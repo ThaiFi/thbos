@@ -128,7 +128,6 @@ async fn spf_batch_execute() -> eyre::Result<()> {
                 timestamp: first_built_block.header.timestamp(),
                 timestamp_millis_part: first_built_block.header.timestamp_millis_part,
                 beneficiary: first_built_block.header.beneficiary(),
-                gas_limit: first_built_block.header.gas_limit(),
                 tempo_import: TempoImport::Full {
                     header_rlp: Bytes::from(alloy_rlp::encode(&first_tempo_block.header)),
                     deposits: vec![],
@@ -145,7 +144,6 @@ async fn spf_batch_execute() -> eyre::Result<()> {
                 timestamp: second_built_block.header.timestamp(),
                 timestamp_millis_part: second_built_block.header.timestamp_millis_part,
                 beneficiary: second_built_block.header.beneficiary(),
-                gas_limit: second_built_block.header.gas_limit(),
                 tempo_import: TempoImport::Full {
                     header_rlp: Bytes::from(alloy_rlp::encode(&second_tempo_block.header)),
                     deposits: vec![],
@@ -269,7 +267,6 @@ struct BuiltTransactionBlock {
     zone_timestamp: u64,
     zone_timestamp_millis_part: u64,
     zone_beneficiary: Address,
-    zone_gas_limit: u64,
     zone_hash: B256,
     tempo_header: TempoHeader,
     raw_user_transaction: Bytes,
@@ -301,7 +298,6 @@ impl BuiltTransactionBlock {
                 timestamp: self.zone_timestamp,
                 timestamp_millis_part: self.zone_timestamp_millis_part,
                 beneficiary: self.zone_beneficiary,
-                gas_limit: self.zone_gas_limit,
                 tempo_import: TempoImport::Full {
                     header_rlp: Bytes::from(alloy_rlp::encode(&self.tempo_header)),
                     deposits: vec![],
@@ -381,7 +377,6 @@ async fn build_single_transaction_block(
         zone_timestamp: built_block.header.timestamp(),
         zone_timestamp_millis_part: built_block.header.timestamp_millis_part,
         zone_beneficiary: built_block.header.beneficiary(),
-        zone_gas_limit: built_block.header.gas_limit(),
         zone_hash: built_block.header.hash,
         tempo_header: l1_block.header,
         raw_user_transaction,
