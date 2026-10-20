@@ -211,7 +211,7 @@ impl EstimatorConfig {
     }
 }
 
-/// Clonable pacing feedback shared by consensus and the payload builder.
+/// Cloneable pacing feedback shared by consensus and the payload builder.
 #[derive(Clone, Debug)]
 pub struct Estimator {
     inner: Arc<EstimatorInner>,
