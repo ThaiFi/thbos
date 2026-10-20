@@ -2,7 +2,6 @@ use super::{tempo_transaction::MAX_WEBAUTHN_SIGNATURE_LENGTH, tt_signature::Prim
 use alloc::vec::Vec;
 use alloy_primitives::{Address, B256, Keccak256, b256, keccak256};
 use alloy_rlp::{Decodable, Error as RlpError};
-use tempo_contracts::SAFE_DEPLOYER_ADDRESS;
 
 /// Tempo signature type byte for native multisig signatures.
 pub const SIGNATURE_TYPE_MULTISIG: u8 = 0x05;
@@ -21,13 +20,6 @@ pub const MAX_MULTISIG_OWNER_SIGNATURE_BYTES: usize = 1 + MAX_WEBAUTHN_SIGNATURE
 
 /// Domain prefix for native multisig account CREATE2 salt derivation.
 pub const MULTISIG_ACCOUNT_DOMAIN: &[u8] = b"tempo:multisig:account";
-
-/// Safe Singleton Factory used to deploy the recovery factory, beacon and implementations.
-pub const MULTISIG_RECOVERY_SINGLETON_FACTORY: Address = SAFE_DEPLOYER_ADDRESS;
-
-/// Expected runtime-code hash of [`MULTISIG_RECOVERY_SINGLETON_FACTORY`].
-pub const MULTISIG_RECOVERY_SINGLETON_FACTORY_RUNTIME_HASH: B256 =
-    b256!("2fa86add0aed31f33a762c9d88e807c475bd51d0f52bd0955754b2608f7e4989");
 
 /// Keccak-256 of the account proxy creation code. The creation code is identical for every
 /// account, takes no constructor arguments and embeds the beacon address as a constant.
