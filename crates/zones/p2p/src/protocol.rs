@@ -186,8 +186,46 @@ impl ResponseFrame {
     }
 }
 
+const ALLOWLIST_UPDATE_FRAME: u8 = 0;
+const ALLOWLIST_ACK_FRAME: u8 = 1;
+
+/// A frame on the deposit allowlist channel. Payloads are opaque to the transport.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum AllowlistFrame {
+    /// An update relayed to a quorum member.
+    Update(Vec<u8>),
+    /// A quorum member's acknowledgement of an update.
+    Ack(Vec<u8>),
+}
+
+impl AllowlistFrame {
+    pub(crate) fn encode(&self) -> Vec<u8> {
+        let (tag, payload) = match self {
+            Self::Update(payload) => (ALLOWLIST_UPDATE_FRAME, payload),
+            Self::Ack(payload) => (ALLOWLIST_ACK_FRAME, payload),
+        };
+        let mut encoded = Vec::with_capacity(1 + payload.len());
+        encoded.push(tag);
+        encoded.extend_from_slice(payload);
+        encoded
+    }
+
+    pub(crate) fn decode(bytes: &[u8]) -> Result<Self, DecodeError> {
+        match bytes.split_first() {
+            Some((&ALLOWLIST_UPDATE_FRAME, payload)) => Ok(Self::Update(payload.to_vec())),
+            Some((&ALLOWLIST_ACK_FRAME, payload)) => Ok(Self::Ack(payload.to_vec())),
+            Some((&tag, _)) => Err(DecodeError::UnknownAllowlistTag(tag)),
+            None => Err(DecodeError::EmptyAllowlistFrame),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub(crate) enum DecodeError {
+    #[error("empty allowlist frame")]
+    EmptyAllowlistFrame,
+    #[error("unknown allowlist frame tag {0}")]
+    UnknownAllowlistTag(u8),
     #[error("invalid capabilities announcement")]
     InvalidCapabilities,
     #[error("incorrect request length: expected {expected} bytes, got {actual}")]
@@ -215,7 +253,8 @@ mod tests {
     use alloy_primitives::B256;
 
     use super::{
-        DecodeError, EncodeError, PeerTip, RESPONSE_HEADER_LEN, RequestFrame, ResponseFrame,
+        AllowlistFrame, DecodeError, EncodeError, PeerTip, RESPONSE_HEADER_LEN, RequestFrame,
+        ResponseFrame,
     };
     use crate::network::MAX_MESSAGE_SIZE;
 
@@ -338,5 +377,24 @@ mod tests {
             ResponseFrame::decode(&encoded),
             Err(DecodeError::OversizedResponseBlock { .. })
         ));
+    }
+
+    #[test]
+    fn allowlist_frames_round_trip_and_reject_unknown_tags() {
+        for frame in [
+            AllowlistFrame::Update(b"{}".to_vec()),
+            AllowlistFrame::Ack(Vec::new()),
+        ] {
+            assert_eq!(AllowlistFrame::decode(&frame.encode()), Ok(frame));
+        }
+        assert_eq!(AllowlistFrame::Ack(vec![7]).encode(), vec![1, 7]);
+        assert_eq!(
+            AllowlistFrame::decode(&[2, 0]),
+            Err(DecodeError::UnknownAllowlistTag(2))
+        );
+        assert_eq!(
+            AllowlistFrame::decode(&[]),
+            Err(DecodeError::EmptyAllowlistFrame)
+        );
     }
 }

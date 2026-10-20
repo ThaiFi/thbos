@@ -9,6 +9,7 @@ use crate::utils::{
     WithdrawalArgs, ZoneAccount, ZoneCreationConfig, ZoneTestNode, fetch_submit_batch_call,
     poll_until, seed_raw_tip403_policy, seed_raw_tip403_token_policy, spawn_sequencer,
     spawn_sequencer_with_config, start_real_p2p_cluster, start_real_p2p_cluster_with_active_nodes,
+    start_real_p2p_cluster_with_deposit_allowlist,
 };
 use alloy::{
     primitives::{Address, B256, U256},
@@ -2572,6 +2573,140 @@ async fn test_deposit_allowlist_bounces_unlisted_senders() -> eyre::Result<()> {
     allowlist.set(&[unlisted.address()], true)?;
     let balance = unlisted.deposit(AMOUNT, L1_TIMEOUT, &zone).await?;
     assert_eq!(balance, U256::from(AMOUNT));
+
+    Ok(())
+}
+
+async fn get_deposit_allowlist(node: &ZoneTestNode) -> eyre::Result<Vec<Address>> {
+    Ok(node
+        .provider()
+        .raw_request("zoneAdmin_getDepositAllowlist".into(), ())
+        .await?)
+}
+
+async fn set_deposit_allowed(
+    node: &ZoneTestNode,
+    addresses: &[Address],
+    allowed: bool,
+) -> eyre::Result<()> {
+    node.provider()
+        .raw_request::<_, ()>("zoneAdmin_setDepositAllowed".into(), (addresses, allowed))
+        .await?;
+    Ok(())
+}
+
+/// `zoneAdmin` writes sent to an RPC-only node reach every sequencer over P2P before the call
+/// returns, and the leader enforces the relayed list on L1 deposits.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_rpc_node_relays_deposit_allowlist_to_every_sequencer() -> eyre::Result<()> {
+    reth_tracing::init_test_tracing();
+
+    const AMOUNT: u128 = 1_000_000;
+
+    let first_signer = crate::utils::signer_at(3);
+    let second_signer = crate::utils::signer_at(4);
+    let (first, second) = (first_signer.address(), second_signer.address());
+    let fixture = start_real_p2p_cluster_with_deposit_allowlist(4, 3, &[first]).await?;
+    let (cluster, rpc) = (&fixture.cluster, &fixture.rpc_node);
+
+    // The relay fails until the RPC node has connected to every sequencer.
+    let listed = poll_until(
+        L1_TIMEOUT,
+        Duration::from_millis(500),
+        "allowlist read relayed to every sequencer",
+        || async { Ok(get_deposit_allowlist(rpc).await.ok()) },
+    )
+    .await?;
+    assert_eq!(listed, vec![first]);
+
+    // Swap the listed sender in one write each way, so the expected list is unambiguous.
+    set_deposit_allowed(rpc, &[second], true).await?;
+    set_deposit_allowed(rpc, &[first], false).await?;
+    for (index, node) in cluster.nodes.iter().enumerate() {
+        assert_eq!(
+            get_deposit_allowlist(node).await?,
+            vec![second],
+            "sequencer {index} did not apply the relayed writes"
+        );
+    }
+    assert_eq!(get_deposit_allowlist(rpc).await?, vec![second]);
+
+    let l1 = &cluster.l1;
+    let leader = &cluster.nodes[0];
+    let mut removed = ZoneAccount::with_signer(first_signer, l1, leader, cluster.portal_address);
+    let mut added = ZoneAccount::with_signer(second_signer, l1, leader, cluster.portal_address);
+    l1.fund_user(removed.address(), AMOUNT).await?;
+    l1.fund_user(added.address(), AMOUNT).await?;
+
+    assert_eq!(
+        added.deposit(AMOUNT, L1_TIMEOUT, leader).await?,
+        U256::from(AMOUNT)
+    );
+    let bounce_from = removed.submit_deposit(AMOUNT).await?;
+    let portal = ZonePortal::new(cluster.portal_address, l1.provider());
+    poll_until(
+        Duration::from_secs(60),
+        Duration::from_millis(250),
+        "removed sender's deposit bounce-back on L1",
+        || {
+            let portal = &portal;
+            async move {
+                let bounced = portal
+                    .DepositBounceBack_filter()
+                    .from_block(bounce_from)
+                    .query()
+                    .await?
+                    .into_iter()
+                    .any(|(event, _)| event.tempoRefundRecipient == first);
+                Ok(bounced.then_some(()))
+            }
+        },
+    )
+    .await?;
+    assert_eq!(
+        leader.balance_of(ZONE_TOKEN_ADDRESS, first).await?,
+        U256::ZERO,
+        "removed depositor was credited"
+    );
+
+    Ok(())
+}
+
+/// A relayed write fails while a sequencer is offline, naming only that sequencer, after the
+/// online sequencers applied it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_rpc_node_allowlist_write_fails_with_offline_sequencer() -> eyre::Result<()> {
+    reth_tracing::init_test_tracing();
+
+    let added = crate::utils::signer_at(4).address();
+    let fixture = start_real_p2p_cluster_with_deposit_allowlist(4, 2, &[]).await?;
+    let (cluster, rpc) = (&fixture.cluster, &fixture.rpc_node);
+
+    // Until the RPC node connects to both online sequencers, the error lists them as well.
+    let error = poll_until(
+        Duration::from_secs(60),
+        Duration::from_millis(500),
+        "relayed write missing only the offline sequencer",
+        || async {
+            let error = set_deposit_allowed(rpc, &[added], true)
+                .await
+                .expect_err("a write cannot reach the offline sequencer")
+                .to_string();
+            Ok((!error.contains(", ")).then_some(error))
+        },
+    )
+    .await?;
+    assert!(
+        error.contains("no acknowledgement from sequencers"),
+        "unexpected relay error: {error}"
+    );
+    for (index, node) in cluster.nodes.iter().enumerate() {
+        assert_eq!(
+            get_deposit_allowlist(node).await?,
+            vec![added],
+            "online sequencer {index} did not apply the write"
+        );
+    }
 
     Ok(())
 }

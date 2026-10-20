@@ -501,6 +501,8 @@ pub(crate) async fn collect_follower_settlement_signatures(
                             tracing::warn!(target: "zone::p2p", %follower, %err, "Rejected follower settlement signature");
                         }
                     }
+                    P2pEvent::AllowlistUpdateReceived { .. }
+                    | P2pEvent::AllowlistAckReceived { .. } => {}
                     P2pEvent::BlockReceived { .. }
                     | P2pEvent::TransactionReceived { .. }
                     | P2pEvent::SettlementProposalReceived { .. } => {

@@ -287,3 +287,16 @@ quorum receiver decodes and validates each forwarded transaction through its poo
 validation is not trusted. Only the active leader selects and orders transactions into blocks.
 Followers periodically retry live pool transactions, recovering from listener overflow and
 temporary leader disconnections.
+
+## Deposit allowlist relay
+
+Sequencers started with `--deposits.allowlist` serve the `zoneAdmin` allowlist methods on their
+operator RPC. An rpc-follower serves the same methods and relays each call to every quorum member
+on a dedicated channel. Each member applies the call to its own persisted list and acknowledges
+it. The call returns only after every member acknowledges, and fails naming the members that did
+not; members that already applied a failed write keep it. Callers must send writes one at a
+time, because writes relayed concurrently through different rpc-followers may apply in different
+orders on different members.
+
+Upgrade every node before calling these methods through an rpc-follower: Commonware disconnects a
+peer that sends on a channel the receiver does not register.

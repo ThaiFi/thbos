@@ -24,10 +24,16 @@ pub(crate) const TRANSACTION_CHANNEL: u64 = 3;
 pub(crate) const SETTLEMENT_PROPOSAL_CHANNEL: u64 = 4;
 /// Follower-to-leader settlement signature channel.
 pub(crate) const SETTLEMENT_SIGNATURE_CHANNEL: u64 = 5;
+/// Deposit allowlist updates relayed to the quorum, and their acknowledgements.
+pub(crate) const ALLOWLIST_CHANNEL: u64 = 6;
 /// Commonware derives receive capacity from this burst size and the retained peer count.
 /// Forwarded transactions are retried from the sender's pool, so a small per-peer burst bounds
 /// memory before the transaction-specific wire limit can run without sacrificing eventual relay.
 pub(crate) const TRANSACTION_BURST: u32 = 4;
+
+/// Maximum deposit allowlist frame accepted from a peer. A full-list replacement of about
+/// 90,000 JSON-encoded addresses fits.
+pub const MAX_ALLOWLIST_MESSAGE_SIZE: usize = 4 * 1024 * 1024;
 
 /// Maximum raw EIP-2718 transaction frame accepted from another sequencer.
 ///
@@ -201,6 +207,11 @@ pub(crate) fn backfill_response_quota() -> Quota {
 
 pub(crate) fn transaction_quota() -> Quota {
     Quota::per_second(NZU32!(1024)).allow_burst(NZU32!(TRANSACTION_BURST))
+}
+
+/// Allowlist updates are operator writes that each wait for every quorum acknowledgement.
+pub(crate) fn allowlist_quota() -> Quota {
+    Quota::per_second(NZU32!(16)).allow_burst(NZU32!(4))
 }
 
 /// ACKs are small fixed-shape EIP-712 statements plus one secp256k1 signature.

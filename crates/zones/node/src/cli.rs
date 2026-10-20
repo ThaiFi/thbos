@@ -19,8 +19,8 @@ use zone_p2p::{MAX_TRANSACTION_MESSAGE_SIZE, P2pConfig, Role};
 use zone_payload::DEFAULT_WITHDRAWAL_BATCH_INTERVAL_BLOCKS;
 
 use crate::{
-    DepositAllowlist, DepositAllowlistConfig, ZoneNode, ZoneProverConfig, ZoneRedactedRpcConfig,
-    ZoneSequencerAddOnsConfig, deposit_allowlist::DEPOSIT_ALLOWLIST_FILE_NAME, dev::DevCommand,
+    DepositAllowlist, ZoneNode, ZoneProverConfig, ZoneRedactedRpcConfig, ZoneSequencerAddOnsConfig,
+    deposit_allowlist::DEPOSIT_ALLOWLIST_FILE_NAME, dev::DevCommand,
     rpc::auth::DEFAULT_MAX_AUTH_TOKEN_VALIDITY_SECS,
 };
 use zone_checker::{CheckerConfig, CheckerExEx, CheckerMode};
@@ -307,11 +307,7 @@ async fn configure_sequencing(
                     args.deposit_allowlist_seed.as_deref(),
                 )
             })
-            .transpose()?
-            .map(|allowlist| DepositAllowlistConfig {
-                allowlist,
-                admin_addr: args.deposit_allowlist_admin_addr,
-            });
+            .transpose()?;
         node = node.with_sequencer(ZoneSequencerAddOnsConfig {
             sequencer_signer,
             // `None` on an rpc-only node: it holds no individual key, and it is never the
@@ -652,16 +648,6 @@ pub struct ZoneArgs {
         requires = "deposit_allowlist"
     )]
     pub deposit_allowlist_seed: Option<PathBuf>,
-
-    /// Serve the unauthenticated `zoneAdmin` allowlist JSON-RPC methods on this address.
-    /// Restrict access at the network layer.
-    #[arg(
-        long = "deposits.allowlist.admin-addr",
-        env = "DEPOSITS_ALLOWLIST_ADMIN_ADDR",
-        value_name = "ADDR",
-        requires = "deposit_allowlist"
-    )]
-    pub deposit_allowlist_admin_addr: Option<SocketAddr>,
 }
 
 fn prepend_log_filter(filter: &mut String, directives: &str) {

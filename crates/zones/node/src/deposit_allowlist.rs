@@ -9,7 +9,6 @@ use std::{
     collections::BTreeSet,
     fs::File,
     io::Write as _,
-    net::SocketAddr,
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -17,22 +16,15 @@ use std::{
 use alloy_primitives::{Address, B256};
 use eyre::{WrapErr as _, ensure};
 use jsonrpsee::{core::RpcResult, proc_macros::rpc, types::ErrorObjectOwned};
-use parking_lot::RwLock;
+use parking_lot::{Mutex, RwLock};
 use tracing::info;
 use zone_l1::abi::{ChaumPedersenProof, DecryptionData};
 
+mod relay;
+pub(crate) use relay::{AllowlistRelay, apply_relayed_updates};
+
 /// File name of the persisted allowlist inside the node data directory.
 pub const DEPOSIT_ALLOWLIST_FILE_NAME: &str = "deposit-allowlist.json";
-
-/// Allowlist configuration attached to a sequencer.
-#[derive(Debug, Clone)]
-pub struct DepositAllowlistConfig {
-    /// The loaded allowlist shared by the engine and the admin server.
-    pub allowlist: DepositAllowlist,
-    /// Listen address of the `zoneAdmin` JSON-RPC server. `None` disables the server, leaving
-    /// the persisted list fixed for the lifetime of the process.
-    pub admin_addr: Option<SocketAddr>,
-}
 
 /// Addresses whose L1 deposits the leader credits, persisted as a sorted JSON array.
 ///
@@ -46,8 +38,11 @@ pub struct DepositAllowlist {
 struct Inner {
     /// Persisted list location, rewritten atomically on every update.
     path: PathBuf,
-    /// Current list. Writers hold the lock while persisting so updates apply in order.
+    /// Current list, read by the engine on every block build.
     addresses: RwLock<BTreeSet<Address>>,
+    /// Serializes writers so updates persist and apply in order without holding `addresses`
+    /// across disk I/O.
+    write_lock: Mutex<()>,
 }
 
 impl DepositAllowlist {
@@ -81,6 +76,7 @@ impl DepositAllowlist {
             inner: Arc::new(Inner {
                 path,
                 addresses: RwLock::new(addresses),
+                write_lock: Mutex::new(()),
             }),
         })
     }
@@ -146,45 +142,61 @@ impl DepositAllowlist {
         &self,
         apply: impl FnOnce(&BTreeSet<Address>) -> BTreeSet<Address>,
     ) -> eyre::Result<()> {
-        let mut addresses = self.inner.addresses.write();
-        let next = apply(&addresses);
+        let _writer = self.inner.write_lock.lock();
+        // Only writers change `addresses`, so this snapshot stays current until the swap below.
+        let next = apply(&self.inner.addresses.read());
         persist(&self.inner.path, &next)?;
-        *addresses = next;
+        *self.inner.addresses.write() = next;
         Ok(())
     }
 }
 
 /// `zoneAdmin` methods for managing the deposit allowlist.
+///
+/// Served by a sequencer for its own list, or by an RPC-only node that relays each write to every
+/// sequencer. Callers must wait for each write to return before sending the next one: concurrent
+/// writes from different RPC nodes may be applied in different orders on different sequencers.
 #[rpc(server, namespace = "zoneAdmin")]
 pub(crate) trait DepositAllowlistApi {
     /// Add (`allowed = true`) or remove (`allowed = false`) depositor addresses.
-    #[method(name = "setDepositAllowed", blocking)]
-    fn set_deposit_allowed(&self, addresses: Vec<Address>, allowed: bool) -> RpcResult<()>;
+    #[method(name = "setDepositAllowed")]
+    async fn set_deposit_allowed(&self, addresses: Vec<Address>, allowed: bool) -> RpcResult<()>;
 
     /// Replace the whole allowlist.
-    #[method(name = "replaceDepositAllowlist", blocking)]
-    fn replace_deposit_allowlist(&self, addresses: Vec<Address>) -> RpcResult<()>;
+    #[method(name = "replaceDepositAllowlist")]
+    async fn replace_deposit_allowlist(&self, addresses: Vec<Address>) -> RpcResult<()>;
 
-    /// Returns the allowlist in ascending order.
+    /// Returns the allowlist in ascending order. Through an RPC-only node, fails unless every
+    /// sequencer holds the same list.
     #[method(name = "getDepositAllowlist")]
-    fn get_deposit_allowlist(&self) -> RpcResult<Vec<Address>>;
+    async fn get_deposit_allowlist(&self) -> RpcResult<Vec<Address>>;
 }
 
+#[jsonrpsee::core::async_trait]
 impl DepositAllowlistApiServer for DepositAllowlist {
-    fn set_deposit_allowed(&self, addresses: Vec<Address>, allowed: bool) -> RpcResult<()> {
-        self.set(&addresses, allowed).map_err(internal_error)?;
-        info!(target: "zone::allowlist", count = addresses.len(), allowed, "Updated deposit allowlist");
+    async fn set_deposit_allowed(&self, addresses: Vec<Address>, allowed: bool) -> RpcResult<()> {
+        let count = addresses.len();
+        let allowlist = self.clone();
+        tokio::task::spawn_blocking(move || allowlist.set(&addresses, allowed))
+            .await
+            .map_err(|err| internal_error(eyre::Report::new(err)))?
+            .map_err(internal_error)?;
+        info!(target: "zone::allowlist", count, allowed, "Updated deposit allowlist");
         Ok(())
     }
 
-    fn replace_deposit_allowlist(&self, addresses: Vec<Address>) -> RpcResult<()> {
+    async fn replace_deposit_allowlist(&self, addresses: Vec<Address>) -> RpcResult<()> {
         let count = addresses.len();
-        self.replace(addresses).map_err(internal_error)?;
+        let allowlist = self.clone();
+        tokio::task::spawn_blocking(move || allowlist.replace(addresses))
+            .await
+            .map_err(|err| internal_error(eyre::Report::new(err)))?
+            .map_err(internal_error)?;
         info!(target: "zone::allowlist", count, "Replaced deposit allowlist");
         Ok(())
     }
 
-    fn get_deposit_allowlist(&self) -> RpcResult<Vec<Address>> {
+    async fn get_deposit_allowlist(&self) -> RpcResult<Vec<Address>> {
         Ok(self.addresses())
     }
 }

@@ -337,6 +337,8 @@ where
                         P2pEvent::SettlementSignatureReceived { .. } => {
                             debug!(target: "zone::p2p", "Ignoring leader-only attestation event on follower");
                         }
+                        P2pEvent::AllowlistUpdateReceived { .. }
+                        | P2pEvent::AllowlistAckReceived { .. } => {}
                     }
                 }
                 Ok(()) = schedule_changes.changed() => {
