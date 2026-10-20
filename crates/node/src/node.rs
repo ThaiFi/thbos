@@ -135,10 +135,6 @@ pub struct TempoNodeArgs {
         num_args = 0..=1
     )]
     pub shadow_replay: Option<Option<TempoHardfork>>,
-    /// Runtime JIT compiler settings.
-    #[cfg(feature = "jit")]
-    #[command(flatten)]
-    pub jit: crate::jit::JitArgs,
 }
 
 impl Default for TempoNodeArgs {
@@ -155,8 +151,6 @@ impl Default for TempoNodeArgs {
             engine_disable_execution_cache_sharing_with_builder: false,
             builder_build_time_multiplier: DEFAULT_BUILD_TIME_MULTIPLIER,
             shadow_replay: None,
-            #[cfg(feature = "jit")]
-            jit: Default::default(),
         }
     }
 }
@@ -257,8 +251,6 @@ pub struct TempoNode {
     network_builder: TempoNetworkBuilder,
     /// Filled with the engine's in-memory overlay when the node launches.
     executed_state: ExecutedState,
-    #[cfg(feature = "jit")]
-    jit: crate::jit::JitArgs,
 }
 
 impl TempoNode {
@@ -270,8 +262,6 @@ impl TempoNode {
             validator_key,
             network_builder: TempoNetworkBuilder::default(),
             executed_state: ExecutedState::default(),
-            #[cfg(feature = "jit")]
-            jit: args.jit.clone(),
         }
     }
 
@@ -499,10 +489,6 @@ where
             self.payload_builder_builder,
             self.network_builder.clone(),
         )
-        .executor(TempoExecutorBuilder {
-            #[cfg(feature = "jit")]
-            jit: self.jit.clone(),
-        })
     }
 
     fn add_ons(&self) -> Self::AddOns {
@@ -562,13 +548,9 @@ impl PayloadAttributesBuilder<TempoPayloadAttributes, TempoHeader>
 }
 
 /// A regular ethereum evm and executor builder.
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Default, Clone, Copy)]
 #[non_exhaustive]
-pub struct TempoExecutorBuilder {
-    /// JIT compiler settings.
-    #[cfg(feature = "jit")]
-    pub jit: crate::jit::JitArgs,
-}
+pub struct TempoExecutorBuilder;
 
 impl<Node> ExecutorBuilder<Node> for TempoExecutorBuilder
 where
@@ -579,9 +561,9 @@ where
     async fn build_evm(self, ctx: &BuilderContext<Node>) -> eyre::Result<Self::EVM> {
         let mut evm_config = TempoEvmConfig::new(ctx.chain_spec());
         #[cfg(feature = "jit")]
-        if self.jit.enabled || self.jit.blocking {
+        if ctx.config().jit.enabled || ctx.config().jit.blocking {
             let spec = ctx.chain_spec().tempo_hardfork_at(u64::MAX);
-            let backend = crate::jit::backend(&self.jit, spec)?;
+            let backend = crate::jit::backend(&ctx.config().jit, spec)?;
             let stats_backend = backend.clone();
             ctx.task_executor().spawn_with_graceful_shutdown_signal(|shutdown| async move {
                 let mut shutdown = std::pin::pin!(shutdown);
