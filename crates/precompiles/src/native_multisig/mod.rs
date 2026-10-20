@@ -94,6 +94,8 @@ impl NativeMultisig {
             &current.owners,
         );
         let stored = self.get_config_commitment(sender)?;
+        // `current` is not validated: only validated configurations are stored, so an invalid one
+        // cannot match the stored hash and is rejected as stale.
         let hash = self.storage.keccak256(
             &current
                 .commitment_preimage()
