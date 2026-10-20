@@ -14333,6 +14333,7 @@ dependencies = [
  "alloy-rlp",
  "alloy-sol-types",
  "bincode",
+ "codspeed-criterion-compat",
  "commonware-codec",
  "reth-chainspec",
  "reth-consensus",

@@ -6,6 +6,7 @@ their contracts are in [`tempo-fuzz-types`](../fuzz-types).
 
 ```bash
 cargo build -p tempo-fuzz-harness --release
+cargo bench -p tempo-fuzz-harness --bench execute
 ```
 
 The library exports two bincode-encoded C ABI functions:

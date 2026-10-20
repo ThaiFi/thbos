@@ -12,7 +12,8 @@ publish.workspace = true
 workspace = true
 
 [lib]
-crate-type = ["cdylib"]
+# `rlib` lets the benchmark call the C ABI in-process.
+crate-type = ["cdylib", "rlib"]
 path = "src/lib.rs"
 
 [dependencies]
@@ -37,5 +38,10 @@ tempo-primitives = { workspace = true, features = ["reth"] }
 
 [dev-dependencies]
 commonware-codec.workspace = true
+criterion.workspace = true
 tempo-dkg-onchain-artifacts = { workspace = true, features = ["test-utils"] }
 tempo-precompiles.workspace = true
+
+[[bench]]
+name = "execute"
+harness = false
