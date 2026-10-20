@@ -1,15 +1,8 @@
 //! The pre-state blocks execute on, and how the state they leave is reported.
 
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    fmt,
-    sync::{
-        Arc, LazyLock,
-        atomic::{AtomicBool, Ordering},
-    },
-};
+use std::{cell::Cell, collections::BTreeMap, fmt, sync::LazyLock};
 
-use alloy_primitives::{Address, B256, Bytes, U256};
+use alloy_primitives::{Address, B256, Bytes, U256, map::B256Map};
 use reth_trie_common::{
     TrieAccount,
     root::{state_root_unhashed, storage_root_unhashed},
@@ -17,50 +10,48 @@ use reth_trie_common::{
 use revm::{
     DatabaseRef,
     bytecode::Bytecode,
-    database::{Cache, CacheDB, DBErrorMarker, DbAccount, EmptyDB},
-    state::{AccountInfo, EvmState},
+    database::{
+        BundleState, CacheState, DBErrorMarker, EmptyDB, PlainAccount, State,
+        StorageWithOriginalValues, TransitionState,
+    },
+    database_interface::WrapDatabaseRef,
+    state::AccountInfo,
 };
 use tempo_fuzz_types::{
-    AccountDiff, AccountInput, ErrorClass, PreState, StateInput, StorageChangeOutput, TxStateDiff,
+    AccountDiff, AccountInput, ErrorClass, PreState, StateChanges, StateInput, StorageChangeOutput,
 };
 
-/// The in-memory state blocks execute on.
-pub(crate) type Db = CacheDB<PreStateDb>;
+/// The state blocks execute on, as the node executes blocks: revm's `State`
+/// with bundle updates, over the seeded pre-state.
+pub(crate) type Db = State<WrapDatabaseRef<PreStateDb>>;
 
 /// What execution reads when the seeded state does not hold a key. For a
 /// genesis pre-state that is empty state. For an exact pre-state it is an
-/// error, also recorded in a flag that clones share, so the input is known to
-/// be incomplete even when the error was swallowed on its way up.
-#[derive(Clone, Debug)]
+/// error, also recorded so the input is known to be incomplete even when the
+/// error was swallowed on its way up.
+#[derive(Debug)]
 pub(crate) struct PreStateDb {
     exact: bool,
-    missed: Arc<AtomicBool>,
+    missed: Cell<bool>,
 }
 
 impl PreStateDb {
-    fn new(exact: bool) -> Self {
-        Self {
-            exact,
-            missed: Arc::default(),
-        }
-    }
-
     /// Whether a read missed an exact pre-state.
     pub(crate) fn missed(&self) -> bool {
-        self.missed.load(Ordering::Relaxed)
+        self.missed.get()
     }
 
     /// Sets the miss flag, e.g. back to a value saved before reads that are
     /// not part of execution.
     pub(crate) fn restore_missed(&self, missed: bool) {
-        self.missed.store(missed, Ordering::Relaxed);
+        self.missed.set(missed);
     }
 
     fn miss(&self, key: Missing) -> Result<(), MissingPreState> {
         if !self.exact {
             return Ok(());
         }
-        self.missed.store(true, Ordering::Relaxed);
+        self.missed.set(true);
         Err(MissingPreState(key))
     }
 }
@@ -125,8 +116,8 @@ impl DatabaseRef for PreStateDb {
 
 /// The dev genesis allocation, seeded once per process: seeding analyses and
 /// hashes every genesis contract, which costs more than executing a transfer.
-static GENESIS: LazyLock<Cache> = LazyLock::new(|| {
-    let mut db = CacheDB::new(PreStateDb::new(false));
+static GENESIS: LazyLock<CacheState> = LazyLock::new(|| {
+    let mut cache = CacheState::new();
     for (address, account) in &tempo_chainspec::spec::DEV.inner.genesis.alloc {
         let info = account_info(
             account.balance,
@@ -138,15 +129,15 @@ static GENESIS: LazyLock<Cache> = LazyLock::new(|| {
             .iter()
             .flatten()
             .map(|(slot, value)| ((*slot).into(), (*value).into()));
-        insert(&mut db, *address, info, storage);
+        insert(&mut cache, *address, info, storage);
     }
-    db.cache
+    cache
 });
 
 /// `pre_state` as a database. `InvalidInput` if a genesis pre-state overrides
 /// a genesis account.
 pub(crate) fn seed(pre_state: &PreState) -> Result<Db, ErrorClass> {
-    match pre_state {
+    let (cache, exact) = match pre_state {
         PreState::Genesis(state) => {
             if state
                 .accounts
@@ -155,44 +146,42 @@ pub(crate) fn seed(pre_state: &PreState) -> Result<Db, ErrorClass> {
             {
                 return Err(ErrorClass::InvalidInput);
             }
-            let mut db = CacheDB {
-                cache: GENESIS.clone(),
-                db: PreStateDb::new(false),
-            };
+            let mut cache = GENESIS.clone();
             for (address, account) in &state.accounts {
-                insert_input(&mut db, *address, account);
+                insert_input(&mut cache, *address, account);
             }
-            Ok(db)
+            (cache, false)
         }
-        PreState::Exact {
-            state,
-            block_hashes,
-        } => {
-            let mut db = CacheDB::new(PreStateDb::new(true));
+        PreState::Exact { state, .. } => {
+            let mut cache = CacheState::new();
             for (address, account) in &state.accounts {
-                if is_empty(account) {
-                    db.cache
-                        .accounts
-                        .insert(*address, DbAccount::new_not_existing());
-                } else {
-                    insert_input(&mut db, *address, account);
-                }
+                insert_input(&mut cache, *address, account);
             }
-            db.cache.block_hashes.extend(
-                block_hashes
-                    .iter()
-                    .map(|(number, hash)| (U256::from(*number), *hash)),
-            );
-            Ok(db)
+            (cache, true)
         }
+    };
+    let mut db = State::builder()
+        .with_database(WrapDatabaseRef(PreStateDb {
+            exact,
+            missed: Cell::new(false),
+        }))
+        .with_cached_prestate(cache)
+        .with_bundle_update()
+        .build();
+    if let PreState::Exact { block_hashes, .. } = pre_state {
+        db.block_hashes
+            .extend(block_hashes.iter().map(|(n, h)| (*n, *h)));
     }
+    Ok(db)
 }
 
+/// Whether `account` holds nothing: an extractor lists the slots a block read
+/// even for an account that does not exist, all of them zero.
 fn is_empty(account: &AccountInput) -> bool {
     account.balance.is_zero()
         && account.nonce == 0
         && account.code.is_empty()
-        && account.storage.is_empty()
+        && account.storage.values().all(U256::is_zero)
 }
 
 fn account_info(balance: U256, nonce: u64, code: Bytes) -> AccountInfo {
@@ -201,196 +190,198 @@ fn account_info(balance: U256, nonce: u64, code: Bytes) -> AccountInfo {
         .with_code(Bytecode::new_raw(code))
 }
 
-fn insert_input(db: &mut Db, address: Address, account: &AccountInput) {
+/// Inserts `account`, or records that it does not exist if it holds nothing.
+fn insert_input(cache: &mut CacheState, address: Address, account: &AccountInput) {
+    if is_empty(account) {
+        cache.insert_not_existing(address);
+        return;
+    }
     let info = account_info(account.balance, account.nonce, account.code.clone());
     let storage = account.storage.iter().map(|(slot, value)| (*slot, *value));
-    insert(db, address, info, storage);
+    insert(cache, address, info, storage);
 }
 
-/// Inserts an account and the slots the pre-state holds for it.
+/// Inserts an account, its code and the slots the pre-state holds for it.
+/// Other slots are read from the database below.
 fn insert(
-    db: &mut Db,
+    cache: &mut CacheState,
     address: Address,
     info: AccountInfo,
     storage: impl Iterator<Item = (U256, U256)>,
 ) {
-    db.insert_account_info(address, info);
-    db.cache
+    if let Some(code) = &info.code {
+        cache.contracts.insert(info.code_hash, code.clone());
+    }
+    cache.insert_account_with_storage(address, info, storage.collect());
+}
+
+/// The net changes recorded since the last call: the state transitions of
+/// one execution step.
+pub(crate) fn drain(db: &mut Db) -> TransitionState {
+    db.transition_state
+        .as_mut()
+        .expect("the state records bundle updates")
+        .take()
+}
+
+/// The state `pre` holds with `bundle` applied: what blocks that applied left.
+pub(crate) fn after(pre: &CacheState, bundle: &BundleState) -> BTreeMap<Address, PlainAccount> {
+    let mut accounts: BTreeMap<_, _> = pre
         .accounts
-        .get_mut(&address)
-        .expect("the account was just inserted")
-        .storage
-        .extend(storage);
+        .iter()
+        .filter_map(|(address, account)| Some((*address, account.account.clone()?)))
+        .collect();
+    for (address, account) in &bundle.state {
+        let Some(info) = &account.info else {
+            accounts.remove(address);
+            continue;
+        };
+        let after = accounts.entry(*address).or_default();
+        after.info = info.clone();
+        // A destroyed account keeps none of its earlier slots.
+        if account.status.was_destroyed() {
+            after.storage.clear();
+        }
+        after.storage.extend(
+            account
+                .storage
+                .iter()
+                .map(|(slot, value)| (*slot, value.present_value)),
+        );
+    }
+    for account in accounts.values_mut() {
+        account.storage.retain(|_, value| !value.is_zero());
+    }
+    accounts
 }
 
-/// The accounts `db` holds that exist and are not empty, with their non-zero
-/// slots, in no particular order.
-fn accounts(db: &Db) -> impl Iterator<Item = (Address, AccountInfo, BTreeMap<U256, U256>)> + '_ {
-    db.cache.accounts.iter().filter_map(|(address, account)| {
-        let info = account.info()?;
-        let storage: BTreeMap<_, _> = account
-            .storage
-            .iter()
-            .filter(|(_, value)| !value.is_zero())
-            .map(|(slot, value)| (*slot, *value))
-            .collect();
-        let empty = info.is_empty() && storage.is_empty();
-        (!empty).then_some((*address, info, storage))
-    })
-}
-
-/// The state `db` holds.
-pub(crate) fn encode(db: &Db) -> StateInput {
-    let accounts = accounts(db)
-        .map(|(address, info, storage)| {
+/// `accounts`, as an outcome reports them. Code comes from the accounts or,
+/// by hash, from `contracts`.
+pub(crate) fn encode(
+    accounts: &BTreeMap<Address, PlainAccount>,
+    contracts: &B256Map<Bytecode>,
+) -> StateInput {
+    let accounts = accounts
+        .iter()
+        .map(|(address, account)| {
             let account = AccountInput {
-                balance: info.balance,
-                nonce: info.nonce,
-                code: code(db, &info),
-                storage,
+                balance: account.info.balance,
+                nonce: account.info.nonce,
+                code: code(&account.info, contracts),
+                storage: account.storage.iter().map(|(k, v)| (*k, *v)).collect(),
             };
-            (address, account)
+            (*address, account)
         })
         .collect();
     StateInput { accounts }
 }
 
-fn code(db: &Db, info: &AccountInfo) -> Bytes {
-    match &info.code {
-        Some(code) => code.original_bytes(),
-        None => db
-            .cache
-            .contracts
-            .get(&info.code_hash)
-            .map(Bytecode::original_bytes)
-            .unwrap_or_default(),
-    }
+fn code(info: &AccountInfo, contracts: &B256Map<Bytecode>) -> Bytes {
+    info.code
+        .as_ref()
+        .or_else(|| contracts.get(&info.code_hash))
+        .map(Bytecode::original_bytes)
+        .unwrap_or_default()
 }
 
-/// The state root of `db`, which must hold the whole state.
-pub(crate) fn state_root(db: &Db) -> B256 {
-    state_root_unhashed(accounts(db).map(|(address, info, storage)| {
-        let storage = storage
-            .into_iter()
-            .map(|(slot, value)| (B256::from(slot), value));
-        let account = TrieAccount {
-            nonce: info.nonce,
-            balance: info.balance,
+/// The state root of `accounts`, which must be the whole state.
+pub(crate) fn state_root(accounts: &BTreeMap<Address, PlainAccount>) -> B256 {
+    state_root_unhashed(accounts.iter().map(|(address, account)| {
+        let storage = account
+            .storage
+            .iter()
+            .map(|(slot, value)| (B256::from(*slot), *value));
+        let trie_account = TrieAccount {
+            nonce: account.info.nonce,
+            balance: account.info.balance,
             storage_root: storage_root_unhashed(storage),
-            code_hash: info.code_hash,
+            code_hash: account.info.code_hash,
         };
-        (address, account)
+        (*address, trie_account)
     }))
 }
 
-/// How `after` differs from `before`: per account, the balance, nonce and code
-/// that changed, and every slot that changed.
-pub(crate) fn diff(
-    before: &StateInput,
-    after: &StateInput,
-) -> (Vec<AccountDiff>, Vec<StorageChangeOutput>) {
-    let empty = AccountInput::default();
-    let addresses: BTreeSet<_> = before
-        .accounts
-        .keys()
-        .chain(after.accounts.keys())
-        .collect();
-    let mut accounts = Vec::new();
-    let mut storage = Vec::new();
-    for &address in addresses {
-        let old = before.accounts.get(&address).unwrap_or(&empty);
-        let new = after.accounts.get(&address).unwrap_or(&empty);
-        let code = (old.code != new.code).then(|| new.code.clone());
-        accounts.extend(account_diff(
-            address,
-            (old.balance, new.balance),
-            (old.nonce, new.nonce),
-            code,
-        ));
-
-        let slots: BTreeSet<_> = old.storage.keys().chain(new.storage.keys()).collect();
-        for &slot in slots {
-            let value =
-                |account: &AccountInput| account.storage.get(&slot).copied().unwrap_or_default();
-            let (before, after) = (value(old), value(new));
-            if before != after {
-                storage.push(StorageChangeOutput {
-                    address,
-                    slot,
-                    before,
-                    after,
-                });
-            }
-        }
-    }
-    (accounts, storage)
+/// One account's net change, as both transitions and bundles record it.
+struct Change<'a> {
+    before: Option<&'a AccountInfo>,
+    after: Option<&'a AccountInfo>,
+    storage_cleared: bool,
+    storage: &'a StorageWithOriginalValues,
 }
 
-/// What a transaction's `changes` do to `db`, before they are committed.
-pub(crate) fn tx_diff(db: &Db, changes: &EvmState, block_index: u64, tx_index: u64) -> TxStateDiff {
-    let touched: BTreeMap<_, _> = changes
-        .iter()
-        .filter(|(_, account)| account.is_touched())
-        .collect();
-    let mut accounts = Vec::new();
-    let mut storage = Vec::new();
-    for (&address, account) in touched {
-        let before = db
-            .cache
-            .accounts
-            .get(&address)
-            .and_then(DbAccount::info)
-            .unwrap_or_default();
-        let after = if account.is_selfdestructed() {
-            AccountInfo::default()
-        } else {
-            account.info.clone()
-        };
-        let code = (before.code_hash != after.code_hash).then(|| code(db, &after));
-        accounts.extend(account_diff(
+/// `changes` as an outcome reports them, by address and then slot.
+fn state_changes<'a>(
+    changes: impl Iterator<Item = (Address, Change<'a>)>,
+    contracts: &B256Map<Bytecode>,
+) -> StateChanges {
+    let changes: BTreeMap<_, _> = changes.collect();
+    let mut out = StateChanges::default();
+    let empty = AccountInfo::default();
+    for (address, change) in changes {
+        let (before, after) = (
+            change.before.unwrap_or(&empty),
+            change.after.unwrap_or(&empty),
+        );
+        let diff = AccountDiff {
             address,
-            (before.balance, after.balance),
-            (before.nonce, after.nonce),
-            code,
-        ));
-
-        let changed: BTreeMap<_, _> = account
+            exists: (change.before.is_some() != change.after.is_some())
+                .then_some(change.after.is_some()),
+            balance: (before.balance != after.balance).then_some(after.balance),
+            nonce: (before.nonce != after.nonce).then_some(after.nonce),
+            code: (before.code_hash != after.code_hash).then(|| code(after, contracts)),
+            storage_cleared: change.storage_cleared,
+        };
+        if diff.exists.is_some()
+            || diff.balance.is_some()
+            || diff.nonce.is_some()
+            || diff.code.is_some()
+            || diff.storage_cleared
+        {
+            out.accounts.push(diff);
+        }
+        let slots: BTreeMap<_, _> = change
             .storage
             .iter()
             .filter(|(_, slot)| slot.is_changed())
             .collect();
-        storage.extend(
-            changed
-                .into_iter()
-                .map(|(&slot, value)| StorageChangeOutput {
-                    address,
-                    slot,
-                    before: value.original_value(),
-                    after: value.present_value(),
-                }),
-        );
+        out.storage
+            .extend(slots.into_iter().map(|(slot, value)| StorageChangeOutput {
+                address,
+                slot: *slot,
+                before: value.previous_or_original_value,
+                after: value.present_value,
+            }));
     }
-    TxStateDiff {
-        block_index,
-        tx_index,
-        accounts,
-        storage,
-    }
+    out
 }
 
-/// An account's change from `(before, after)` balances and nonces and its new
-/// code, if it changed; `None` if nothing did.
-fn account_diff(
-    address: Address,
-    (old_balance, balance): (U256, U256),
-    (old_nonce, nonce): (u64, u64),
-    code: Option<Bytes>,
-) -> Option<AccountDiff> {
-    let diff = AccountDiff {
-        address,
-        balance: (old_balance != balance).then_some(balance),
-        nonce: (old_nonce != nonce).then_some(nonce),
-        code,
-    };
-    (diff.balance.is_some() || diff.nonce.is_some() || diff.code.is_some()).then_some(diff)
+/// The changes `transitions` record.
+pub(crate) fn transition_changes(
+    transitions: &TransitionState,
+    contracts: &B256Map<Bytecode>,
+) -> StateChanges {
+    let changes = transitions.transitions.iter().map(|(address, account)| {
+        let change = Change {
+            before: account.previous_info.as_ref(),
+            after: account.info.as_ref(),
+            storage_cleared: account.storage_was_destroyed,
+            storage: &account.storage,
+        };
+        (*address, change)
+    });
+    state_changes(changes, contracts)
+}
+
+/// The changes `bundle` records.
+pub(crate) fn bundle_changes(bundle: &BundleState, contracts: &B256Map<Bytecode>) -> StateChanges {
+    let changes = bundle.state.iter().map(|(address, account)| {
+        let change = Change {
+            before: account.original_info.as_ref(),
+            after: account.info.as_ref(),
+            storage_cleared: account.status.was_destroyed(),
+            storage: &account.storage,
+        };
+        (*address, change)
+    });
+    state_changes(changes, contracts)
 }

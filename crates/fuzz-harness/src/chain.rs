@@ -80,6 +80,7 @@ fn context_header(spec: &TempoChainSpec, context: &BlockContextInput) -> TempoHe
             blob_gas_used: Some(0),
             excess_blob_gas: Some(0),
             withdrawals_root: Some(EMPTY_ROOT_HASH),
+            extra_data: context.extra_data.clone(),
             ..Default::default()
         },
         consensus_context: None,

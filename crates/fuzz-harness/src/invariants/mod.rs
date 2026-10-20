@@ -17,7 +17,7 @@ use tempo_evm::evm::TempoEvm;
 use tempo_fuzz_types::{InvariantFailure, InvariantScope};
 use tempo_primitives::TempoBlockEnv;
 
-use crate::state::Db;
+use crate::state::{Db, PreStateDb};
 
 /// Appends to `failures` each invariant `db` breaks, at `scope`. `env` is the
 /// block's environment. `changed`, sorted, limits the check to contracts whose
@@ -30,12 +30,13 @@ pub(crate) fn check(
     changed: Option<&[Address]>,
     failures: &mut Vec<InvariantFailure>,
 ) {
-    let missed = db.db.missed();
+    let pre_state = &db.database.0;
+    let missed = pre_state.missed();
     let mut accounts: Vec<Address> = db
         .cache
         .accounts
         .iter()
-        .filter(|(_, account)| account.info().is_some())
+        .filter(|(_, account)| account.account.is_some())
         .map(|(address, _)| *address)
         .collect();
     accounts.sort_unstable();
@@ -50,22 +51,26 @@ pub(crate) fn check(
             scope: scope.clone(),
         });
     }
-    db.db.restore_missed(missed);
+    pre_state.restore_missed(missed);
 }
 
 /// Read-only calls against the state being checked.
 struct Views<'a>(TempoEvm<WrapDatabaseRef<&'a Db>>);
 
 impl Views<'_> {
+    fn pre_state(&self) -> &PreStateDb {
+        &self.0.components().0.0.database.0
+    }
+
     /// `call`'s return value from `target`. `Ok(None)` when nothing answers:
     /// `target` has no code, or the view read a key the pre-state lacks.
     /// `Err` when the view reverts, halts or returns something undecodable.
     fn call<C: SolCall>(&mut self, target: Address, call: C) -> Result<Option<C::Return>, String> {
-        self.0.components().0.0.db.restore_missed(false);
+        self.pre_state().restore_missed(false);
         let result = self
             .0
             .transact_system_call(Address::ZERO, target, call.abi_encode().into());
-        if self.0.components().0.0.db.missed() {
+        if self.pre_state().missed() {
             return Ok(None);
         }
         let result = result

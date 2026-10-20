@@ -6,6 +6,7 @@
 use std::{collections::BTreeMap, fmt};
 
 use alloy_primitives::{Address, B256, Bytes, Log, U256};
+use revm::context::result::{HaltReason, ResultGas};
 use serde::{
     Deserialize, Deserializer, Serialize, Serializer,
     de::{Error as DeError, SeqAccess, Visitor},
@@ -131,6 +132,9 @@ pub struct BlockContextInput {
     pub gas_limit: u64,
     pub beneficiary: Address,
     pub hardfork: TempoHardfork,
+    /// The header's extra data. From T8 on, an epoch-boundary block must carry
+    /// the DKG outcome here, or it is rejected.
+    pub extra_data: Bytes,
 }
 
 impl Default for BlockContextInput {
@@ -143,6 +147,7 @@ impl Default for BlockContextInput {
             gas_limit: 30_000_000,
             beneficiary: Address::ZERO,
             hardfork: TempoHardfork::T1,
+            extra_data: Bytes::new(),
         }
     }
 }
@@ -233,8 +238,8 @@ pub enum PreState {
     /// block hashes `BLOCKHASH` may read. Reading anything it does not hold
     /// fails the input with [`ErrorClass::IncompletePreState`]: an unlisted
     /// account, an unlisted slot of a listed account, or an unlisted block
-    /// hash. An account with no balance, nonce, code or storage does not
-    /// exist, so all its slots read as zero.
+    /// hash. An account with no balance, nonce or code whose listed slots
+    /// are all zero does not exist, so all its slots read as zero.
     Exact {
         state: StateInput,
         block_hashes: BTreeMap<u64, B256>,
@@ -303,8 +308,7 @@ pub struct TempoExecutionOutcome {
     /// The state after the last block that applied, without empty accounts
     /// and zero slots. A block that fails leaves no changes.
     pub final_state: StateInput,
-    /// How `final_state` differs from the pre-state, and what each
-    /// transaction changed.
+    /// What changed, overall and at each step of each block that applied.
     pub state_diff: StateDiff,
     /// Invariants broken after a block's pre-execution changes or after a
     /// transaction. They do not stop execution.
@@ -320,38 +324,61 @@ pub struct TempoHarnessCapabilities {
     pub supported_inputs: NonEmpty<HarnessInputKind>,
 }
 
-/// State changes, by address and then slot.
-#[derive(Clone, Debug, Default, Deserialize, Eq, Hash, PartialEq, Serialize)]
+/// What changed, overall and at each step of each block that applied.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub struct StateDiff {
-    pub accounts: Vec<AccountDiff>,
-    pub storage: Vec<StorageChangeOutput>,
-    pub txs: Vec<TxStateDiff>,
+    /// How `final_state` differs from the pre-state.
+    pub total: StateChanges,
+    pub blocks: Vec<BlockChanges>,
 }
 
+/// The net changes of each step of a block.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub struct BlockChanges {
+    /// System calls before the transactions.
+    pub pre_block: StateChanges,
+    /// One entry per transaction, in order.
+    pub txs: Vec<StateChanges>,
+    /// System calls after the transactions.
+    pub post_block: StateChanges,
+}
+
+/// Net state changes, by address and then slot.
 #[derive(Clone, Debug, Default, Deserialize, Eq, Hash, PartialEq, Serialize)]
-pub struct TxStateDiff {
-    pub block_index: u64,
-    pub tx_index: u64,
+pub struct StateChanges {
     pub accounts: Vec<AccountDiff>,
     pub storage: Vec<StorageChangeOutput>,
 }
 
-/// An account's new balance, nonce and code, each only if it changed.
+/// What changed about an account; each field is `None` or `false` when it
+/// did not change.
 #[derive(Clone, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
 pub struct AccountDiff {
     pub address: Address,
+    /// Whether the account exists now, if that changed.
+    pub exists: Option<bool>,
     pub balance: Option<U256>,
     pub nonce: Option<u64>,
     pub code: Option<Bytes>,
+    /// Whether all of its storage was cleared first.
+    pub storage_cleared: bool,
+}
+
+/// How a transaction ended. A revert's data is the receipt's `output`.
+#[derive(Clone, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
+pub enum TxOutcome {
+    Success,
+    Revert,
+    Halt(HaltReason),
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
 pub struct TxReceiptOutput {
     pub block_index: u64,
     pub tx_index: u64,
-    pub success: bool,
+    pub outcome: TxOutcome,
+    pub gas: ResultGas,
     pub cumulative_gas_used: u64,
-    pub gas_used: u64,
     pub effective_gas_price: u128,
     pub output: Bytes,
     pub logs: Vec<Log>,

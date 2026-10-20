@@ -10,5 +10,6 @@ path = "src/lib.rs"
 
 [dependencies]
 alloy-primitives = { workspace = true, features = ["serde"] }
+revm = { workspace = true, features = ["std", "serde"] }
 serde = { workspace = true, features = ["std"] }
 tempo-hardfork = { workspace = true, features = ["serde", "std"] }
