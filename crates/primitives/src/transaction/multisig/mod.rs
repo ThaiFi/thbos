@@ -333,38 +333,51 @@ impl Decodable for MultisigSignature {
 }
 
 #[cfg(any(test, feature = "arbitrary"))]
-impl<'a> arbitrary::Arbitrary<'a> for MultisigSignature {
-    fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
-        let len = u.int_in_range(1..=MAX_MULTISIG_SIGNATURES)?;
-        let mut signatures = Vec::with_capacity(len);
-        for _ in 0..len {
-            let mut signature = PrimitiveSignature::arbitrary(u)?;
-            if let PrimitiveSignature::WebAuthn(signature) = &mut signature {
-                // Standalone primitive generation is unbounded; an owner approval is not.
-                let len = signature
-                    .webauthn_data
-                    .len()
-                    .min(MAX_WEBAUTHN_SIGNATURE_LENGTH - 128);
-                signature.webauthn_data = signature.webauthn_data.slice(..len);
+mod arbitrary_impl {
+    use super::{
+        MAX_MULTISIG_SIGNATURES, MAX_WEBAUTHN_SIGNATURE_LENGTH, MultisigConfig, MultisigOwner,
+        MultisigSignature, PrimitiveSignature,
+    };
+    use alloc::{vec, vec::Vec};
+    use alloy_primitives::Address;
+    use arbitrary::{Arbitrary, Result, Unstructured};
+
+    impl<'a> Arbitrary<'a> for MultisigSignature {
+        fn arbitrary(u: &mut Unstructured<'a>) -> Result<Self> {
+            let len = u.int_in_range(1..=MAX_MULTISIG_SIGNATURES)?;
+            let mut signatures = Vec::with_capacity(len);
+            for _ in 0..len {
+                let mut signature = PrimitiveSignature::arbitrary(u)?;
+                if let PrimitiveSignature::WebAuthn(signature) = &mut signature {
+                    // Standalone primitive generation is unbounded; an owner approval is not.
+                    let len = signature
+                        .webauthn_data
+                        .len()
+                        .min(MAX_WEBAUTHN_SIGNATURE_LENGTH - 128);
+                    signature.webauthn_data = signature.webauthn_data.slice(..len);
+                }
+                signatures.push(signature);
             }
-            signatures.push(signature);
-        }
 
-        let mut owner = Address::arbitrary(u)?;
-        if owner.is_zero() {
-            owner = Address::repeat_byte(1);
+            let mut owner = Address::arbitrary(u)?;
+            if owner.is_zero() {
+                owner = Address::repeat_byte(1);
+            }
+            let config = MultisigConfig {
+                salt: u.arbitrary()?,
+                version: 0,
+                threshold: 1,
+                owners: vec![MultisigOwner { owner, weight: 1 }],
+            };
+            // A single nonzero owner of weight 1 at threshold 1 is valid, a CREATE2 account equals
+            // zero or that owner only by a hash collision, and every approval is within the owner
+            // size cap: a failure here is a generator bug that fuzzing must surface, not skip.
+            let account = config
+                .derive_account(Address::repeat_byte(0x99))
+                .expect("generated single-owner multisig config is valid");
+            Ok(Self::try_new(account, config, signatures)
+                .expect("generated multisig signature satisfies its shape limits"))
         }
-        let config = MultisigConfig {
-            salt: u.arbitrary()?,
-            version: 0,
-            threshold: 1,
-            owners: vec![MultisigOwner { owner, weight: 1 }],
-        };
-        let account = config
-            .derive_account(Address::repeat_byte(0x99))
-            .map_err(|_| arbitrary::Error::IncorrectFormat)?;
-
-        Self::try_new(account, config, signatures).map_err(|_| arbitrary::Error::IncorrectFormat)
     }
 }
 
