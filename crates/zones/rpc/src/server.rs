@@ -409,8 +409,8 @@ mod tests {
         KeyInfo, SignatureType as KeyInfoSignatureType,
     };
     use tempo_primitives::transaction::{
-        KeychainSignature, MultisigConfig, MultisigOwner, MultisigSignature, PrimitiveSignature,
-        TempoSignature,
+        ConfigurableAccountConfig, ConfigurableAccountOwner, ConfigurableAccountSignature,
+        KeychainSignature, PrimitiveSignature, TempoSignature,
     };
 
     #[allow(dead_code)]
@@ -514,13 +514,13 @@ mod tests {
         let delegate = Address::repeat_byte(0x66);
         let now = now_secs();
         let (fields, _) = build_token_fields(ZONE_ID, CHAIN_ID, now, now + 600);
-        let signature = MultisigSignature::try_new(
+        let signature = ConfigurableAccountSignature::try_new(
             delegate,
-            MultisigConfig {
+            ConfigurableAccountConfig {
                 salt: B256::ZERO,
                 version: 1,
                 threshold: 1,
-                owners: vec![MultisigOwner {
+                owners: vec![ConfigurableAccountOwner {
                     owner: Address::repeat_byte(3),
                     weight: 1,
                 }],

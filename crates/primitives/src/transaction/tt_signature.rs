@@ -1,7 +1,7 @@
 #[cfg(test)]
-use super::multisig::MultisigConfig;
+use super::configurable_account::ConfigurableAccountConfig;
 use super::{
-    multisig::{MultisigSignature, SIGNATURE_TYPE_MULTISIG},
+    configurable_account::{ConfigurableAccountSignature, SIGNATURE_TYPE_CONFIGURABLE_ACCOUNT},
     tempo_transaction::{
         MAX_WEBAUTHN_SIGNATURE_LENGTH, P256_SIGNATURE_LENGTH, SECP256K1_SIGNATURE_LENGTH,
         SignatureType,
@@ -581,7 +581,7 @@ pub enum AccountSignature {
     /// An existing primitive approval.
     Primitive(PrimitiveSignature),
     /// An account's primitive-owner quorum.
-    Multisig(MultisigSignature),
+    Multisig(ConfigurableAccountSignature),
 }
 
 impl AccountSignature {
@@ -592,8 +592,8 @@ impl AccountSignature {
                 Some(&SIGNATURE_TYPE_KEYCHAIN | &SIGNATURE_TYPE_KEYCHAIN_V2) => {
                     return Err("keychain signatures are not account signatures");
                 }
-                Some(&SIGNATURE_TYPE_MULTISIG) if data.len() > 1 => {
-                    return decode_exact::<MultisigSignature>(&data[1..])
+                Some(&SIGNATURE_TYPE_CONFIGURABLE_ACCOUNT) if data.len() > 1 => {
+                    return decode_exact::<ConfigurableAccountSignature>(&data[1..])
                         .map(Self::Multisig)
                         .map_err(|_| "Invalid Multisig signature RLP");
                 }
@@ -636,7 +636,7 @@ impl AccountSignature {
     }
 
     /// Returns the multisig witness, when applicable.
-    pub const fn as_multisig(&self) -> Option<&MultisigSignature> {
+    pub const fn as_multisig(&self) -> Option<&ConfigurableAccountSignature> {
         match self {
             Self::Multisig(signature) => Some(signature),
             Self::Primitive(_) => None,
@@ -674,8 +674,8 @@ impl From<PrimitiveSignature> for AccountSignature {
     }
 }
 
-impl From<MultisigSignature> for AccountSignature {
-    fn from(signature: MultisigSignature) -> Self {
+impl From<ConfigurableAccountSignature> for AccountSignature {
+    fn from(signature: ConfigurableAccountSignature) -> Self {
         Self::Multisig(signature)
     }
 }
@@ -736,7 +736,7 @@ pub enum TempoSignature {
     Keychain(KeychainSignature),
 
     /// Native multisig signature.
-    Multisig(MultisigSignature),
+    Multisig(ConfigurableAccountSignature),
 }
 
 impl TempoSignature {
@@ -754,7 +754,7 @@ impl TempoSignature {
             return PrimitiveSignature::from_bytes(data).map(Self::Primitive);
         }
 
-        if data.len() > 1 && data[0] == SIGNATURE_TYPE_MULTISIG {
+        if data.len() > 1 && data[0] == SIGNATURE_TYPE_CONFIGURABLE_ACCOUNT {
             return match AccountSignature::from_bytes(data)? {
                 AccountSignature::Primitive(signature) => Ok(Self::Primitive(signature)),
                 AccountSignature::Multisig(signature) => Ok(Self::Multisig(signature)),
@@ -951,7 +951,7 @@ impl TempoSignature {
     }
 
     /// Get the native multisig signature if this is a multisig signature.
-    pub const fn as_multisig(&self) -> Option<&MultisigSignature> {
+    pub const fn as_multisig(&self) -> Option<&ConfigurableAccountSignature> {
         match self {
             Self::Multisig(multisig_sig) => Some(multisig_sig),
             _ => None,
@@ -1229,7 +1229,7 @@ where
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use crate::transaction::multisig::tests::current_config;
+    use crate::transaction::configurable_account::ConfigurableAccountOwner;
     use alloy_primitives::{b256, hex};
     use alloy_rlp::{Decodable, Encodable};
     use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -1239,6 +1239,16 @@ pub(crate) mod tests {
     };
     use proptest::prelude::*;
     use proptest_arbitrary_interop::arb;
+
+    /// A version 1 single-owner account config with weight 1 and threshold 1.
+    pub(crate) fn current_config(owner: Address) -> ConfigurableAccountConfig {
+        ConfigurableAccountConfig {
+            salt: B256::ZERO,
+            version: 1,
+            threshold: 1,
+            owners: vec![ConfigurableAccountOwner { owner, weight: 1 }],
+        }
+    }
 
     /// Generate P256 keypair, return (signing_key, pub_key_x, pub_key_y)
     pub(crate) fn generate_p256_keypair() -> (P256SigningKey, B256, B256) {
@@ -1760,7 +1770,7 @@ pub(crate) mod tests {
         let signatures = vec![Bytes::from(vec![0x33; 39])];
         let payload_length = account.length() + signatures.length();
 
-        let mut sig_bytes = vec![SIGNATURE_TYPE_MULTISIG];
+        let mut sig_bytes = vec![SIGNATURE_TYPE_CONFIGURABLE_ACCOUNT];
         Header {
             list: true,
             payload_length,
@@ -2265,7 +2275,7 @@ pub(crate) mod tests {
     fn test_account_signature_types() {
         let config = current_config(Address::repeat_byte(0x22));
         let signature = TempoSignature::Multisig(
-            MultisigSignature::try_new(
+            ConfigurableAccountSignature::try_new(
                 Address::repeat_byte(0x11),
                 config,
                 vec![PrimitiveSignature::default()],
@@ -2316,7 +2326,7 @@ pub(crate) mod tests {
 
     #[test]
     fn test_recover_signer_multisig_only_recovers_account() {
-        let config = MultisigConfig {
+        let config = ConfigurableAccountConfig {
             salt: B256::repeat_byte(0x42),
             version: 0,
             ..current_config(Address::repeat_byte(0x11))
@@ -2324,8 +2334,12 @@ pub(crate) mod tests {
         let account = config.derive_account(Address::repeat_byte(0x99)).unwrap();
         let inner_hash = B256::repeat_byte(0x24);
         let signature = TempoSignature::Multisig(
-            MultisigSignature::try_new(account, config, vec![PrimitiveSignature::default()])
-                .unwrap(),
+            ConfigurableAccountSignature::try_new(
+                account,
+                config,
+                vec![PrimitiveSignature::default()],
+            )
+            .unwrap(),
         );
 
         // recover_signer returns the claimed account after stateless shape checks only; it does

@@ -755,9 +755,10 @@ mod selector_hex_serde {
 mod tests {
     use super::*;
     use crate::transaction::{
-        KeychainSignature, MultisigConfig, MultisigSignature, PrimitiveSignature, TempoSignature,
-        multisig::tests::current_config,
+        ConfigurableAccountConfig, ConfigurableAccountSignature, KeychainSignature,
+        PrimitiveSignature, TempoSignature,
         tt_authorization::tests::{generate_secp256k1_keypair, sign_hash},
+        tt_signature::tests::current_config,
     };
     use alloy_rlp::{Decodable, Encodable};
 
@@ -992,12 +993,13 @@ mod tests {
             serde_json::to_value(&legacy).unwrap()
         );
         let account = Address::repeat_byte(0x11);
-        let config = MultisigConfig {
+        let config = ConfigurableAccountConfig {
             version: 0,
             ..current_config(Address::repeat_byte(0x22))
         };
         let multisig =
-            MultisigSignature::try_new(account, config, vec![primitive.clone()]).unwrap();
+            ConfigurableAccountSignature::try_new(account, config, vec![primitive.clone()])
+                .unwrap();
         let previous = WireAuthorization {
             authorization: auth.clone(),
             signature: TempoSignature::Multisig(multisig.clone()),

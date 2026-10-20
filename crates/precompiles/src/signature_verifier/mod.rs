@@ -94,7 +94,7 @@ mod tests {
     use alloy_signer_local::PrivateKeySigner;
     use tempo_chainspec::hardfork::TempoHardfork;
     use tempo_primitives::transaction::{
-        MultisigConfig, MultisigOwner, MultisigSignature,
+        ConfigurableAccountConfig, ConfigurableAccountOwner, ConfigurableAccountSignature,
         tt_signature::{SIGNATURE_TYPE_P256, SIGNATURE_TYPE_WEBAUTHN},
     };
 
@@ -105,13 +105,13 @@ mod tests {
     #[test]
     fn keychain_verification_rejects_multisig() -> eyre::Result<()> {
         let account = Address::repeat_byte(1);
-        let multisig = MultisigSignature::try_new(
+        let multisig = ConfigurableAccountSignature::try_new(
             Address::repeat_byte(2),
-            MultisigConfig {
+            ConfigurableAccountConfig {
                 salt: B256::ZERO,
                 version: 1,
                 threshold: 1,
-                owners: vec![MultisigOwner {
+                owners: vec![ConfigurableAccountOwner {
                     owner: Address::repeat_byte(3),
                     weight: 1,
                 }],

@@ -1,12 +1,8 @@
 use alloy_consensus::crypto::RecoveryError;
 use alloy_eips::eip7702::{Authorization, RecoveredAuthority, RecoveredAuthorization};
-#[cfg(feature = "evm")]
-use alloy_primitives::U256;
 use alloy_primitives::{Address, B256};
 use alloy_rlp::{BufMut, Decodable, Encodable, Header, Result as RlpResult, length_of_length};
 use core::ops::Deref;
-#[cfg(feature = "evm")]
-use revm::context::transaction::AuthorizationTr;
 
 #[cfg(not(feature = "std"))]
 use once_cell::race::OnceBox as OnceLock;
@@ -289,29 +285,13 @@ impl Deref for RecoveredTempoAuthorization {
     }
 }
 
-#[cfg(feature = "evm")]
-impl AuthorizationTr for RecoveredTempoAuthorization {
-    fn chain_id(&self) -> U256 {
-        self.chain_id
-    }
-    fn address(&self) -> Address {
-        self.address
-    }
-    fn nonce(&self) -> u64 {
-        self.nonce
-    }
-
-    fn authority(&self) -> Option<Address> {
-        self.authority()
-    }
-}
-
 #[cfg(test)]
 pub mod tests {
 
     use super::*;
     use crate::transaction::{
-        KeychainSignature, MultisigSignature, PrimitiveSignature, multisig::tests::current_config,
+        ConfigurableAccountSignature, KeychainSignature, PrimitiveSignature,
+        tt_signature::tests::current_config,
     };
     use alloc::vec::Vec;
     use alloy_primitives::{U256, keccak256};
@@ -451,7 +431,7 @@ pub mod tests {
         assert_ne!(bad_lazy.authority().unwrap(), expected_address);
 
         // Neither direct nor delegated multisig may supply an authorization-list authority.
-        let multisig = MultisigSignature::try_new(
+        let multisig = ConfigurableAccountSignature::try_new(
             Address::repeat_byte(0x22),
             current_config(expected_address),
             vec![PrimitiveSignature::default()],
