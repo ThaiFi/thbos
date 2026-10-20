@@ -7,7 +7,7 @@ use crate::{
     storage::{ConfigCommitmentWriteGas, Handler, keccak_cost},
 };
 use alloy::primitives::{Address, B256};
-pub use tempo_chainspec::is_valid_configurable_account as valid_account;
+pub use tempo_chainspec::is_valid_native_account as valid_account;
 use tempo_contracts::precompiles::{
     CONFIGURABLE_ACCOUNT_ADDRESS, ConfigurableAccountError, ConfigurableAccountEvent,
     IConfigurableAccount,
