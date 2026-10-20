@@ -1,7 +1,6 @@
-//! The typed inputs and outcomes of the Tempo fuzz harness, shared by the
-//! harness and the runners that load it. They are exchanged bincode-encoded
-//! across the harness's C ABI; [`TYPED_HARNESS_SCHEMA_VERSION`] changes with
-//! their encoding.
+//! The typed inputs and outcomes of the Tempo fuzz harness, shared by the harness and the runners
+//! that load it. They are exchanged bincode-encoded across the harness's C ABI;
+//! [`TYPED_HARNESS_SCHEMA_VERSION`] changes with their encoding.
 
 use std::{collections::BTreeMap, fmt};
 
@@ -29,8 +28,8 @@ pub enum ErrorClass {
     RlpDecode = 2,
     Rejected = 3,
     Internal = 4,
-    /// Execution read an account, storage slot, code or block hash that an
-    /// exact pre-state ([`PreState::Exact`]) does not hold.
+    /// Execution read an account, storage slot, code or block hash that an exact pre-state
+    /// ([`PreState::Exact`]) does not hold.
     IncompletePreState = 5,
 }
 
@@ -132,8 +131,8 @@ pub struct BlockContextInput {
     pub gas_limit: u64,
     pub beneficiary: Address,
     pub hardfork: TempoHardfork,
-    /// The header's extra data. From T8 on, an epoch-boundary block must carry
-    /// the DKG outcome here, or it is rejected.
+    /// The header's extra data. From T8 on, an epoch-boundary block must carry the DKG outcome
+    /// here, or it is rejected.
     pub extra_data: Bytes,
 }
 
@@ -152,25 +151,23 @@ impl Default for BlockContextInput {
     }
 }
 
-/// The chain to execute on: the dev genesis configuration with this chain ID
-/// and these hardfork activation timestamps. A hardfork the schedule does not
-/// list activates at its [`TempoHardfork::variant_index`], or with the
-/// hardfork before it if that is later. Listed activations must not decrease
-/// in hardfork order.
+/// The chain to execute on: the dev genesis configuration with this chain ID and these hardfork
+/// activation timestamps. A hardfork the schedule does not list activates at its
+/// [`TempoHardfork::variant_index`], or with the hardfork before it if that is later. Listed
+/// activations must not decrease in hardfork order.
 #[derive(Clone, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
 pub struct ChainSpecInput {
     pub chain_id: u64,
     pub hardforks: BTreeMap<TempoHardfork, u64>,
 }
 
-/// Seconds between the activations [`ChainSpecInput::default`] gives the
-/// hardforks Moderato has not scheduled.
+/// Seconds between the activations [`ChainSpecInput::default`] gives the hardforks Moderato has not
+/// scheduled.
 const UNSCHEDULED_SPACING: u64 = 1_000_000;
 
 impl Default for ChainSpecInput {
-    /// Moderato's chain ID and schedule. Hardforks Moderato has not scheduled
-    /// follow its last one, a million seconds apart, so each can be
-    /// selected on its own.
+    /// Moderato's chain ID and schedule. Hardforks Moderato has not scheduled follow its last one,
+    /// a million seconds apart, so each can be selected on its own.
     fn default() -> Self {
         let mut previous = 0;
         let hardforks = TempoHardfork::VARIANTS
@@ -231,15 +228,14 @@ pub struct TempoBlockchainInput {
 /// The state blocks execute on.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub enum PreState {
-    /// The dev genesis allocation plus these accounts, which must not be
-    /// genesis accounts. Anything else reads as empty.
+    /// The dev genesis allocation plus these accounts, which must not be genesis accounts. Anything
+    /// else reads as empty.
     Genesis(StateInput),
-    /// Exactly this state, e.g. a block's pre-state taken from a node, and the
-    /// block hashes `BLOCKHASH` may read. Reading anything it does not hold
-    /// fails the input with [`ErrorClass::IncompletePreState`]: an unlisted
-    /// account, an unlisted slot of a listed account, or an unlisted block
-    /// hash. An account with no balance, nonce or code whose listed slots
-    /// are all zero does not exist, so all its slots read as zero.
+    /// Exactly this state, e.g. a block's pre-state taken from a node, and the block hashes
+    /// `BLOCKHASH` may read. Reading anything it does not hold fails the input with
+    /// [`ErrorClass::IncompletePreState`]: an unlisted account, an unlisted slot of a listed
+    /// account, or an unlisted block hash. An account with no balance, nonce or code whose listed
+    /// slots are all zero does not exist, so all its slots read as zero.
     Exact {
         state: StateInput,
         block_hashes: BTreeMap<u64, B256>,
@@ -251,16 +247,15 @@ pub struct TempoBlock {
     pub header: BlockHeaderInput,
     /// EIP-2718 encoded transactions.
     pub txs: Vec<Bytes>,
-    /// Verified transaction senders in transaction order. Empty asks the
-    /// harness to recover them.
+    /// Verified transaction senders in transaction order. Empty asks the harness to recover them.
     pub senders: Vec<Address>,
 }
 
 /// How a block's header is given.
 #[derive(Clone, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
 pub enum BlockHeaderInput {
-    /// The fields a fuzzer picks. The harness fills in the rest, and moves
-    /// the timestamp into the window where the requested hardfork is active.
+    /// The fields a fuzzer picks. The harness fills in the rest, and moves the timestamp into the
+    /// window where the requested hardfork is active.
     Context(BlockContextInput),
     /// An RLP-encoded Tempo header, executed exactly as given.
     Rlp(Bytes),
@@ -296,22 +291,21 @@ pub enum TempoHarnessOutcome {
 
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub struct TempoExecutionOutcome {
-    /// Why execution stopped: a block failed, or the input could not be
-    /// executed at all, in which case the rest of the outcome is empty.
-    /// [`ErrorClass::None`] when every block applied.
+    /// Why execution stopped: a block failed, or the input could not be executed at all, in which
+    /// case the rest of the outcome is empty. [`ErrorClass::None`] when every block applied.
     pub error: ErrorClass,
     /// Receipts of the blocks that applied, in order.
     pub receipts: Vec<TxReceiptOutput>,
-    /// The state root of `final_state`. `None` for an exact pre-state, which
-    /// holds only part of the state.
+    /// The state root of `final_state`. `None` for an exact pre-state, which holds only part of the
+    /// state.
     pub state_root: Option<B256>,
-    /// The state after the last block that applied, without empty accounts
-    /// and zero slots. A block that fails leaves no changes.
+    /// The state after the last block that applied, without empty accounts and zero slots. A block
+    /// that fails leaves no changes.
     pub final_state: StateInput,
     /// What changed, overall and at each step of each block that applied.
     pub state_diff: StateDiff,
-    /// Invariants broken after a block's pre-execution changes or after a
-    /// transaction. They do not stop execution.
+    /// Invariants broken after a block's pre-execution changes or after a transaction. They do not
+    /// stop execution.
     pub invariant_failures: Vec<InvariantFailure>,
 }
 
@@ -350,8 +344,7 @@ pub struct StateChanges {
     pub storage: Vec<StorageChangeOutput>,
 }
 
-/// What changed about an account; each field is `None` or `false` when it
-/// did not change.
+/// What changed about an account; each field is `None` or `false` when it did not change.
 #[derive(Clone, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
 pub struct AccountDiff {
     pub address: Address,

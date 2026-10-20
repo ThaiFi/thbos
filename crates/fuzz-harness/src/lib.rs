@@ -1,10 +1,9 @@
 //! Tempo's stateless block executor for fuzzing and replay, loaded as a cdylib.
 //!
-//! An input is a chain, a pre-state and blocks ([`tempo_fuzz_types`]). The
-//! harness executes the blocks with Tempo's block executor on an in-memory
-//! state and reports receipts, the resulting state, what changed, and which
-//! protocol invariants broke. A panic inside the executor aborts the process:
-//! the node would crash on the same block.
+//! An input is a chain, a pre-state and blocks ([`tempo_fuzz_types`]). The harness executes the
+//! blocks with Tempo's block executor on an in-memory state and reports receipts, the resulting
+//! state, what changed, and which protocol invariants broke. A panic inside the executor aborts the
+//! process: the node would crash on the same block.
 
 mod chain;
 mod execute;
@@ -19,17 +18,16 @@ use tempo_fuzz_types::{
     TempoHarnessCapabilities, TempoHarnessInput,
 };
 
-/// Executes a bincode-encoded [`TempoHarnessInput`] and writes the
-/// bincode-encoded [`tempo_fuzz_types::TempoHarnessOutcome`] to `out_ptr`.
+/// Executes a bincode-encoded [`TempoHarnessInput`] and writes the bincode-encoded
+/// [`tempo_fuzz_types::TempoHarnessOutcome`] to `out_ptr`.
 ///
-/// Returns `FUZZ_ACCEPT` once the outcome is written. Returns `FUZZ_REJECT`
-/// when the input does not decode, or when `out_len` is too small; in the
-/// latter case `*out_written` holds the size needed.
+/// Returns `FUZZ_ACCEPT` once the outcome is written. Returns `FUZZ_REJECT` when the input does not
+/// decode, or when `out_len` is too small; in the latter case `*out_written` holds the size needed.
 ///
 /// # Safety
 ///
-/// `in_ptr` must be readable for `in_len` bytes, `out_ptr` writable for
-/// `out_len` bytes, and `out_written` writable.
+/// `in_ptr` must be readable for `in_len` bytes, `out_ptr` writable for `out_len` bytes, and
+/// `out_written` writable.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn tempo_fuzz_execute_with_result_v1(
     out_ptr: *mut u8,
@@ -51,9 +49,8 @@ pub unsafe extern "C" fn tempo_fuzz_execute_with_result_v1(
     unsafe { write_output(out_ptr, out_len, out_written, &outcome) }
 }
 
-/// Writes the bincode-encoded [`TempoHarnessCapabilities`] to `out_ptr`, with
-/// the same return values and safety contract as
-/// [`tempo_fuzz_execute_with_result_v1`].
+/// Writes the bincode-encoded [`TempoHarnessCapabilities`] to `out_ptr`, with the same return
+/// values and safety contract as [`tempo_fuzz_execute_with_result_v1`].
 ///
 /// # Safety
 ///

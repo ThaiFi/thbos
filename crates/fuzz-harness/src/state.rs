@@ -21,14 +21,13 @@ use tempo_fuzz_types::{
     AccountDiff, AccountInput, ErrorClass, PreState, StateChanges, StateInput, StorageChangeOutput,
 };
 
-/// The state blocks execute on, as the node executes blocks: revm's `State`
-/// with bundle updates, over the seeded pre-state.
+/// The state blocks execute on, as the node executes blocks: revm's `State` with bundle updates,
+/// over the seeded pre-state.
 pub(crate) type Db = State<WrapDatabaseRef<PreStateDb>>;
 
-/// What execution reads when the seeded state does not hold a key. For a
-/// genesis pre-state that is empty state. For an exact pre-state it is an
-/// error, also recorded so the input is known to be incomplete even when the
-/// error was swallowed on its way up.
+/// What execution reads when the seeded state does not hold a key. For a genesis pre-state that is
+/// empty state. For an exact pre-state it is an error, also recorded so the input is known to be
+/// incomplete even when the error was swallowed on its way up.
 #[derive(Debug)]
 pub(crate) struct PreStateDb {
     exact: bool,
@@ -41,8 +40,7 @@ impl PreStateDb {
         self.missed.get()
     }
 
-    /// Sets the miss flag, e.g. back to a value saved before reads that are
-    /// not part of execution.
+    /// Sets the miss flag, e.g. back to a value saved before reads that are not part of execution.
     pub(crate) fn restore_missed(&self, missed: bool) {
         self.missed.set(missed);
     }
@@ -84,8 +82,7 @@ impl core::error::Error for MissingPreState {}
 
 impl DBErrorMarker for MissingPreState {}
 
-/// Answers misses on a genesis pre-state the way revm's `EmptyDB` does, which
-/// fuzz inputs rely on.
+/// Answers misses on a genesis pre-state the way revm's `EmptyDB` does, which fuzz inputs rely on.
 impl DatabaseRef for PreStateDb {
     type Error = MissingPreState;
 
@@ -114,8 +111,8 @@ impl DatabaseRef for PreStateDb {
     }
 }
 
-/// The dev genesis allocation, seeded once per process: seeding analyses and
-/// hashes every genesis contract, which costs more than executing a transfer.
+/// The dev genesis allocation, seeded once per process: seeding analyses and hashes every genesis
+/// contract, which costs more than executing a transfer.
 static GENESIS: LazyLock<CacheState> = LazyLock::new(|| {
     let mut cache = CacheState::new();
     for (address, account) in &tempo_chainspec::spec::DEV.inner.genesis.alloc {
@@ -134,8 +131,7 @@ static GENESIS: LazyLock<CacheState> = LazyLock::new(|| {
     cache
 });
 
-/// `pre_state` as a database. `InvalidInput` if a genesis pre-state overrides
-/// a genesis account.
+/// `pre_state` as a database. `InvalidInput` if a genesis pre-state overrides a genesis account.
 pub(crate) fn seed(pre_state: &PreState) -> Result<Db, ErrorClass> {
     let (cache, exact) = match pre_state {
         PreState::Genesis(state) => {
@@ -175,8 +171,8 @@ pub(crate) fn seed(pre_state: &PreState) -> Result<Db, ErrorClass> {
     Ok(db)
 }
 
-/// Whether `account` holds nothing: an extractor lists the slots a block read
-/// even for an account that does not exist, all of them zero.
+/// Whether `account` holds nothing: an extractor lists the slots a block read even for an account
+/// that does not exist, all of them zero.
 fn is_empty(account: &AccountInput) -> bool {
     account.balance.is_zero()
         && account.nonce == 0
@@ -201,8 +197,8 @@ fn insert_input(cache: &mut CacheState, address: Address, account: &AccountInput
     insert(cache, address, info, storage);
 }
 
-/// Inserts an account, its code and the slots the pre-state holds for it.
-/// Other slots are read from the database below.
+/// Inserts an account, its code and the slots the pre-state holds for it. Other slots are read from
+/// the database below.
 fn insert(
     cache: &mut CacheState,
     address: Address,
@@ -215,8 +211,7 @@ fn insert(
     cache.insert_account_with_storage(address, info, storage.collect());
 }
 
-/// The net changes recorded since the last call: the state transitions of
-/// one execution step.
+/// The net changes recorded since the last call: the state transitions of one execution step.
 pub(crate) fn drain(db: &mut Db) -> TransitionState {
     db.transition_state
         .as_mut()
@@ -255,8 +250,8 @@ pub(crate) fn after(pre: &CacheState, bundle: &BundleState) -> BTreeMap<Address,
     accounts
 }
 
-/// `accounts`, as an outcome reports them. Code comes from the accounts or,
-/// by hash, from `contracts`.
+/// `accounts`, as an outcome reports them. Code comes from the accounts or, by hash, from
+/// `contracts`.
 pub(crate) fn encode(
     accounts: &BTreeMap<Address, PlainAccount>,
     contracts: &B256Map<Bytecode>,

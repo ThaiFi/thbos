@@ -112,9 +112,9 @@ fn genesis_state() -> StateInput {
     state::encode(&accounts, &db.cache.contracts)
 }
 
-/// The dev genesis as an exact pre-state for `blocks`, listing what they
-/// read, as an extractor reading a witness would: every account and slot
-/// execution loads, zeros included, with its value before the blocks.
+/// The dev genesis as an exact pre-state for `blocks`, listing what they read, as an extractor
+/// reading a witness would: every account and slot execution loads, zeros included, with its value
+/// before the blocks.
 fn exact_genesis(blocks: &[TempoBlock]) -> StateInput {
     let spec = Arc::new(chain::chain_spec(&ChainSpecInput::default()).unwrap());
     let mut db = state::seed(&genesis()).unwrap();

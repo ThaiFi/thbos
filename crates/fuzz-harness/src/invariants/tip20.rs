@@ -1,10 +1,10 @@
 //! TIP-20 supply invariants.
 //!
-//! - `TEMPO-TIP20-SUPPLY-CAP`: a token's `totalSupply` does not exceed its
-//!   `supplyCap`. A zero cap is not exempt: minting checks the cap without
-//!   exception, and `setSupplyCap` rejects a cap below the supply.
-//! - `TEMPO-TIP20-BALANCE-SUM`: the balances of the accounts the state holds
-//!   sum to at most `totalSupply`, without overflow.
+//! - `TEMPO-TIP20-SUPPLY-CAP`: a token's `totalSupply` does not exceed its `supplyCap`. A zero cap
+//!   is not exempt: minting checks the cap without exception, and `setSupplyCap` rejects a cap
+//!   below the supply.
+//! - `TEMPO-TIP20-BALANCE-SUM`: the balances of the accounts the state holds sum to at most
+//!   `totalSupply`, without overflow.
 //! - `TEMPO-TIP20-VIEW`: a token's views answer.
 
 use alloy_primitives::{Address, U256};
@@ -13,8 +13,7 @@ use tempo_primitives::is_tip20_prefix;
 
 use super::Views;
 
-/// The invariants broken by each TIP-20 token among `accounts` for which
-/// `selected` holds, as `(id, message)`.
+/// Invariants broken by each TIP-20 among `accounts` for which `selected` holds, as `(id, message)`.
 pub(super) fn check(
     views: &mut Views<'_>,
     accounts: &[Address],

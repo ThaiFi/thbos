@@ -113,8 +113,7 @@ impl EncodeSize for OnchainDkgOutcome {
 #[cfg(any(test, feature = "test-utils"))]
 pub mod test_utils {
     //! Fixtures for tests that need a valid DKG outcome.
-
-    use super::OnchainDkgOutcome;
+    pub use super::OnchainDkgOutcome;
     use commonware_cryptography::{
         Signer as _,
         bls12381::{dkg::feldman_desmedt as dkg, primitives::sharing::Mode},
@@ -144,13 +143,13 @@ pub mod test_utils {
 
 #[cfg(test)]
 mod tests {
-    use super::OnchainDkgOutcome;
+    use super::test_utils::*;
     use commonware_codec::{Encode as _, EncodeSize as _, ReadExt as _};
     use commonware_consensus::types::Epoch;
 
     #[test]
     fn onchain_dkg_outcome_roundtrip() {
-        let mut on_chain = super::test_utils::dealt_outcome(42, 10);
+        let mut on_chain = dealt_outcome(42, 10);
         // Preserve Commonware Epoch's wire encoding, including varint boundaries.
         let payload = on_chain.encode()[Epoch::new(on_chain.epoch).encode_size()..].to_vec();
         for epoch in [0, 127, 128, 16383, 16384, u64::MAX] {

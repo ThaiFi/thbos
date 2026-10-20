@@ -1,10 +1,9 @@
-//! Protocol invariants, checked on the state after a block's pre-execution
-//! changes and after each transaction.
+//! Protocol invariants checked on state after a block's pre-execution changes and each transaction.
 //!
-//! A check reads state only through view calls, over the accounts the state
-//! holds. On an exact pre-state those are the accounts execution touched, so a
-//! check asserts only what holds for any subset of accounts, and a view that
-//! reads a key the pre-state lacks answers nothing rather than failing.
+//! A check reads state only through view calls, over the accounts the state holds. On an exact
+//! pre-state those are the accounts execution touched, so a check asserts only what holds for any
+//! subset of accounts, and a view that reads a key the pre-state lacks answers nothing rather than
+//! failing.
 
 mod tip20;
 
@@ -19,10 +18,9 @@ use tempo_primitives::TempoBlockEnv;
 
 use crate::state::{Db, PreStateDb};
 
-/// Appends to `failures` each invariant `db` breaks, at `scope`. `env` is the
-/// block's environment. `changed`, sorted, limits the check to contracts whose
-/// state changed, as no other contract's invariants can have broken; `None`
-/// checks every contract.
+/// Appends to `failures` each invariant `db` breaks, at `scope`. `env` is the block's environment.
+/// `changed`, sorted, limits the check to contracts whose state changed, as no other contract's
+/// invariants can have broken; `None` checks every contract.
 pub(crate) fn check(
     db: &Db,
     env: &EvmEnv<TempoHardfork, TempoBlockEnv>,
@@ -62,9 +60,9 @@ impl Views<'_> {
         &self.0.components().0.0.database.0
     }
 
-    /// `call`'s return value from `target`. `Ok(None)` when nothing answers:
-    /// `target` has no code, or the view read a key the pre-state lacks.
-    /// `Err` when the view reverts, halts or returns something undecodable.
+    /// `call`'s return value from `target`. `Ok(None)` when nothing answers: `target` has no code,
+    /// or the view read a key the pre-state lacks. `Err` when the view reverts, halts or returns
+    /// something undecodable.
     fn call<C: SolCall>(&mut self, target: Address, call: C) -> Result<Option<C::Return>, String> {
         self.pre_state().restore_missed(false);
         let result = self

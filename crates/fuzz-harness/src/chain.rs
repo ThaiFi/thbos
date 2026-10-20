@@ -10,9 +10,8 @@ use tempo_chainspec::{
 use tempo_fuzz_types::{BlockContextInput, BlockHeaderInput, ChainSpecInput, ErrorClass};
 use tempo_primitives::TempoHeader;
 
-/// The dev chain spec with `input`'s chain ID and hardfork schedule. A
-/// hardfork the schedule does not list activates at its variant index, or
-/// with the hardfork before it if that is later.
+/// The dev chain spec with `input`'s chain ID and hardfork schedule. A hardfork the schedule does
+/// not list activates at its variant index, or with the hardfork before it if that is later.
 pub(crate) fn chain_spec(input: &ChainSpecInput) -> Result<TempoChainSpec, ErrorClass> {
     let mut spec = tempo_chainspec::spec::DEV.as_ref().clone();
     spec.inner.chain = input.chain_id.into();
@@ -32,8 +31,8 @@ pub(crate) fn chain_spec(input: &ChainSpecInput) -> Result<TempoChainSpec, Error
     Ok(spec)
 }
 
-/// The header `input` describes. A context header has no transactions root
-/// yet: the block that holds the transactions computes it.
+/// The header `input` describes. A context header has no transactions root yet: the block that
+/// holds the transactions computes it.
 pub(crate) fn header(
     spec: &TempoChainSpec,
     input: &BlockHeaderInput,
@@ -46,9 +45,8 @@ pub(crate) fn header(
     }
 }
 
-/// A header at the latest timestamp no earlier than `context.timestamp`
-/// where `context.hardfork` is active. Hardforks that share its activation
-/// are active too.
+/// A header at the latest timestamp no earlier than `context.timestamp` where `context.hardfork` is
+/// active. Hardforks that share its activation are active too.
 fn context_header(spec: &TempoChainSpec, context: &BlockContextInput) -> TempoHeader {
     let activation = |fork| {
         spec.tempo_fork_activation(fork)

@@ -87,9 +87,8 @@ fn decode_tx(bytes: &[u8]) -> Result<TempoTxEnvelope, ErrorClass> {
     TempoTxEnvelope::decode_2718_exact(bytes).map_err(|_| ErrorClass::RlpDecode)
 }
 
-/// Executes `blocks` in order on `pre_state`, stopping at the first block that
-/// fails. An input that is not executable at all leaves an empty outcome with
-/// only its error set.
+/// Executes `blocks` in order on `pre_state`, stopping at the first block that fails. An input that
+/// is not executable at all leaves an empty outcome with only its error set.
 fn execute(
     chain: &ChainSpecInput,
     pre_state: &PreState,
@@ -131,8 +130,7 @@ fn execute(
     outcome
 }
 
-/// `block` with its header resolved, its transactions decoded and their
-/// senders known.
+/// `block` with its header resolved, its transactions decoded and their senders known.
 pub(crate) fn recover_block(
     spec: &TempoChainSpec,
     block: &TempoBlock,
@@ -167,9 +165,8 @@ pub(crate) fn recover_block(
     ))
 }
 
-/// Executes `blocks` on `db`, appending each applied block's outputs to
-/// `outcome` and setting its error at the first block that fails. Returns the
-/// changes of the blocks that applied.
+/// Executes `blocks` on `db`, appending each applied block's outputs to `outcome` and setting its
+/// error at the first block that fails. Returns the changes of the blocks that applied.
 pub(crate) fn execute_blocks(
     evm_config: &TempoEvmConfig,
     consensus: &TempoConsensus,
@@ -263,8 +260,8 @@ fn execute_block(
     Ok((changes, outputs))
 }
 
-/// Applies the block's pre-execution changes and its transactions, recording
-/// each step's changes and checking invariants after it.
+/// Applies the block's pre-execution changes and its transactions, recording each step's changes
+/// and checking invariants after it.
 fn execute_txs<'db, E>(
     executor: &mut E,
     block: &ExecutionBlock,
@@ -325,9 +322,8 @@ where
     Ok(txs)
 }
 
-/// Ends an execution step: applies its transitions to `changes`, checks
-/// invariants at `scope` (only for contracts the step changed, if
-/// `changed_only`), and returns the step's changes.
+/// Ends an execution step: applies its transitions to `changes`, checks invariants at `scope` (only
+/// for contracts the step changed, if `changed_only`), and returns the step's changes.
 fn step<'db, E>(
     executor: &mut E,
     env: &EvmEnv<TempoHardfork, TempoBlockEnv>,
@@ -350,8 +346,7 @@ where
     step_changes
 }
 
-/// A block the node would reject is `Rejected`; anything else went wrong in
-/// the executor.
+/// A block the node would reject is `Rejected`; anything else went wrong in the executor.
 fn class(err: &BlockExecutionError) -> ErrorClass {
     match err {
         BlockExecutionError::Validation(_) => ErrorClass::Rejected,
