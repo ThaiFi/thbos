@@ -246,7 +246,7 @@ fn evm_storage_reads_and_writes_commitments() {
         assert_eq!(storage.gas_refunded(), 0);
     }
 
-    // The commitment lives in the journaled account extension, not in a storage slot.
+    // The commitment lives in the journaled account extension.
     {
         let account = evm.state_mut().account(&ACCOUNT).unwrap();
         let info = account.get().unwrap();
