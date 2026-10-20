@@ -21,9 +21,9 @@ pub use network_identity::NetworkIdentity;
 pub use spec::{TempoChainSpec, TempoConsensusSpec, TempoHardforks};
 
 #[cfg(feature = "evm")]
-mod configurable_account;
+mod native_account;
 #[cfg(feature = "evm")]
-pub use configurable_account::is_valid_configurable_account;
+pub use native_account::is_valid_native_account;
 
 pub use tempo_hardfork::{TempoHardfork, constants};
 

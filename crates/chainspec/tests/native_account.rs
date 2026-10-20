@@ -1,12 +1,12 @@
 #![cfg(feature = "evm")]
 
 use alloy_primitives::{Address, U256, address};
-use tempo_chainspec::{TempoHardfork, is_valid_configurable_account};
+use tempo_chainspec::{TempoHardfork, is_valid_native_account};
 use tempo_contracts::precompiles::{PATH_USD_ADDRESS, SYSTEM_PRECOMPILES};
 use tempo_primitives::{MasterId, TempoAddressExt, UserTag};
 
 #[test]
-fn reserved_addresses_are_not_configurable_accounts() {
+fn reserved_addresses_are_not_native_accounts() {
     let reserved = [
         Address::ZERO,
         Address::with_last_byte(1),
@@ -19,17 +19,17 @@ fn reserved_addresses_are_not_configurable_accounts() {
     .chain(SYSTEM_PRECOMPILES.iter().map(|&(precompile, _)| precompile));
     for address in reserved {
         assert!(
-            !is_valid_configurable_account(address, TempoHardfork::T14),
+            !is_valid_native_account(address, TempoHardfork::T14),
             "{address}"
         );
     }
 }
 
 #[test]
-fn ordinary_addresses_are_configurable_accounts() {
+fn ordinary_addresses_are_native_accounts() {
     for address in [Address::repeat_byte(0x33), Address::repeat_byte(0x71)] {
         assert!(
-            is_valid_configurable_account(address, TempoHardfork::T14),
+            is_valid_native_account(address, TempoHardfork::T14),
             "{address}"
         );
     }
