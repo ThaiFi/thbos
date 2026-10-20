@@ -13,7 +13,7 @@ use alloy_evm::FromRecoveredTx;
 use alloy_primitives::{
     Address, B256, Bytes, TxHash, TxKind, U256, bytes, keccak256, map::AddressMap,
 };
-use reth_evm::execute::WithTxEnv;
+use reth_evm::{SenderRecoveryCache, execute::WithTxEnv};
 use reth_primitives_traits::{InMemorySize, Recovered, SignerRecoverable};
 use reth_transaction_pool::{
     EthBlobTransactionSidecar, EthPoolTransaction, EthPooledTransaction, PoolTransaction,
@@ -852,6 +852,38 @@ impl PoolTransaction for TempoPooledTransaction {
         ))
     }
 
+    fn recover_raw_transaction_with_cache(
+        data: &[u8],
+        cache: &SenderRecoveryCache,
+    ) -> Result<Self, RawPoolTransactionError> {
+        let transaction = Self::decode_raw_transaction(data)?;
+        let mut expiring_nonce_hash = None;
+        let signer = match &transaction {
+            TempoTxEnvelope::AA(tx) => cache.recover_with(&transaction, |_| {
+                tx.recover_signer_with_expiring_nonce_hash()
+                    .map(|(signer, hash)| {
+                        expiring_nonce_hash = hash;
+                        signer
+                    })
+            }),
+            _ => cache.recover(&transaction),
+        }
+        .map_err(|_| RawPoolTransactionError::InvalidTransactionSignature)?;
+        let expiring_nonce_hash = expiring_nonce_hash.or_else(|| {
+            transaction.as_aa().and_then(|tx| {
+                tx.tx()
+                    .is_expiring_nonce_tx()
+                    .then(|| tx.expiring_nonce_hash(signer))
+            })
+        });
+
+        Ok(Self::new_with(
+            Recovered::new_unchecked(transaction, signer),
+            expiring_nonce_hash,
+            data.len(),
+        ))
+    }
+
     fn hash(&self) -> &TxHash {
         self.inner.transaction.tx_hash()
     }
@@ -1143,7 +1175,7 @@ impl KeyAuthorizationTargetSubject {
 mod tests {
     use super::*;
     use crate::test_utils::TxBuilder;
-    use alloy_consensus::TxEip1559;
+    use alloy_consensus::{SignableTransaction, TxEip1559};
     use alloy_primitives::{Address, Signature, TxKind, address};
     use alloy_signer::SignerSync;
     use alloy_signer_local::PrivateKeySigner;
@@ -1600,6 +1632,75 @@ mod tests {
             prop_assert_eq!(pooled.expiring_nonce_hash(), via_new.expiring_nonce_hash());
             prop_assert_eq!(pooled.hash(), via_new.hash());
             prop_assert_eq!(pooled.sender(), via_new.sender());
+        }
+
+        #[test]
+        fn proptest_cached_raw_recovery_matches_default_on_miss_and_hit(
+            tx in arb_sized::<TempoTransaction>(TEMPO_TRANSACTION_ARBITRARY_SIZE)
+        ) {
+            for nonce_key in [U256::ZERO, TEMPO_EXPIRING_NONCE_KEY] {
+                let mut tx = tx.clone();
+                tx.nonce_key = nonce_key;
+                let (envelope, sender) = signed_aa_envelope(tx);
+                let raw = envelope.encoded_2718();
+                let cache = SenderRecoveryCache::default();
+                let reference_cache = SenderRecoveryCache::default();
+
+                prop_assert_eq!(cache.get(envelope.tx_hash()), None);
+                for _ in 0..2 {
+                    let expected = TempoPooledTransaction::try_recover_with_cache(
+                        TempoPooledTransaction::decode_raw_transaction(&raw).unwrap(),
+                        &reference_cache,
+                    ).unwrap();
+                    let actual = TempoPooledTransaction::recover_raw_transaction_with_cache(
+                        &raw, &cache,
+                    ).unwrap();
+
+                    prop_assert_eq!(actual.clone_into_consensus(), expected.clone_into_consensus());
+                    prop_assert_eq!(actual.encoded_length(), expected.encoded_length());
+                    prop_assert_eq!(actual.cost(), expected.cost());
+                    prop_assert_eq!(actual.expiring_nonce_hash, expected.expiring_nonce_hash);
+                    prop_assert_eq!(cache.get(envelope.tx_hash()), Some(sender));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn cached_raw_recovery_preserves_errors_and_ethereum_transactions() {
+        let (envelope, _) = signed_aa_envelope(TempoTransaction::default());
+        let mut trailing = envelope.encoded_2718();
+        trailing.push(0);
+        let invalid: TempoTxEnvelope = TempoTransaction::default()
+            .into_signed(Signature::new(U256::ZERO, U256::ZERO, false).into())
+            .into();
+        let ethereum: TempoTxEnvelope = TxEip1559::default()
+            .into_signed(Signature::test_signature())
+            .into();
+
+        for raw in [
+            Vec::new(),
+            vec![0xff],
+            vec![2, 0x80],
+            trailing,
+            invalid.encoded_2718(),
+            ethereum.encoded_2718(),
+        ] {
+            let cache = SenderRecoveryCache::default();
+            for _ in 0..2 {
+                let expected = TempoPooledTransaction::decode_raw_transaction(&raw)
+                    .and_then(|transaction| {
+                        TempoPooledTransaction::try_recover_with_cache(transaction, &cache)
+                            .map_err(|_| RawPoolTransactionError::InvalidTransactionSignature)
+                    })
+                    .map(|transaction| transaction.into_consensus())
+                    .map_err(|error| error.to_string());
+                let actual =
+                    TempoPooledTransaction::recover_raw_transaction_with_cache(&raw, &cache)
+                        .map(|transaction| transaction.into_consensus())
+                        .map_err(|error| error.to_string());
+                assert_eq!(actual, expected);
+            }
         }
     }
 
