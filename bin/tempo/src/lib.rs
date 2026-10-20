@@ -549,14 +549,13 @@ pub fn tempo_main_with(mut overrides: TempoOverrides) -> eyre::Result<()> {
             url => Some(url.to_string()),
         };
 
-        let estimator = tempo_node::Estimator::new(
-            tempo_node::EstimatorConfig::new(
-                args.consensus.target_block_time.into_duration(),
-                args.consensus.network_budget.into_duration(),
-            )
-            .with_build_time_multiplier(args.node_args.builder_build_time_multiplier),
-        )
-        .map_err(|reason| eyre::eyre!("invalid proposal budget flags: {reason}"))?;
+        // One proposal budget estimator is shared by the payload builder and
+        // the consensus engine so both pace against the same learned window.
+        // Built before the node launches, ahead of the consensus stack's own
+        // flag validation, so invalid proposal budget flags fail startup here.
+        let estimator = args
+            .consensus
+            .estimator(args.node_args.builder_build_time_multiplier)?;
         let tempo_node = overrides.apply_tempo_node({
             let node = TempoNode::new(&args.node_args, validator_key);
             match gossip_protocol_handler {
@@ -564,7 +563,8 @@ pub fn tempo_main_with(mut overrides: TempoOverrides) -> eyre::Result<()> {
                 None => node,
             }
         });
-        // Apply after overrides so both consumers receive the same handle.
+        // Applied after the mapper, which may rebuild the node, so that the
+        // builder cannot end up with a different estimator than consensus.
         let tempo_node = tempo_node.with_estimator(estimator.clone());
         let executed_state = tempo_node.executed_state();
 
@@ -1193,6 +1193,16 @@ mod tests {
             Duration::from_millis(50)
         );
         assert_eq!(node_cmd.ext.node_args.builder_build_time_multiplier, 1.15);
+        assert_eq!(
+            node_cmd
+                .ext
+                .consensus
+                .estimator_config(node_cmd.ext.node_args.builder_build_time_multiplier)
+                .network_budget_max,
+            Duration::from_millis(300)
+        );
+        assert_eq!(node_cmd.ext.consensus.network_reserve_percentile, 75);
+        assert!(node_cmd.ext.consensus.network_reserve_fast_rise);
 
         let mut cli = TempoCli::try_parse_from([
             "tempo",
