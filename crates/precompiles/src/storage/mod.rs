@@ -21,16 +21,42 @@ pub mod packing;
 pub use packing::FieldLocation;
 pub use types::mapping as slots;
 
-use alloy::primitives::{Address, B256, LogData, Signature, U256};
-use revm::{
-    context::journaled_state::JournalCheckpoint,
+use alloy::primitives::{Address, B256, Bytes, KECCAK256_EMPTY, LogData, Signature, U256};
+use evm2::{
+    evm::{AccountInfo, StateCheckpoint},
     interpreter::gas::{KECCAK256, KECCAK256WORD},
-    state::{AccountInfo, Bytecode},
 };
 use tempo_chainspec::hardfork::TempoHardfork;
 use tempo_primitives::TempoBlockEnv;
 
 use crate::error::{Result, TempoPrecompileError};
+
+/// TIP-1108 charge for the first config-commitment write to an account.
+pub const CONFIG_COMMITMENT_REGISTRATION_GAS: u64 = 20_000;
+
+/// TIP-1108 charge for replacing a nonzero config commitment.
+const CONFIG_COMMITMENT_UPDATE_GAS: u64 = 5_000;
+
+/// Determines where TIP-1108's field-write charge is paid.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConfigCommitmentWriteGas {
+    /// First registration was charged once in transaction intrinsic gas.
+    Intrinsic,
+    /// Charge the explicit precompile operation here: the field write, plus TIP-1000's
+    /// new-account cost (regular and state gas) when the write finds the account still empty.
+    Precompile,
+}
+
+impl ConfigCommitmentWriteGas {
+    fn cost(self, previous: B256) -> Result<u64> {
+        match self {
+            Self::Intrinsic if previous.is_zero() => Ok(0),
+            Self::Intrinsic => Err(TempoPrecompileError::InvalidConfigCommitmentWrite),
+            Self::Precompile if previous.is_zero() => Ok(CONFIG_COMMITMENT_REGISTRATION_GAS),
+            Self::Precompile => Ok(CONFIG_COMMITMENT_UPDATE_GAS),
+        }
+    }
+}
 
 /// Low-level storage provider for interacting with the EVM.
 ///
@@ -51,7 +77,7 @@ pub trait PrecompileStorageProvider {
     fn block_env(&self) -> &TempoBlockEnv;
 
     /// Sets the bytecode at the given address.
-    fn set_code(&mut self, address: Address, code: Bytecode) -> Result<()>;
+    fn set_code(&mut self, address: Address, code: Bytes) -> Result<()>;
 
     /// Executes a closure with access to the account info for the given address.
     fn with_account_info(
@@ -59,21 +85,6 @@ pub trait PrecompileStorageProvider {
         address: Address,
         f: &mut dyn FnMut(&AccountInfo),
     ) -> Result<()>;
-
-    /// Returns `EXTCODEHASH(address)` and the account's runtime bytecode.
-    fn account_code(&mut self, address: Address) -> Result<(B256, Bytecode)>;
-
-    /// Copies deployed runtime bytecode between accounts.
-    ///
-    /// Returns `None` when the source account's runtime bytecode is empty.
-    fn copy_runtime(&mut self, source: Address, destination: Address) -> Result<Option<B256>> {
-        let (code_hash, code) = self.account_code(source)?;
-        if code.is_empty() {
-            return Ok(None);
-        }
-        self.set_code(destination, code)?;
-        Ok(Some(code_hash))
-    }
 
     /// Performs an SLOAD operation (persistent storage read).
     fn sload(&mut self, address: Address, key: U256) -> Result<U256>;
@@ -160,17 +171,17 @@ pub trait PrecompileStorageProvider {
     ///
     /// Prefer [`StorageCtx::checkpoint`] which returns a [`CheckpointGuard`] that
     /// auto-reverts on drop and is hardfork-aware (no-op pre-T1C).
-    fn checkpoint(&mut self) -> JournalCheckpoint;
+    fn checkpoint(&mut self) -> StateCheckpoint;
 
     /// Commits all state changes since the given checkpoint.
     ///
     /// Prefer [`CheckpointGuard::commit`].
-    fn checkpoint_commit(&mut self, checkpoint: JournalCheckpoint);
+    fn checkpoint_commit(&mut self, checkpoint: StateCheckpoint);
 
     /// Reverts all state changes back to the given checkpoint.
     ///
     /// Prefer [`CheckpointGuard`] (auto-reverts on drop).
-    fn checkpoint_revert(&mut self, checkpoint: JournalCheckpoint);
+    fn checkpoint_revert(&mut self, checkpoint: StateCheckpoint);
 
     /// Enables or disables TIP-1060 storage-credit accounting for subsequent storage writes.
     ///
@@ -190,13 +201,7 @@ pub trait PrecompileStorageProvider {
     ///
     /// Implementations should use this over naked `keccak256` call to ensure gas is accounted for.
     fn keccak256(&mut self, data: &[u8]) -> Result<B256> {
-        let num_words =
-            u64::try_from(data.len().div_ceil(32)).map_err(|_| TempoPrecompileError::OutOfGas)?;
-        let price = KECCAK256WORD
-            .checked_mul(num_words)
-            .and_then(|w| w.checked_add(KECCAK256))
-            .ok_or(TempoPrecompileError::OutOfGas)?;
-        self.deduct_gas(price)?;
+        self.deduct_gas(keccak_cost(data.len())?)?;
         Ok(keccak256(data))
     }
 
@@ -218,6 +223,27 @@ pub trait PrecompileStorageProvider {
         let recovered = alloy::consensus::crypto::secp256k1::recover_signer(&sig, digest);
 
         Ok(recovered.ok().filter(|addr| !addr.is_zero()))
+    }
+
+    /// Reads the commitment with normal account-access gas.
+    /// Providers that cannot store commitments report zero for every account.
+    fn config_commitment(&mut self, address: Address) -> Result<B256> {
+        self.with_account_info(address, &mut |_| {})?;
+        Ok(B256::ZERO)
+    }
+
+    /// Writes an authorized nonzero commitment through the account journal.
+    /// Callers must validate registration, rotation, or migration authority first.
+    /// Account-access gas belongs to that authorization read; this method charges
+    /// only what `gas` names, or nothing when registration was charged intrinsically.
+    /// Providers that cannot store commitments reject every write.
+    fn set_config_commitment(
+        &mut self,
+        _address: Address,
+        _commitment: B256,
+        _gas: ConfigCommitmentWriteGas,
+    ) -> Result<()> {
+        Err(TempoPrecompileError::InvalidConfigCommitmentWrite)
     }
 }
 
@@ -272,6 +298,17 @@ pub trait ContractStorage {
     /// Returns true if the contract has been initialized (has bytecode deployed).
     fn is_initialized(&self) -> Result<bool> {
         self.storage()
-            .with_account_info(self.address(), |info| Ok(!info.is_empty_code_hash()))
+            .with_account_info(self.address(), |info| Ok(info.code_hash != KECCAK256_EMPTY))
     }
+}
+
+/// Gas for one `KECCAK256` over `len` bytes of input.
+///
+/// Fails with [`TempoPrecompileError::OutOfGas`] if the cost overflows `u64`.
+pub fn keccak_cost(len: usize) -> Result<u64> {
+    let num_words = u64::try_from(len.div_ceil(32)).map_err(|_| TempoPrecompileError::OutOfGas)?;
+    u64::from(KECCAK256WORD)
+        .checked_mul(num_words)
+        .and_then(|w| w.checked_add(u64::from(KECCAK256)))
+        .ok_or(TempoPrecompileError::OutOfGas)
 }
