@@ -1,7 +1,7 @@
 //! Native multisig precompile calls through its ABI.
 
 use alloy::{
-    primitives::{Address, B256, Bytes, LogData, address, keccak256},
+    primitives::{Address, B256, Bytes, address, keccak256},
     sol_types::{SolCall, SolEvent, SolInterface},
 };
 use alloy_evm::EvmEnv;
@@ -37,8 +37,9 @@ const OWNER: Address = Address::repeat_byte(0x22);
 const EOA: Address = Address::repeat_byte(0x33);
 
 fn t14_storage() -> HashMapStorageProvider {
-    HashMapStorageProvider::new_with_spec(1, TempoHardfork::T14)
-        .with_multisig_recovery_factory(FACTORY)
+    let mut storage = HashMapStorageProvider::new_with_spec(1, TempoHardfork::T14);
+    storage.set_multisig_recovery_factory(FACTORY);
+    storage
 }
 
 fn weighted_owners(entries: &[(Address, u8)]) -> Vec<INativeMultisig::MultisigOwner> {
@@ -147,13 +148,6 @@ fn seed_commitment(account: Address, commitment: B256) {
     StorageCtx
         .set_config_commitment(account, commitment, ConfigCommitmentWriteGas::Intrinsic)
         .unwrap();
-}
-
-fn emitted(storage: &HashMapStorageProvider) -> &[LogData] {
-    storage
-        .events
-        .get(&NATIVE_MULTISIG_ADDRESS)
-        .map_or(&[][..], Vec::as_slice)
 }
 
 #[test]
@@ -308,7 +302,7 @@ fn native_rotation_requires_registered_current_leaf_and_direct_authority() {
             .encode_log_data()
         })
         .collect();
-    assert_eq!(emitted(&storage), events.as_slice());
+    assert_eq!(storage.get_events(NATIVE_MULTISIG_ADDRESS), &events);
 }
 
 #[test]
@@ -673,5 +667,8 @@ fn upgrade_account_installs_a_version_one_commitment() {
         owners,
     }
     .encode_log_data();
-    assert_eq!(emitted(&storage), [upgraded, updated].as_slice());
+    assert_eq!(
+        storage.get_events(NATIVE_MULTISIG_ADDRESS),
+        &[upgraded, updated]
+    );
 }

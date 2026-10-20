@@ -107,12 +107,6 @@ impl HashMapStorageProvider {
         self.gas_params = GasParams::new_spec(self.spec.into());
         self
     }
-
-    /// Selects an explicit recovery factory for native-account test fixtures.
-    pub const fn with_multisig_recovery_factory(mut self, factory: Address) -> Self {
-        self.block_env.multisig_recovery_factory = Some(factory);
-        self
-    }
 }
 
 impl PrecompileStorageProvider for HashMapStorageProvider {
@@ -476,5 +470,10 @@ impl HashMapStorageProvider {
     /// Overrides the static-call context.
     pub fn set_is_static(&mut self, is_static: bool) {
         self.is_static = is_static;
+    }
+
+    /// Selects an explicit recovery factory for native-account test fixtures.
+    pub fn set_multisig_recovery_factory(&mut self, factory: Address) {
+        self.block_env.multisig_recovery_factory = Some(factory);
     }
 }

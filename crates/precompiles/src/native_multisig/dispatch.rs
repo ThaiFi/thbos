@@ -1,3 +1,5 @@
+//! ABI dispatch for the [`NativeMultisig`] precompile.
+
 use super::NativeMultisig;
 use crate::{Precompile, charge_input_cost, dispatch, mutate, view};
 use alloy::primitives::Address;

@@ -1,4 +1,7 @@
 //! Journaled native account configuration updates.
+
+pub mod dispatch;
+
 use crate::{
     error::Result,
     storage::{ConfigCommitmentWriteGas, Handler},
@@ -17,8 +20,6 @@ use tempo_primitives::{
         multisig::{MULTISIG_ACCOUNT_CREATE2_PREIMAGE_LEN, MULTISIG_UPGRADE_DOMAIN},
     },
 };
-
-mod dispatch;
 
 #[contract(addr = NATIVE_MULTISIG_ADDRESS)]
 pub struct NativeMultisig {
@@ -183,6 +184,7 @@ pub enum UpgradeEligibility {
     PrimitiveRoot,
 }
 
+/// Gas for one `KECCAK256` over `bytes` bytes of input.
 pub const fn keccak_cost(bytes: usize) -> u64 {
     KECCAK256 + KECCAK256WORD * bytes.div_ceil(32) as u64
 }
