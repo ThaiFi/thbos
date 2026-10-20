@@ -1189,6 +1189,7 @@ def run-local-e2e-phase [run: record, ctx: record] {
             }
         } catch { |e|
             print $"Error: local e2e txgen sender failed for ($phase): ($e.msg)"
+            print $e.rendered
             1
         })
         if $sender_exit == 0 and $phase_clickhouse_url != "" {
