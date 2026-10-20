@@ -263,7 +263,7 @@ fn derive_account_charges_input_and_proof_hashing_gas() {
 }
 
 #[test]
-fn native_rotation_requires_registered_current_leaf_and_direct_authority() {
+fn rotation_requires_registered_current_leaf_and_direct_authority() {
     let mut storage = t14_storage();
     let (account, owners) = StorageCtx::enter(&mut storage, || {
         let owners = weighted_owners(&[(OWNER, 1)]);
@@ -433,7 +433,7 @@ fn update_config_rejects_invalid_current_and_next_configs() {
 }
 
 #[test]
-fn native_config_error_precedence_through_abi() {
+fn config_error_precedence_through_abi() {
     let mut storage = t14_storage();
     StorageCtx::enter(&mut storage, || {
         struct Case {
@@ -514,7 +514,7 @@ fn native_config_error_precedence_through_abi() {
 }
 
 #[test]
-fn native_factory_is_only_required_to_derive_accounts() {
+fn recovery_factory_is_only_required_to_derive_accounts() {
     let mut storage = HashMapStorageProvider::new_with_spec(1, TempoHardfork::T14);
     StorageCtx::enter(&mut storage, || {
         let owners = weighted_owners(&[(OWNER, 1)]);
