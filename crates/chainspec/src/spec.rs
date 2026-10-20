@@ -70,10 +70,6 @@ macro_rules! tempo_genesis_info {
 tempo_hardfork::tempo_post_genesis_hardforks!(tempo_genesis_info);
 
 impl TempoGenesisInfo {
-    /// Explicit custom-chain factory shared by execution, pool validation, and RPC.
-    pub const fn multisig_recovery_factory(&self) -> Option<Address> {
-        self.multisig_recovery_factory
-    }
     /// Extract Tempo genesis info from genesis extra_fields
     fn extract_from(genesis: &Genesis) -> Self {
         genesis
@@ -89,6 +85,11 @@ impl TempoGenesisInfo {
 
     pub fn general_gas_limit(&self) -> Option<u64> {
         self.general_gas_limit
+    }
+
+    /// Returns the TIP-1110 recovery factory configured in genesis, if any.
+    pub const fn multisig_recovery_factory(&self) -> Option<Address> {
+        self.multisig_recovery_factory
     }
 }
 
