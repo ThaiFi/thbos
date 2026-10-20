@@ -3,6 +3,11 @@ name: bench-e2e-multi-region
 on:
   workflow_call:
     inputs:
+      diagnostic_run_ids:
+        description: Comma-separated benchmark run IDs to inspect without launching benchmarks.
+        type: string
+        required: false
+        default: ""
       cloud:
         type: string
         required: false
@@ -114,6 +119,11 @@ on:
         required: false
   workflow_dispatch:
     inputs:
+      diagnostic_run_ids:
+        description: Comma-separated benchmark run IDs to inspect without launching benchmarks.
+        type: string
+        required: false
+        default: ""
       cloud:
         description: Cloud provider used for disposable benchmark infrastructure.
         type: choice
@@ -279,6 +289,7 @@ env:
 
 jobs:
   bench-e2e-multi-region:
+    if: inputs.diagnostic_run_ids == ''
     permissions:
       actions: read
       contents: read
@@ -902,3 +913,47 @@ jobs:
       - name: Check benchmark result
         if: always() && (steps.fetch_tempo_binaries.outcome == 'failure' || steps.generate_initial_validator_state.outcome == 'failure' || steps.initialize_validator_state.outcome == 'failure' || steps.benchmark.outcome == 'failure')
         run: exit 1
+
+  diagnose-benchmark:
+    if: inputs.diagnostic_run_ids != ''
+    runs-on: depot-ubuntu-latest-8
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      CLOUDSDK_CONFIG: ${{ runner.temp }}/gcloud-benchmark-status
+      BENCHMARK_RUN_IDS: ${{ inputs.diagnostic_run_ids }}
+    steps:
+      - name: Secure runner
+        uses: tempoxyz/gh-actions/actions/secure-runner@e813067e922303348ee5aad965f745803cc24f1f # 2026-10-02T09-56-31Z-e813067e
+
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Authenticate to Google Cloud
+        uses: tempoxyz/gh-actions/vendor/google-github-actions/auth@e813067e922303348ee5aad965f745803cc24f1f # 2026-10-02T09-56-31Z-e813067e
+        with:
+          workload_identity_provider: projects/383683155128/locations/global/workloadIdentityPools/tempo-benchmark/providers/tempo-benchmark
+          service_account: benchmark-runner@chain-benchmarking-zygis.iam.gserviceaccount.com
+
+      - name: Setup Google Cloud CLI
+        uses: tempoxyz/gh-actions/vendor/google-github-actions/setup-gcloud@e813067e922303348ee5aad965f745803cc24f1f # 2026-10-02T09-56-31Z-e813067e
+        with:
+          project_id: chain-benchmarking-zygis
+
+      - name: Read benchmark progress
+        run: |
+          [[ "$BENCHMARK_RUN_IDS" =~ ^[0-9]+(,[0-9]+)*$ ]]
+          IFS=',' read -ra benchmark_runs <<< "$BENCHMARK_RUN_IDS"
+          for benchmark_run_id in "${benchmark_runs[@]}"; do
+            prefix="gs://tempo-benchmark-artifacts-383683155128-us-east1/runs/bench-e2e-multi-region-$benchmark_run_id-1/artifacts/runner"
+            echo "Benchmark $benchmark_run_id"
+            if gcloud storage cat "$prefix/status.json" > "$RUNNER_TEMP/benchmark-status.json"; then
+              jq '{status,message,updated_at}' "$RUNNER_TEMP/benchmark-status.json"
+            fi
+            if gcloud storage cat "$prefix/timings.json" > "$RUNNER_TEMP/benchmark-timings.json"; then
+              jq '{updated_at,runner_elapsed_secs,phases:[.phases[] | {name,status,elapsed_secs,completed_at}]}' "$RUNNER_TEMP/benchmark-timings.json"
+            fi
+          done
