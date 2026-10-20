@@ -439,6 +439,36 @@ jobs:
           path.write_text(source)
           PYTHON
 
+      - name: Fail closed when allocating benchmark commands
+        run: |
+          python3 - <<'PYTHON'
+          import os
+          from pathlib import Path
+
+          path = Path(os.environ["BENCH_REPO_DIR"]) / "scripts/run_benchmark.sh"
+          source = path.read_text()
+          start = source.index("next_gcp_command_sequence() {")
+          end = source.index("\nrun_gcp_host_action() {", start)
+          assert "gcloud storage ls" in source[start:end] and "|| true" in source[start:end]
+          replacement = """next_gcp_command_sequence() {
+            python3 - "$1" "$RUN_PREFIX/control/${3:-validator}-$2/commands/" <<'SEQUENCE'
+          import json, subprocess, sys, urllib.parse, urllib.request
+          bucket, prefix = sys.argv[1:]
+          token = subprocess.check_output(["gcloud", "auth", "print-access-token"], text=True).strip()
+          url = "https://storage.googleapis.com/storage/v1/b/" + urllib.parse.quote(bucket, safe="") + "/o?" + urllib.parse.urlencode({"prefix": prefix, "maxResults": 1000})
+          request = urllib.request.Request(url, headers={"Authorization": "Bearer " + token})
+          with urllib.request.urlopen(request, timeout=30) as response:
+              listing = json.load(response)
+          assert not listing.get("nextPageToken"), "Unexpectedly large command history"
+          names = [item["name"].rsplit("/", 1)[-1] for item in listing.get("items", [])]
+          sequences = [int(name[:-5]) for name in names if name.endswith(".json") and name[:-5].isdigit()]
+          print(max(sequences, default=0) + 1)
+          SEQUENCE
+          }
+          """
+          path.write_text(source[:start] + replacement + source[end:])
+          PYTHON
+
       - name: Resolve baseline and feature refs
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         with:
