@@ -82,12 +82,10 @@ impl ConfigurableAccount {
         threshold: u8,
         owners: Vec<IConfigurableAccount::ConfigurableAccountOwner>,
     ) -> Result<()> {
-        // The wrapper rejects delegatecall; a validated configurable account origin cannot have
-        // code. Together these conditions restrict authority to protocol-created batch calls.
-        if sender.is_zero()
-            || self.tx_origin.t_read()? != sender
-            || self.directly_authorized_account.t_read()? != sender
-        {
+        // The wrapper rejects delegatecall. `directly_authorized_account` is seeded only with the
+        // account of the transaction's outer owner quorum, which validation binds to the
+        // transaction caller, so a match with `sender` already implies `sender` is the origin.
+        if sender.is_zero() || self.directly_authorized_account.t_read()? != sender {
             return Err(
                 ConfigurableAccountError::unauthorized_configurable_account_caller().into(),
             );

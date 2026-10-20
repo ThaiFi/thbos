@@ -295,7 +295,7 @@ fn rotation_requires_registered_current_leaf_and_direct_authority() {
 }
 
 #[test]
-fn update_config_requires_the_sender_as_origin_and_direct_authority() {
+fn update_config_requires_the_sender_as_direct_authority() {
     let mut storage = t14_storage();
     StorageCtx::enter(&mut storage, || {
         let owners = weighted_owners(&[(OWNER, 1)]);
@@ -312,7 +312,6 @@ fn update_config_requires_the_sender_as_origin_and_direct_authority() {
         );
         for (sender, origin, directly_authorized) in [
             (Address::ZERO, Address::ZERO, Address::ZERO),
-            (account, EOA, account),
             (account, account, EOA),
         ] {
             seed_authority(
@@ -325,7 +324,8 @@ fn update_config_requires_the_sender_as_origin_and_direct_authority() {
                 ConfigurableAccountError::unauthorized_configurable_account_caller(),
             );
         }
-        seed_authority(account, account, UpgradeEligibility::NotSoleCall);
+        // The direct authority alone decides: the origin is not consulted.
+        seed_authority(EOA, account, UpgradeEligibility::NotSoleCall);
         returns::<IConfigurableAccount::updateConfigCall>(update(account, &current, 1, &owners));
     });
 }
