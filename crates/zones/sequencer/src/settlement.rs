@@ -42,6 +42,7 @@ use crate::{
         AttestationDomain, SettlementAttestation, SettlementCertificate,
         SignedSettlementAttestation,
     },
+    metrics::ZoneMonitorMetrics,
     prover::SettlementProof,
     prover_config::active_l1_hardfork,
 };
@@ -62,7 +63,7 @@ use schnellru::{ByLength, LruMap};
 use tempo_alloy::{TempoNetwork, provider::ext::TempoProviderExt, rpc::TempoCallBuilderExt};
 use tempo_chainspec::hardfork::TempoHardfork;
 use tempo_primitives::{Block, TempoReceipt};
-use tracing::{info, instrument, warn};
+use tracing::{debug, info, instrument, warn};
 use zone_chainspec::ZoneChainSpec;
 use zone_prover::{ProofBundle, VerifierMode};
 
@@ -128,6 +129,15 @@ const DEFAULT_ANCESTRY_HEADER_CACHE_CAPACITY: u32 = 262_144;
 /// observing N can only execute in N+1 or later, where that hash is available. Eight certificate
 /// signatures still fit comfortably within this limit.
 const SUBMIT_BATCH_GAS_LIMIT: u64 = 2_000_000;
+
+/// First delay before re-reading an L1 tip that has not reached a batch's Tempo block.
+const L1_TIP_WAIT_INITIAL_DELAY: Duration = Duration::from_millis(25);
+
+/// Longest delay between L1 tip reads, kept below Tempo's 500 ms block time.
+const L1_TIP_WAIT_MAX_DELAY: Duration = Duration::from_millis(400);
+
+/// L1 tip reads before a batch's Tempo block is reported as unconfirmed (about 1.6 s of waiting).
+const L1_TIP_WAIT_ATTEMPTS: u32 = 8;
 
 /// Maximum number of pending withdrawal slots reconstructed in one recovery page.
 /// Bounds L1 topic filters and temporary withdrawal data without limiting the on-chain FIFO.
@@ -280,6 +290,8 @@ pub struct BatchSubmitter {
     /// requests. Settlement batches are submitted in order, so later requests
     /// can reuse almost the entire preceding range.
     ancestry_header_cache: RwLock<LruMap<u64, CachedAncestryHeader>>,
+    /// Batch preparation and submission metrics.
+    metrics: ZoneMonitorMetrics,
 }
 impl BatchSubmitter {
     /// Shared Tempo L1 provider backing portal reads and submissions.
@@ -356,12 +368,47 @@ impl BatchSubmitter {
             ancestry_header_cache: RwLock::new(LruMap::new(ByLength::new(
                 DEFAULT_ANCESTRY_HEADER_CACHE_CAPACITY,
             ))),
+            metrics: ZoneMonitorMetrics::default(),
         }
     }
 
     /// Resolve the single immutable anchor shared by proving, quorum, and submission.
+    ///
+    /// The zone imports L1 blocks over its own connection, which can reach a different L1 node
+    /// than this submitter's provider. While the submitter's L1 tip is behind the batch's Tempo
+    /// block, the tip is re-read with exponential backoff for up to [`L1_TIP_WAIT_ATTEMPTS`]
+    /// reads before returning an error.
     pub async fn prepare_batch(&self, batch: BatchData) -> Result<PreparedBatch> {
-        let anchor = self.resolve_batch_anchor(batch.tempo_block_number).await?;
+        let tempo_block_number = batch.tempo_block_number;
+        let mut delay = L1_TIP_WAIT_INITIAL_DELAY;
+        let mut attempt = 1;
+        let current_l1_block = loop {
+            let current_l1_block = self.l1_provider.get_block_number().await?;
+            if tempo_block_number <= current_l1_block {
+                break current_l1_block;
+            }
+            if attempt == L1_TIP_WAIT_ATTEMPTS {
+                return Err(eyre::eyre!(
+                    "tempo_block_number ({tempo_block_number}) is not yet confirmed on L1 \
+                     (tip={current_l1_block}) after {L1_TIP_WAIT_ATTEMPTS} reads"
+                ));
+            }
+            self.metrics.l1_tip_wait_total.increment(1);
+            debug!(
+                tempo_block_number,
+                current_l1_block,
+                attempt,
+                ?delay,
+                "L1 tip has not reached the batch Tempo block; waiting"
+            );
+            // Monitor shutdown aborts the preparation task, which cancels this sleep.
+            tokio::time::sleep(delay).await;
+            delay = (delay * 2).min(L1_TIP_WAIT_MAX_DELAY);
+            attempt += 1;
+        };
+        let anchor = self
+            .resolve_batch_anchor(tempo_block_number, current_l1_block)
+            .await?;
         Ok(PreparedBatch { batch, anchor })
     }
 
@@ -838,21 +885,19 @@ impl BatchSubmitter {
 
     /// Resolve the anchor mode for the given `tempo_block_number`.
     ///
+    /// `current_l1_block` is the observed L1 tip; [`Self::prepare_batch`] ensures it is at or
+    /// after `tempo_block_number`.
+    ///
     /// - **Direct** (gap < configured effective window): the portal reads the
     ///   hash directly from EIP-2935.
     /// - **Ancestry** (gap ≥ configured effective window): a recent L1 block
     ///   behind the configured safety margin is used as anchor. Ancestry headers
     ///   are collected and validated for future prover integration.
-    async fn resolve_batch_anchor(&self, tempo_block_number: u64) -> Result<BatchAnchor> {
-        let current_l1_block = self.l1_provider.get_block_number().await?;
-
-        if tempo_block_number > current_l1_block {
-            return Err(eyre::eyre!(
-                "tempo_block_number ({tempo_block_number}) is not yet confirmed on L1 \
-                 (tip={current_l1_block}), will retry after L1 advances"
-            ));
-        }
-
+    async fn resolve_batch_anchor(
+        &self,
+        tempo_block_number: u64,
+        current_l1_block: u64,
+    ) -> Result<BatchAnchor> {
         let gap = current_l1_block.saturating_sub(tempo_block_number);
 
         if gap < self.anchor_config.effective_window() {
@@ -2553,31 +2598,63 @@ mod tests {
         let (header, hash) = mock_l1_header(100, B256::ZERO);
         asserter.push_success(&100_u64);
         asserter.push_success(&header);
-        let anchor = submitter.resolve_batch_anchor(100).await.unwrap();
+        let prepared = submitter
+            .prepare_batch(test_prepared_batch(20, 100).batch)
+            .await
+            .unwrap();
 
-        assert_eq!(anchor.block_number(100), 100);
-        assert_eq!(anchor.block_hash(), hash);
-        assert!(anchor.ancestry_headers().is_empty());
+        assert_eq!(prepared.anchor_block_number(), 100);
+        assert_eq!(prepared.anchor.block_hash(), hash);
+        assert!(prepared.anchor.ancestry_headers().is_empty());
         assert!(asserter.read_q().is_empty());
     }
 
-    #[tokio::test]
-    async fn anchor_resolution_rejects_future_l1_block() {
+    #[tokio::test(start_paused = true)]
+    async fn prepare_batch_waits_for_lagging_l1_tip() {
         let asserter = Asserter::new();
-        let provider = ProviderBuilder::new_with_network::<TempoNetwork>()
-            .connect_mocked_client(asserter.clone())
-            .erased();
-        let submitter = BatchSubmitter::new(Address::ZERO, provider, test_chain_spec());
+        let submitter =
+            BatchSubmitter::new(Address::ZERO, mock_l1(asserter.clone()), test_chain_spec());
 
+        let (header, hash) = mock_l1_header(101, B256::ZERO);
         asserter.push_success(&100_u64);
-        let err = match submitter.resolve_batch_anchor(101).await {
+        asserter.push_success(&100_u64);
+        asserter.push_success(&101_u64);
+        asserter.push_success(&header);
+        let start = tokio::time::Instant::now();
+        let prepared = submitter
+            .prepare_batch(test_prepared_batch(20, 101).batch)
+            .await
+            .unwrap();
+
+        assert_eq!(start.elapsed(), Duration::from_millis(75));
+        assert_eq!(prepared.anchor_block_number(), 101);
+        assert_eq!(prepared.anchor.block_hash(), hash);
+        assert!(asserter.read_q().is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn prepare_batch_rejects_l1_tip_that_never_reaches_tempo_block() {
+        let asserter = Asserter::new();
+        let submitter =
+            BatchSubmitter::new(Address::ZERO, mock_l1(asserter.clone()), test_chain_spec());
+
+        for _ in 0..L1_TIP_WAIT_ATTEMPTS {
+            asserter.push_success(&100_u64);
+        }
+        let start = tokio::time::Instant::now();
+        let err = match submitter
+            .prepare_batch(test_prepared_batch(20, 101).batch)
+            .await
+        {
             Ok(_) => panic!("future L1 anchor was accepted"),
             Err(err) => err,
         };
-        assert!(
-            err.to_string()
-                .contains("tempo_block_number (101) is not yet confirmed on L1 (tip=100)")
+
+        assert_eq!(
+            err.to_string(),
+            "tempo_block_number (101) is not yet confirmed on L1 (tip=100) after 8 reads"
         );
+        assert_eq!(start.elapsed(), Duration::from_millis(1_575));
         assert!(asserter.read_q().is_empty());
     }
 
@@ -2850,9 +2927,8 @@ mod tests {
         );
 
         let (header, hash) = mock_l1_header(99, B256::ZERO);
-        asserter.push_success(&100_u64);
         asserter.push_success(&header);
-        let anchor = submitter.resolve_batch_anchor(99).await.unwrap();
+        let anchor = submitter.resolve_batch_anchor(99, 100).await.unwrap();
 
         assert_eq!(anchor.block_hash(), hash);
         assert!(submitter.ancestry_header_cache.read().is_empty());

@@ -190,6 +190,9 @@ pub(crate) struct ZoneMonitorMetrics {
     /// Batches that selected the proofless verifier after proving or preflight failed.
     pub batch_no_proof_fallback_total: Counter,
 
+    /// Waits for the submitter's L1 tip to reach a batch's Tempo block during preparation.
+    pub l1_tip_wait_total: Counter,
+
     /// Failed attempts to rebuild the in-memory withdrawal store from chain state.
     pub withdrawal_store_restore_failure_total: Counter,
 
