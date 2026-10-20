@@ -14056,6 +14056,7 @@ dependencies = [
  "reth-network-peers",
  "serde",
  "serde_json",
+ "tempo-contracts",
  "tempo-dkg-onchain-artifacts",
  "tempo-hardfork",
  "tempo-primitives",
@@ -17001,6 +17002,7 @@ name = "zone-evm"
 version = "0.3.5"
 dependencies = [
  "alloy-consensus",
+ "alloy-eips",
  "alloy-evm",
  "alloy-genesis",
  "alloy-primitives",

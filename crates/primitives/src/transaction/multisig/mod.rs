@@ -21,6 +21,9 @@ pub const MAX_MULTISIG_OWNER_SIGNATURE_BYTES: usize = 1 + MAX_WEBAUTHN_SIGNATURE
 /// Domain prefix for native multisig account CREATE2 salt derivation.
 pub const MULTISIG_ACCOUNT_DOMAIN: &[u8] = b"tempo:multisig:account";
 
+/// Domain prefix for the salt of an account migrated in place (TIP-1113).
+pub const MULTISIG_UPGRADE_DOMAIN: &[u8] = b"tempo:multisig:upgrade";
+
 /// Keccak-256 of the account proxy creation code. The creation code is identical for every
 /// account, takes no constructor arguments and embeds the beacon address as a constant.
 ///
@@ -314,6 +317,60 @@ impl MultisigSignature {
         }
         Ok(())
     }
+
+    /// Verifies the owner approvals against this configuration, without checking account state.
+    pub fn verify_approvals(&self, inner_digest: B256) -> Result<(), MultisigQuorumError> {
+        let digest = self.digest(inner_digest);
+        let mut weight = MultisigWeightAccumulator::new(self.config.threshold)?;
+        for (approval_index, approval) in self.signatures.iter().enumerate() {
+            let owner = approval.recover_signer(&digest).map_err(|_| {
+                MultisigQuorumError::OwnerSignatureRecoveryFailed { approval_index }
+            })?;
+            let owner_weight = self
+                .config
+                .owner_weight(owner)
+                .ok_or(MultisigQuorumError::SignerNotOwner)?;
+            weight.record_owner(owner, owner_weight)?;
+            if weight.has_quorum() && approval_index + 1 != self.signatures.len() {
+                return Err(MultisigQuorumError::ExcessSignatures);
+            }
+        }
+        weight.finish()
+    }
+
+    /// Checks the stored commitment or, on first use, derives the named account.
+    /// Does not read state, inspect code, or verify owner approvals.
+    pub fn validate_account_commitment(
+        &self,
+        stored: B256,
+        factory: Option<Address>,
+    ) -> Result<(), MultisigStateError> {
+        let actual = self.config_commitment();
+        if actual.is_zero() || (!stored.is_zero() && stored != actual) {
+            return Err(MultisigStateError::CommitmentMismatch {
+                expected: stored,
+                actual,
+            });
+        }
+        if stored.is_zero() {
+            if self.config.version != 0 {
+                return Err(MultisigStateError::UnregisteredVersion {
+                    actual: self.config.version,
+                });
+            }
+            let factory = factory.ok_or(MultisigStateError::FactoryNotConfigured)?;
+            // The config was validated against `account` at construction, which excludes a zero or
+            // owner account, so a derived collision with either is reported as a mismatch.
+            let expected = multisig_account_address(factory, self.config.account_salt_validated());
+            if expected != self.account {
+                return Err(MultisigStateError::InitialAccountMismatch {
+                    expected,
+                    actual: self.account,
+                });
+            }
+        }
+        Ok(())
+    }
 }
 
 impl Decodable for MultisigSignature {
@@ -427,6 +484,58 @@ impl From<MultisigConfigError> for MultisigSignatureError {
     }
 }
 
+/// Why a witness does not match the current account commitment.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum MultisigStateError {
+    /// The witness hash differs from the stored hash or is zero.
+    CommitmentMismatch {
+        /// Stored hash.
+        expected: B256,
+        /// Witness hash.
+        actual: B256,
+    },
+    /// First use requires version zero.
+    UnregisteredVersion {
+        /// Witness version.
+        actual: u64,
+    },
+    /// First use requires a configured recovery factory.
+    FactoryNotConfigured,
+    /// The initial configuration derives a different address.
+    InitialAccountMismatch {
+        /// Derived account.
+        expected: Address,
+        /// Account named in the witness.
+        actual: Address,
+    },
+}
+
+impl core::fmt::Display for MultisigStateError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::CommitmentMismatch { expected, actual } => write!(
+                f,
+                "multisig configuration commitment mismatch: expected {expected}, actual {actual}"
+            ),
+            Self::UnregisteredVersion { actual } => {
+                write!(
+                    f,
+                    "unregistered configuration version mismatch: expected 0, actual {actual}"
+                )
+            }
+            Self::FactoryNotConfigured => {
+                f.write_str("native multisig recovery factory is not configured")
+            }
+            Self::InitialAccountMismatch { expected, actual } => {
+                write!(
+                    f,
+                    "initial multisig account mismatch: expected {expected}, actual {actual}"
+                )
+            }
+        }
+    }
+}
+
 /// Native multisig quorum validation error.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum MultisigQuorumError {
@@ -444,6 +553,8 @@ pub enum MultisigQuorumError {
     SignersNotAscending,
     /// Recovered signer weight does not meet the threshold.
     WeightBelowThreshold,
+    /// An owner approval could not recover a signer.
+    OwnerSignatureRecoveryFailed { approval_index: usize },
 }
 
 impl MultisigQuorumError {
@@ -457,6 +568,7 @@ impl MultisigQuorumError {
             Self::SignerNotOwner => "multisig signer is not an owner",
             Self::SignersNotAscending => "multisig recovered owners must be strictly ascending",
             Self::WeightBelowThreshold => "multisig signature weight below threshold",
+            Self::OwnerSignatureRecoveryFailed { .. } => "invalid multisig owner signature",
         }
     }
 }
