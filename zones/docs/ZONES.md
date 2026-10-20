@@ -332,7 +332,9 @@ that should bounce.
 | Present | Credits only listed senders. A present but empty list bounces every deposit. |
 | Unreadable, or over 80,000 addresses | The node fails to start. |
 
-The node creates the file on the first write. Change it only through the `zoneAdmin` methods,
+The node creates the file on the first write, which must be `zoneAdmin_replaceDepositAllowlist`:
+an uninitialized sequencer rejects `zoneAdmin_setDepositAllowed`, because a partial first list
+would bounce everyone else. Change the file only through the `zoneAdmin` methods,
 never by hand. Each write persists the file with an fsync before the leader uses the new list.
 
 #### Flags and methods

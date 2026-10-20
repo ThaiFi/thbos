@@ -165,6 +165,8 @@ pub enum DepositAllowlistError {
     Unauthorized { signer: Address },
     #[error("nonce {nonce} does not exceed the last applied nonce {applied}")]
     StaleNonce { nonce: u64, applied: u64 },
+    #[error("the allowlist is uninitialized; the first write must replace the whole list")]
+    Uninitialized,
     #[error("allowlist would hold {len} addresses; the limit is {MAX_DEPOSIT_ALLOWLIST_LEN}")]
     TooLarge { len: usize },
     #[error("failed to persist the allowlist: {0}")]
@@ -345,9 +347,13 @@ impl DepositAllowlist {
         }
     }
 
-    /// Add or remove `addresses`, persisting the result before it takes effect.
+    /// Add or remove `addresses`, persisting the result before it takes effect. Fails while the
+    /// list is uninitialized, because a partial first write would stop crediting everyone else.
     pub fn set(&self, addresses: &[Address], allowed: bool) -> Result<(), DepositAllowlistError> {
         self.update(|state| {
+            if !state.initialized {
+                return Err(DepositAllowlistError::Uninitialized);
+            }
             let mut next = state.clone();
             apply_set(&mut next.addresses, addresses, allowed);
             Ok(Some(next))
@@ -366,6 +372,7 @@ impl DepositAllowlist {
 
     /// Apply `write` if the admin signed it, its deadline has not passed, and its nonce exceeds
     /// the last applied one. A retry of the last applied write succeeds without reapplying it.
+    /// Only a replacement can initialize the list.
     pub(crate) fn apply_signed(&self, write: SignedWrite) -> Result<(), DepositAllowlistError> {
         let hash = self.inner.admin.authorize(&write)?;
         self.update(|state| {
@@ -377,6 +384,9 @@ impl DepositAllowlist {
                     nonce: write.nonce,
                     applied: state.nonce,
                 });
+            }
+            if !state.initialized && matches!(write.write, Write::Set { .. }) {
+                return Err(DepositAllowlistError::Uninitialized);
             }
             let mut next = State {
                 nonce: write.nonce,
@@ -701,7 +711,29 @@ mod tests {
         );
         assert_eq!(decryptions, vec![valid_decryption()]);
 
-        allowlist.set(&[ALICE, BOB], true).unwrap();
+        // Only a full replacement initializes the list: a first add or remove would stop
+        // crediting every sender outside it.
+        for allowed in [true, false] {
+            assert_eq!(
+                allowlist.apply_signed(sign(set(&[ALICE], allowed), 1)),
+                Err(DepositAllowlistError::Uninitialized)
+            );
+        }
+        assert_eq!(
+            allowlist.set(&[ALICE], true),
+            Err(DepositAllowlistError::Uninitialized)
+        );
+        assert!(!allowlist.status().initialized);
+        assert!(!path.exists());
+
+        allowlist
+            .apply_signed(sign(
+                Write::Replace {
+                    addresses: vec![ALICE, BOB],
+                },
+                3,
+            ))
+            .unwrap();
         allowlist
             .apply_signed(sign(set(&[ALICE], false), 7))
             .unwrap();
