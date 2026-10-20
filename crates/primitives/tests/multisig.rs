@@ -368,7 +368,7 @@ fn sixty_five_byte_owners_remain_untyped() {
             vec![primitive],
         );
         let decoded = MultisigSignature::decode(&mut encoded.as_slice()).unwrap();
-        assert_eq!(decoded.signatures(), [expected].as_slice());
+        assert_eq!(decoded.signatures(), [expected]);
     }
 }
 
@@ -779,46 +779,41 @@ fn multisig_signature_construction_reports_the_first_broken_rule() {
         pub_key_y: B256::ZERO,
     });
 
-    for (account, config, signatures, expected) in [
+    for (constructed, expected) in [
         // The account comes before the config and the approvals.
         (
-            Address::ZERO,
-            empty_config.clone(),
-            Vec::new(),
+            MultisigSignature::try_new(Address::ZERO, empty_config.clone(), Vec::new()),
             MultisigSignatureError::ZeroAccount,
         ),
         // The config comes before the approvals.
         (
-            account,
-            empty_config,
-            Vec::new(),
+            MultisigSignature::try_new(account, empty_config, Vec::new()),
             MultisigSignatureError::InvalidConfig(MultisigConfigError::EmptyOwners),
         ),
         // Initial self-ownership is checked against the named account.
         (
-            account,
-            sorted_secp_config(&[(account, 1)], 1),
-            vec![valid_owner_signature()],
+            MultisigSignature::try_new(
+                account,
+                sorted_secp_config(&[(account, 1)], 1),
+                vec![valid_owner_signature()],
+            ),
             MultisigSignatureError::InvalidConfig(MultisigConfigError::AccountIsOwner),
         ),
         (
-            account,
-            config.clone(),
-            Vec::new(),
+            MultisigSignature::try_new(account, config.clone(), Vec::new()),
             MultisigSignatureError::EmptySignatures,
         ),
         // The approval count comes before each approval's size.
         (
-            account,
-            config,
-            vec![oversized; MAX_MULTISIG_SIGNATURES + 1],
+            MultisigSignature::try_new(
+                account,
+                config,
+                vec![oversized; MAX_MULTISIG_SIGNATURES + 1],
+            ),
             MultisigSignatureError::TooManySignatures,
         ),
     ] {
-        assert_eq!(
-            MultisigSignature::try_new(account, config, signatures),
-            Err(expected)
-        );
+        assert_eq!(constructed, Err(expected));
     }
 }
 
@@ -1043,7 +1038,7 @@ proptest! {
             decode_exact::<MultisigSignature>(encoded_multisig(account, &config, approvals.clone()));
         match approvals
             .iter()
-            .map(|approval| PrimitiveSignature::from_bytes(approval))
+            .map(|approval| decode_exact::<PrimitiveSignature>(alloy_rlp::encode(approval.as_slice())))
             .collect::<Result<Vec<_>, _>>()
         {
             // Accepted approvals decode in order and re-encode canonically.
@@ -1065,7 +1060,7 @@ proptest! {
                 prop_assert_eq!(decode_exact::<MultisigSignature>(reencoded), Ok(decoded));
             }
             // The first rejected approval's error is the signature's.
-            Err(message) => prop_assert_eq!(decoded, Err(RlpError::Custom(message))),
+            Err(error) => prop_assert_eq!(decoded, Err(error)),
         }
     }
 }
