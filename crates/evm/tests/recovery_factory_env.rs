@@ -15,7 +15,7 @@ fn configured_genesis_factory_reaches_the_block_env() {
     genesis
         .config
         .extra_fields
-        .insert("multisigRecoveryFactory".into(), json!(factory));
+        .insert("recoveryFactory".into(), json!(factory));
     let evm_config = TempoEvmConfig::new(Arc::new(TempoChainSpec::from_genesis(genesis)));
 
     let parent = TempoHeader {

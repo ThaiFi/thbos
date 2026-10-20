@@ -7,7 +7,7 @@ use alloy_rlp::{Decodable, Error as RlpError};
 pub const SIGNATURE_TYPE_CONFIGURABLE_ACCOUNT: u8 = 0x05;
 
 /// Domain prefix for configurable account owner approvals.
-pub const CONFIGURABLE_ACCOUNT_SIGNATURE_DOMAIN: &[u8] = b"tempo:multisig:signature";
+pub const CONFIGURABLE_ACCOUNT_SIGNATURE_DOMAIN: &[u8] = b"tempo:configurable-account:signature";
 
 /// Maximum number of owners allowed in an account config.
 pub const MAX_CONFIGURABLE_ACCOUNT_OWNERS: usize = 48;
@@ -19,10 +19,10 @@ pub const MAX_CONFIGURABLE_ACCOUNT_SIGNATURES: usize = 8;
 pub const MAX_CONFIGURABLE_ACCOUNT_OWNER_SIGNATURE_BYTES: usize = 1 + MAX_WEBAUTHN_SIGNATURE_LENGTH;
 
 /// Domain prefix for configurable account CREATE2 salt derivation.
-pub const CONFIGURABLE_ACCOUNT_DOMAIN: &[u8] = b"tempo:multisig:account";
+pub const CONFIGURABLE_ACCOUNT_DOMAIN: &[u8] = b"tempo:configurable-account:account";
 
 /// Domain prefix for the salt of an account migrated in place (TIP-1113).
-pub const CONFIGURABLE_ACCOUNT_UPGRADE_DOMAIN: &[u8] = b"tempo:multisig:upgrade";
+pub const CONFIGURABLE_ACCOUNT_UPGRADE_DOMAIN: &[u8] = b"tempo:configurable-account:upgrade";
 
 /// Keccak-256 of the account proxy creation code. The creation code is identical for every
 /// account, takes no constructor arguments and embeds the beacon address as a constant.
@@ -37,7 +37,7 @@ pub const ACCOUNT_PROXY_INIT_CODE_HASH: B256 =
 pub const CONFIGURABLE_ACCOUNT_CREATE2_PREIMAGE_LEN: usize = 1 + 20 + 32 + 32;
 
 /// Domain prefix for configurable account configuration commitments.
-pub const CONFIGURABLE_ACCOUNT_CONFIG_DOMAIN: &[u8] = b"tempo:multisig:config";
+pub const CONFIGURABLE_ACCOUNT_CONFIG_DOMAIN: &[u8] = b"tempo:configurable-account:config";
 
 /// Configurable account owner entry.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, alloy_rlp::RlpEncodable, alloy_rlp::RlpDecodable)]

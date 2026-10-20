@@ -15,7 +15,7 @@ fn genesis_info_reads_the_configured_recovery_factory() {
     genesis
         .config
         .extra_fields
-        .insert("multisigRecoveryFactory".into(), json!(factory));
+        .insert("recoveryFactory".into(), json!(factory));
 
     let spec = TempoChainSpec::from_genesis(genesis);
 

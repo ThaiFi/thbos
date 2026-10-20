@@ -49,10 +49,7 @@ macro_rules! tempo_genesis_info {
                 )*
                 /// Development-only TIP-1110 factory; public networks remain unconfigured.
                 // TODO: set the canonical TIP-1110 recovery factory for public networks before T14 activation
-                #[serde(
-                    rename = "multisigRecoveryFactory",
-                    skip_serializing_if = "Option::is_none"
-                )]
+                #[serde(skip_serializing_if = "Option::is_none")]
                 recovery_factory: Option<Address>,
             }
 

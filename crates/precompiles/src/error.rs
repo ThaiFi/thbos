@@ -173,7 +173,7 @@ impl From<ConfigurableAccountConfigError> for TempoPrecompileError {
             ConfigurableAccountConfigError::EmptyOwners
             | ConfigurableAccountConfigError::ZeroOwner
             | ConfigurableAccountConfigError::AccountIsOwner => {
-                ConfigurableAccountError::invalid_multisig_owner()
+                ConfigurableAccountError::invalid_configurable_account_owner()
             }
             ConfigurableAccountConfigError::TooManyOwners => {
                 ConfigurableAccountError::too_many_owners()

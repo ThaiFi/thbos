@@ -640,23 +640,23 @@ fn configurable_account_hashes_follow_vectors_and_documented_layout() {
     assert_eq!(
         initial.account_salt_preimage().map(keccak256),
         Ok(b256!(
-            "7162e370e58784e6b33d61878820d1497eeaf4f68e00b2cfc00a2f3b1dbb00da"
+            "641ad6eccc3adf35fac828d5cbb727e2489c904a905420e794e8275b6150bfe1"
         ))
     );
     assert_eq!(
         initial.derive_account(TEST_FACTORY),
-        Ok(address!("d62b59cb4e41a0dd9000c71c6663df05e2bb910d"))
+        Ok(address!("87c346a9029d675f296db533b12e146439cf20d5"))
     );
     assert_eq!(
         initial.commitment(),
         Ok(b256!(
-            "a9e7d1e2ad25e227a4de5f38f3bba31d854ffc8efec46aaa8649097a516bb4ee"
+            "79cc3a5fcbe18cb8cbbd2b41393750ccf3bbc20533a846755767fa10068ae01d"
         ))
     );
     let digest_account = address!("91847576f406d0842ad7c1a0c97c22a122e64278");
     assert_eq!(
         configurable_account_digest(inner_digest, digest_account, 0),
-        b256!("7a62ef46efdf76a6a0ab6c38c5fdeda2169d6a0de3643bb9912a4fbce881a870")
+        b256!("e6fa513b5ab32da6f116443f13191096bce77b4850f4d51f3aa436fa7650c964")
     );
     let current = ConfigurableAccountSignature::try_new(
         digest_account,
@@ -666,17 +666,17 @@ fn configurable_account_hashes_follow_vectors_and_documented_layout() {
     .unwrap();
     assert_eq!(
         current.digest(inner_digest),
-        b256!("cceb022fd342beddcf6583e680c18a34936212276a680f026e52728b5ebb722b")
+        b256!("285c850cb2803beb10f2f212dac73784a1a03b3991ba79081b24bfa91beb9182")
     );
     assert_eq!(
         current.config_commitment(),
-        b256!("6237ca5930f2265d4fb70a0305dd6ceea4df227053b4a62c304489ede946a2f8")
+        b256!("ee570a0f26f17b41cdf0952a04ee01ea23495b0c0a59f9c904b0d60cb76453c3")
     );
     // The most owners, each of weight 1, at threshold 8, reproduced the same way.
     assert_eq!(
         configurable_account_config(0, 8, &indexed_owners(MAX_CONFIGURABLE_ACCOUNT_OWNERS, 1))
             .derive_account(TEST_FACTORY),
-        Ok(address!("213bb3642432619a5327c0c6c60bda3ca2bbe59c"))
+        Ok(address!("7a4279bb3f1b8b54d703484317f64eae6814e827"))
     );
 
     // The documented preimage layouts, built by hand.
