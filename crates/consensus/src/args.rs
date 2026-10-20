@@ -731,10 +731,18 @@ mod tests {
             .split("--consensus.verification-mode <VERIFICATION_MODE>")
             .nth(1)
             .unwrap();
-        let help = flag.split("\n      --").next().unwrap().trim();
+        let help = flag
+            .split("\n      --")
+            .next()
+            .unwrap()
+            .trim()
+            .lines()
+            .map(str::trim)
+            .collect::<Vec<_>>()
+            .join("\n");
         assert_eq!(
             help,
-            "When to complete application verification of proposed blocks.\n\n          Hardfork follows the chain schedule (immediate before T14, deferred from T14). Immediate and deferred override the schedule.\n\n          [default: hardfork]\n          [possible values: immediate, deferred, hardfork]"
+            "When to complete application verification of proposed blocks.\n\nHardfork follows the chain schedule (immediate before T14, deferred from T14). Immediate and deferred override the schedule.\n\n[default: hardfork]\n[possible values: immediate, deferred, hardfork]"
         );
     }
 
