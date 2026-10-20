@@ -29,6 +29,7 @@ use tempo_contracts::{
         ValidatorConfigError, ValidatorConfigV2Error, ZoneFactoryError,
     },
 };
+use tempo_primitives::transaction::MultisigConfigError;
 
 /// Top-level error type for all Tempo precompile operations
 #[derive(
@@ -158,6 +159,27 @@ impl From<JournalLoadErasedError> for TempoPrecompileError {
             JournalLoadError::DBError(e) => Self::Fatal(e.to_string()),
             JournalLoadError::ColdLoadSkipped => Self::OutOfGas,
         }
+    }
+}
+
+impl From<MultisigConfigError> for TempoPrecompileError {
+    fn from(error: MultisigConfigError) -> Self {
+        match error {
+            MultisigConfigError::EmptyOwners
+            | MultisigConfigError::ZeroOwner
+            | MultisigConfigError::AccountIsOwner => NativeMultisigError::invalid_multisig_owner(),
+            MultisigConfigError::TooManyOwners => NativeMultisigError::too_many_owners(),
+            MultisigConfigError::ZeroThreshold | MultisigConfigError::ThresholdExceedsWeight => {
+                NativeMultisigError::invalid_threshold()
+            }
+            MultisigConfigError::ZeroWeight | MultisigConfigError::TotalWeightExceedsMax => {
+                NativeMultisigError::invalid_weight()
+            }
+            MultisigConfigError::DuplicateOwner => NativeMultisigError::duplicate_owner(),
+            MultisigConfigError::OwnersNotAscending => NativeMultisigError::invalid_owner_order(),
+            MultisigConfigError::DerivedAccountZero => NativeMultisigError::invalid_account(),
+        }
+        .into()
     }
 }
 
