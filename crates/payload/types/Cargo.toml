@@ -19,6 +19,9 @@ workspace = true
 tempo-primitives = { workspace = true, features = ["reth-codec", "serde"] }
 
 reth-ethereum-engine-primitives.workspace = true
+# Only for its `account-ext` feature: `reth-primitives-traits/account-ext` turns on the
+# revm-state extension, but reth-node-api pulls reth-evm without its own.
+reth-evm.workspace = true
 reth-node-api.workspace = true
 reth-payload-primitives.workspace = true
 reth-primitives-traits.workspace = true
