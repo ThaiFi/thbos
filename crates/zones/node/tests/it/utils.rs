@@ -1096,6 +1096,33 @@ impl ZoneTestNode {
             true,
             additional_decryption_keys,
             None,
+            None,
+        )
+        .await
+    }
+
+    /// Start a zone node connected to a real L1 whose engine bounces deposits from senders
+    /// missing from `deposit_allowlist`.
+    pub(crate) async fn start_from_l1_with_deposit_allowlist(
+        l1_http_url: &url::Url,
+        l1_ws_url: &url::Url,
+        portal_address: Address,
+        deposit_allowlist: zone_node::DepositAllowlist,
+    ) -> eyre::Result<Self> {
+        let (genesis, _) = build_l1_anchored_genesis(l1_http_url, portal_address).await?;
+
+        Self::launch_with_genesis_and_withdrawal_batch_interval_and_decryption_keys(
+            l1_ws_url.to_string(),
+            portal_address,
+            next_unique_chain_id(),
+            Some(genesis),
+            l1_dev_signer(),
+            8,
+            None,
+            true,
+            Vec::new(),
+            None,
+            Some(deposit_allowlist),
         )
         .await
     }
@@ -1277,6 +1304,7 @@ impl ZoneTestNode {
             spawn_engine,
             Vec::new(),
             None,
+            None,
         )
         .await
     }
@@ -1293,6 +1321,7 @@ impl ZoneTestNode {
         spawn_engine: bool,
         additional_decryption_keys: Vec<SecretKey>,
         prover_config: Option<ZoneProverConfig>,
+        deposit_allowlist: Option<zone_node::DepositAllowlist>,
     ) -> eyre::Result<Self> {
         let tasks = Runtime::test();
         let is_local_dummy_l1 = l1_ws_url == DUMMY_L1_URL;
@@ -1475,7 +1504,8 @@ impl ZoneTestNode {
                 deposit_decryption_keys,
                 portal_address,
                 None,
-            );
+            )
+            .with_deposit_allowlist(deposit_allowlist);
             node_handle
                 .node
                 .task_executor
@@ -4163,6 +4193,7 @@ async fn start_real_p2p_cluster_inner(
                 false,
                 additional_decryption_keys,
                 prover_config.clone(),
+                None,
             )
         },
     ))

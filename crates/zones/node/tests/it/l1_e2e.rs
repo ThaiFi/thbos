@@ -24,7 +24,10 @@ use tempo_contracts::zones::{
     ZonePortal, ZonePortal::Role as PortalRole,
 };
 use tempo_precompiles::{PATH_USD_ADDRESS, zone_factory::portal};
-use zone_node::dev::{ProvisionConfig, provision_zone};
+use zone_node::{
+    DepositAllowlist,
+    dev::{ProvisionConfig, provision_zone},
+};
 
 /// Longer timeout for real L1 tests — the L1 dev node produces blocks every
 /// 250ms and the L1Subscriber needs to connect, backfill, and subscribe.
@@ -2491,6 +2494,84 @@ async fn test_deposit_policy_failure_bounces_to_tempo_refund_recipient() -> eyre
         bounced,
         "expected completed encrypted deposit bounceback event"
     );
+
+    Ok(())
+}
+
+/// With portal access open, the sequencer deposit allowlist credits listed senders, bounces
+/// unlisted senders back to their Tempo refund recipient, and applies list updates without a
+/// restart.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_deposit_allowlist_bounces_unlisted_senders() -> eyre::Result<()> {
+    reth_tracing::init_test_tracing();
+
+    const AMOUNT: u128 = 1_000_000;
+
+    let l1 = L1TestNode::start().await?;
+    let portal_address = l1.deploy_zone().await?;
+    l1.set_access_mode_on_portal(portal_address, false).await?;
+
+    let listed_signer = l1.signer_at(3);
+    let unlisted_signer = l1.signer_at(4);
+    let datadir = tempfile::tempdir()?;
+    let seed = datadir.path().join("seed.json");
+    std::fs::write(&seed, serde_json::to_vec(&[listed_signer.address()])?)?;
+    let allowlist =
+        DepositAllowlist::load(datadir.path().join("deposit-allowlist.json"), Some(&seed))?;
+
+    let zone = ZoneTestNode::start_from_l1_with_deposit_allowlist(
+        l1.http_url(),
+        l1.ws_url(),
+        portal_address,
+        allowlist.clone(),
+    )
+    .await?;
+    zone.wait_for_l2_tempo_finalized(0, L1_TIMEOUT).await?;
+
+    let mut listed = ZoneAccount::with_signer(listed_signer, &l1, &zone, portal_address);
+    let mut unlisted = ZoneAccount::with_signer(unlisted_signer, &l1, &zone, portal_address);
+    l1.fund_user(listed.address(), AMOUNT).await?;
+    l1.fund_user(unlisted.address(), 2 * AMOUNT).await?;
+    // Start the sequencer only after L1 setup so its shared signer cannot race the funding.
+    let _sequencer = spawn_sequencer(&l1, &zone, portal_address, l1.dev_signer()).await;
+
+    listed.deposit(AMOUNT, L1_TIMEOUT, &zone).await?;
+
+    let bounce_from = unlisted.submit_deposit(AMOUNT).await?;
+    let portal = ZonePortal::new(portal_address, l1.provider());
+    poll_until(
+        Duration::from_secs(60),
+        Duration::from_millis(250),
+        "unlisted deposit bounce-back on L1",
+        || {
+            let portal = &portal;
+            let refund_recipient = unlisted.address();
+            async move {
+                let bounced = portal
+                    .DepositBounceBack_filter()
+                    .from_block(bounce_from)
+                    .query()
+                    .await?
+                    .into_iter()
+                    .any(|(event, _)| {
+                        event.tempoRefundRecipient == refund_recipient
+                            && event.amount + event.bouncebackFee == AMOUNT
+                    });
+                Ok(bounced.then_some(()))
+            }
+        },
+    )
+    .await?;
+    assert_eq!(
+        zone.balance_of(ZONE_TOKEN_ADDRESS, unlisted.address())
+            .await?,
+        U256::ZERO,
+        "unlisted depositor was credited"
+    );
+
+    allowlist.set(&[unlisted.address()], true)?;
+    let balance = unlisted.deposit(AMOUNT, L1_TIMEOUT, &zone).await?;
+    assert_eq!(balance, U256::from(AMOUNT));
 
     Ok(())
 }
