@@ -17110,6 +17110,7 @@ dependencies = [
  "reqwest 0.13.5",
  "reth-chain-state",
  "reth-chainspec",
+ "reth-consensus",
  "reth-eth-wire-types",
  "reth-ethereum",
  "reth-evm",
