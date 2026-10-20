@@ -473,7 +473,8 @@ pub enum ConfigurableAccountSignatureError {
     EmptySignatures,
     /// The owner approval list exceeds [`MAX_CONFIGURABLE_ACCOUNT_SIGNATURES`].
     TooManySignatures,
-    /// An encoded primitive owner approval exceeds [`MAX_CONFIGURABLE_ACCOUNT_OWNER_SIGNATURE_BYTES`].
+    /// An encoded primitive owner approval exceeds
+    /// [`MAX_CONFIGURABLE_ACCOUNT_OWNER_SIGNATURE_BYTES`].
     OwnerSignatureTooLarge,
 }
 
@@ -667,8 +668,8 @@ impl ConfigurableAccountWeightAccumulator {
 /// Computes the digest that configurable account owners approve.
 ///
 /// This free function is also used while constructing a signature, before a
-/// [`ConfigurableAccountSignature`] exists; [`ConfigurableAccountSignature::digest`] supplies the account and
-/// version from an existing value.
+/// [`ConfigurableAccountSignature`] exists; [`ConfigurableAccountSignature::digest`] supplies the
+/// account and version from an existing value.
 pub fn configurable_account_digest(
     inner_digest: B256,
     account: Address,

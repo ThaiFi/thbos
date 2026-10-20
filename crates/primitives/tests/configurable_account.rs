@@ -1137,11 +1137,15 @@ proptest! {
     #[test]
     fn proptest_configurable_account_signature_decode_follows_owner_approval_decoding(
         account in any::<Address>().prop_filter("configurable accounts are nonzero", |account| !account.is_zero()),
-        approvals in prop::collection::vec(owner_approval_bytes(), 1..=MAX_CONFIGURABLE_ACCOUNT_SIGNATURES),
+        approvals in prop::collection::vec(
+            owner_approval_bytes(),
+            1..=MAX_CONFIGURABLE_ACCOUNT_SIGNATURES,
+        ),
     ) {
         let config = current_config(indexed_owner(2));
-        let decoded =
-            decode_exact::<ConfigurableAccountSignature>(encoded_configurable_account_signature(account, &config, approvals.clone()));
+        let decoded = decode_exact::<ConfigurableAccountSignature>(
+            encoded_configurable_account_signature(account, &config, approvals.clone()),
+        );
         match approvals
             .iter()
             .map(|approval| decode_exact::<PrimitiveSignature>(alloy_rlp::encode(approval.as_slice())))
@@ -1163,7 +1167,10 @@ proptest! {
                     &reencoded,
                     &encoded_configurable_account_signature(account, &config, canonical_approvals)
                 );
-                prop_assert_eq!(decode_exact::<ConfigurableAccountSignature>(reencoded), Ok(decoded));
+                prop_assert_eq!(
+                    decode_exact::<ConfigurableAccountSignature>(reencoded),
+                    Ok(decoded)
+                );
             }
             // The first rejected approval's error is the signature's.
             Err(error) => prop_assert_eq!(decoded, Err(error)),
