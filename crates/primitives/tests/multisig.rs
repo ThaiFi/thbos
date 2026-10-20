@@ -334,6 +334,18 @@ fn config_validation_reports_the_first_broken_rule() {
             Ok(241),
         ),
         (
+            "the eight heaviest owners reach the threshold, light owner in the middle",
+            multisig_config(0, 240, &one_light_owner(4)),
+            None,
+            Ok(241),
+        ),
+        (
+            "the eight heaviest owners reach the threshold, light owner last",
+            multisig_config(0, 240, &one_light_owner(MAX_MULTISIG_SIGNATURES)),
+            None,
+            Ok(241),
+        ),
+        (
             "a threshold past the eight heaviest owners",
             multisig_config(0, 241, &one_light_owner(0)),
             None,
@@ -376,6 +388,13 @@ fn config_validation_reports_the_first_broken_rule() {
             }
             None => {
                 assert_eq!(config.validate(), expected, "{case}");
+                // Deriving the account and committing to the config validate it first.
+                assert_eq!(
+                    config.derive_account(TEST_FACTORY).err(),
+                    expected.err(),
+                    "{case}"
+                );
+                assert_eq!(config.commitment().err(), expected.err(), "{case}");
             }
         }
     }
@@ -632,6 +651,17 @@ fn multisig_hashes_follow_vectors_and_documented_layout() {
         multisig_digest(inner_digest, account, config.version),
         "the version sets the digest"
     );
+
+    // Each preimage bounds the owner count on its own.
+    let oversized = multisig_config(0, 1, &indexed_owners(MAX_MULTISIG_OWNERS + 1, 1));
+    assert_eq!(
+        oversized.account_salt_preimage(),
+        Err(MultisigConfigError::TooManyOwners)
+    );
+    assert_eq!(
+        oversized.commitment_preimage(),
+        Err(MultisigConfigError::TooManyOwners)
+    );
 }
 
 #[test]
@@ -691,6 +721,12 @@ fn multisig_quorum_reports_the_first_broken_rule() {
             u8::MAX,
             [indexed_owners(MAX_MULTISIG_SIGNATURES, 1), vec![light]].concat(),
             Err(MultisigQuorumError::TooManySignatures),
+        ),
+        (
+            "as many approvals as the cap",
+            u8::try_from(MAX_MULTISIG_SIGNATURES).unwrap(),
+            indexed_owners(MAX_MULTISIG_SIGNATURES, 1),
+            Ok(()),
         ),
         (
             "an approval after quorum",
