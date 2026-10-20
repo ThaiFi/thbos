@@ -719,6 +719,40 @@ fn a_context_header_lands_where_its_hardfork_is_active() {
 }
 
 #[test]
+fn context_headers_pass_the_nodes_header_validation_at_every_hardfork() {
+    use reth_consensus::HeaderValidator as _;
+    let spec = Arc::new(chain::chain_spec(&ChainSpecInput::default()).unwrap());
+    let consensus = TempoConsensus::new(Arc::clone(&spec));
+    for &hardfork in TempoHardfork::VARIANTS {
+        let context = BlockHeaderInput::Context(context(hardfork, 0));
+        let header = chain::header(&spec, &context).unwrap();
+        let header = reth_primitives_traits::SealedHeader::seal_slow(header);
+        let result = consensus.validate_header(&header);
+        assert!(result.is_ok(), "{hardfork:?}: {result:?}");
+    }
+}
+
+#[test]
+fn headers_the_node_rejects_are_rejected() {
+    let mut context = context(TempoHardfork::T4, 0);
+    context.timestamp_millis_part = 1000;
+    let outcome = run(
+        genesis(),
+        vec![block(BlockHeaderInput::Context(context), Vec::new())],
+    );
+    assert_eq!(outcome.error, ErrorClass::Rejected);
+
+    let tx = transfer(CHAIN_ID, 0, 7);
+    let rlp = rlp_header(&tx, |header| header.general_gas_limit += 1);
+    let outcome = run(
+        genesis(),
+        vec![block(BlockHeaderInput::Rlp(rlp.into()), vec![tx])],
+    );
+    assert_eq!(outcome.error, ErrorClass::Rejected);
+    assert!(outcome.receipts.is_empty());
+}
+
+#[test]
 fn transaction_inputs_decode_and_recover_without_executing() {
     let outcome = |tx: Bytes, sender: Option<Address>| {
         let input = TempoHarnessInput::Transaction(TempoTransactionInput { tx, sender });

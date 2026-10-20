@@ -1,6 +1,7 @@
 //! The chain blocks execute on, and the headers they execute with.
 
 use alloy_consensus::{Header, constants::EMPTY_ROOT_HASH};
+use alloy_eips::eip7685::EMPTY_REQUESTS_HASH;
 use alloy_primitives::B256;
 use reth_chainspec::ForkCondition;
 use tempo_chainspec::{
@@ -62,11 +63,15 @@ fn context_header(spec: &TempoChainSpec, context: &BlockContextInput) -> TempoHe
         .min();
     let timestamp = context.timestamp.max(start);
     let timestamp = end.map_or(timestamp, |end| timestamp.min(end - 1));
-    let fork = spec.tempo_hardfork_at(timestamp);
 
+    let shared_gas_limit = spec.shared_gas_limit_at(timestamp, context.gas_limit);
     TempoHeader {
-        general_gas_limit: fork.general_gas_limit().unwrap_or(context.gas_limit),
-        shared_gas_limit: fork.shared_gas_limit(context.gas_limit),
+        general_gas_limit: spec.general_gas_limit_at(
+            timestamp,
+            context.gas_limit,
+            shared_gas_limit,
+        ),
+        shared_gas_limit,
         timestamp_millis_part: context.timestamp_millis_part,
         inner: Header {
             number: context.block_number,
@@ -78,6 +83,7 @@ fn context_header(spec: &TempoChainSpec, context: &BlockContextInput) -> TempoHe
             blob_gas_used: Some(0),
             excess_blob_gas: Some(0),
             withdrawals_root: Some(EMPTY_ROOT_HASH),
+            requests_hash: Some(EMPTY_REQUESTS_HASH),
             extra_data: context.extra_data.clone(),
             ..Default::default()
         },

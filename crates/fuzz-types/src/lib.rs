@@ -203,7 +203,8 @@ pub enum BlockHeaderInput {
     /// The fields a fuzzer picks. The harness fills in the rest, and moves the timestamp into the
     /// window where the requested hardfork is active.
     Context(BlockContextInput),
-    /// An RLP-encoded Tempo header, executed exactly as given.
+    /// An RLP-encoded Tempo header, executed as given if the node's header checks accept it. It is
+    /// not checked against a parent or against what the block produced.
     Rlp(Bytes),
 }
 

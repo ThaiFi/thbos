@@ -11,7 +11,7 @@ use alloy_evm::{
     block::{BlockExecutionError, BlockExecutor, TxResult as _},
 };
 use alloy_primitives::Address;
-use reth_consensus::Consensus as _;
+use reth_consensus::{Consensus as _, HeaderValidator as _};
 use reth_evm::ConfigureEvm;
 use reth_primitives_traits::{RecoveredBlock, transaction::signed::SignedTransaction as _};
 use revm::{
@@ -217,6 +217,9 @@ fn execute_block(
     block: &ExecutionBlock,
     block_index: u64,
 ) -> Result<(BundleState, BlockOutputs), ErrorClass> {
+    consensus
+        .validate_header(block.sealed_block().sealed_header())
+        .map_err(|_| ErrorClass::Rejected)?;
     consensus
         .validate_block_pre_execution(block.sealed_block())
         .map_err(|_| ErrorClass::Rejected)?;
