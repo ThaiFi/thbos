@@ -642,7 +642,7 @@ def start-e2e-local-node [
     }
 }
 
-def build-e2e-consensus-args [node_dir: string, trusted_peers: string, port: int, consensus_ip: string] {
+def build-e2e-consensus-args [node_dir: string, trusted_peers: string, port: int, consensus_ip: string, authrpc_port: int] {
     let addr = ($node_dir | path basename)
     let inferred_ip = if ($addr | str contains ":") {
         $addr | split row ":" | get 0
@@ -663,7 +663,6 @@ def build-e2e-consensus-args [node_dir: string, trusted_peers: string, port: int
 
     let execution_p2p_port = $port + 1
     let metrics_port = $port + 2
-    let authrpc_port = $port + 10003
     let discv5_port = $port + 4
 
     [
@@ -1056,20 +1055,21 @@ def run-local-e2e-phase [run: record, ctx: record] {
     if ("report.json" | path exists) { rm report.json }
     let tuning_state = if $ctx.tune { apply-system-tuning } else { { tuned: false } }
 
+    let ports = (e2e-allocate-tcp-ports)
     let a_rpc = "http://127.0.0.1:8545"
     let b_rpc = "http://127.0.0.1:8645"
-    let a_base_args = (build-base-args $genesis $ctx.a.datadir $a_log_dir "0.0.0.0" 8545 19001)
+    let a_base_args = (build-base-args $genesis $ctx.a.datadir $a_log_dir "0.0.0.0" 8545 ($ports | get 0))
         | append ["--log.file.format" "json"]
-        | append (build-e2e-consensus-args $ctx.a.node_dir $ctx.trusted_peers $ctx.a.consensus_port $ctx.a.ip)
+        | append (build-e2e-consensus-args $ctx.a.node_dir $ctx.trusted_peers $ctx.a.consensus_port $ctx.a.ip ($ports | get 2))
         | append $local_reth_args
         | append (log-filter-args $ctx.loud)
         | append (if $ctx.gas_limit != "" { ["--builder.gaslimit" $ctx.gas_limit] } else { [] })
         | append (if $ctx.samply { ["--log.samply"] } else { [] })
         | append (if $ctx.tracy != "off" { ["--log.tracy" "--log.tracy.filter" $ctx.tracy_filter] } else { [] })
         | append (benchmark-otlp-args $ctx.tracing_otlp)
-    let b_base_args = (build-base-args $genesis $ctx.b.datadir $b_log_dir "0.0.0.0" 8645 19101)
+    let b_base_args = (build-base-args $genesis $ctx.b.datadir $b_log_dir "0.0.0.0" 8645 ($ports | get 1))
         | append ["--log.file.format" "json"]
-        | append (build-e2e-consensus-args $ctx.b.node_dir $ctx.trusted_peers $ctx.b.consensus_port $ctx.b.ip)
+        | append (build-e2e-consensus-args $ctx.b.node_dir $ctx.trusted_peers $ctx.b.consensus_port $ctx.b.ip ($ports | get 3))
         | append $local_reth_args
         | append (log-filter-args $ctx.loud)
         | append (if $ctx.gas_limit != "" { ["--builder.gaslimit" $ctx.gas_limit] } else { [] })
@@ -1139,7 +1139,7 @@ def run-local-e2e-phase [run: record, ctx: record] {
     } else {
         ""
     }
-    let metrics_urls = ["a:http://127.0.0.1:19001/metrics" "b:http://127.0.0.1:19101/metrics"]
+    let metrics_urls = [$"a:http://127.0.0.1:($ports | get 0)/metrics" $"b:http://127.0.0.1:($ports | get 1)/metrics"]
         | append (if $ctx.runner_metrics_url != "" { [$"runner:($ctx.runner_metrics_url)"] } else { [] })
     let submit_rpc_url = [$a_rpc $b_rpc] | str join ","
 
@@ -1848,4 +1848,22 @@ def "main e2e" [
     if $e2e_exit != 0 {
         exit $e2e_exit
     }
+}
+
+# Reserve four distinct ephemeral listeners together, then release them immediately before startup.
+def e2e-allocate-tcp-ports [] {
+    ^node --input-type=module -e '
+        import net from "node:net";
+        const servers = [];
+        for (let i = 0; i < 4; i++) {
+            const server = net.createServer();
+            await new Promise((resolve, reject) => {
+                server.once("error", reject);
+                server.listen(0, "0.0.0.0", resolve);
+            });
+            servers.push(server);
+        }
+        console.log(JSON.stringify(servers.map(server => server.address().port)));
+        await Promise.all(servers.map(server => new Promise(resolve => server.close(resolve))));
+    ' | from json
 }
