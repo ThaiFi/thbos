@@ -394,7 +394,11 @@ where
             .config
             .verification_mode
             .is_deferred_at(&self.config.execution_node.chain_spec(), boundary_timestamp);
-        let application = self.config.application.for_epoch(deferred);
+        let application = if deferred {
+            self.config.application.to_deferred()
+        } else {
+            self.config.application.to_immediate()
+        };
         self.metrics
             .deferred_verification
             .metric()

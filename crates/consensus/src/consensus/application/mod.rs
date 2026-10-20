@@ -75,13 +75,14 @@ where
         }
     }
 
-    /// Selects a fixed verification wrapper for one epoch.
-    pub(crate) fn for_epoch(&self, deferred: bool) -> EpochApplication<E> {
-        if deferred {
-            EpochApplication::Deferred(self.deferred.clone())
-        } else {
-            EpochApplication::Immediate(self.immediate.clone())
-        }
+    /// Clones the immediate verification wrapper for one epoch.
+    pub(crate) fn to_immediate(&self) -> EpochApplication<E> {
+        EpochApplication::Immediate(self.immediate.clone())
+    }
+
+    /// Clones the deferred verification wrapper for one epoch.
+    pub(crate) fn to_deferred(&self) -> EpochApplication<E> {
+        EpochApplication::Deferred(self.deferred.clone())
     }
 }
 
