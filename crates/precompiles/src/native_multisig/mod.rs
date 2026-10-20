@@ -50,6 +50,7 @@ impl NativeMultisig {
     ) -> Result<Address> {
         let factory = self.factory()?;
         let config = config(salt, 0, threshold, owners);
+        // Reject an invalid configuration before charging the proof hashing gas.
         config.validate()?;
         self.storage
             .deduct_gas(initial_account_proof_gas(&config)?)?;
