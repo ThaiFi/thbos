@@ -36,8 +36,6 @@ use tempo_primitives::transaction::MultisigConfigError;
     Debug, Clone, PartialEq, Eq, thiserror::Error, derive_more::From, derive_more::TryInto,
 )]
 pub enum TempoPrecompileError {
-    #[error("native multisig error: {0:?}")]
-    NativeMultisigError(NativeMultisigError),
     /// Stablecoin DEX error
     #[error("Stablecoin DEX error: {0:?}")]
     StablecoinDEX(StablecoinDEXError),
@@ -118,6 +116,9 @@ pub enum TempoPrecompileError {
     #[error("ZoneFactory error: {0:?}")]
     ZoneFactoryError(ZoneFactoryError),
 
+    #[error("native multisig error: {0:?}")]
+    NativeMultisigError(NativeMultisigError),
+
     /// Gas limit exceeded during precompile execution.
     #[error("Gas limit exceeded")]
     OutOfGas,
@@ -195,7 +196,6 @@ impl TempoPrecompileError {
             Self::TIP20ChannelReserveError(e) => e.selector(),
             Self::NonceError(e) => e.selector(),
             Self::TIP20Factory(e) => e.selector(),
-            Self::NativeMultisigError(e) => e.selector(),
             Self::RolesAuthError(e) => e.selector(),
             Self::AddrRegistryError(e) => e.selector(),
             Self::TIPFeeAMMError(e) => e.selector(),
@@ -209,6 +209,7 @@ impl TempoPrecompileError {
             Self::StorageCreditsError(e) => e.selector(),
             Self::CurrentCommitteeError(e) => e.selector(),
             Self::ZoneFactoryError(e) => e.selector(),
+            Self::NativeMultisigError(e) => e.selector(),
             Self::UnknownFunctionSelector(selector) => *selector,
             Self::Panic(_) | Self::StorageDeltaUnderflow(_) => Panic::SELECTOR,
             Self::OutOfGas | Self::StaticCallNotAllowed | Self::Fatal(_) => [0, 0, 0, 0],
@@ -225,8 +226,7 @@ impl TempoPrecompileError {
             | Self::Fatal(_)
             | Self::Panic(_)
             | Self::StorageDeltaUnderflow(_) => true,
-            Self::NativeMultisigError(_)
-            | Self::StablecoinDEX(_)
+            Self::StablecoinDEX(_)
             | Self::TIP20(_)
             | Self::TIP20ChannelReserveError(_)
             | Self::NonceError(_)
@@ -244,6 +244,7 @@ impl TempoPrecompileError {
             | Self::StorageCreditsError(_)
             | Self::CurrentCommitteeError(_)
             | Self::ZoneFactoryError(_)
+            | Self::NativeMultisigError(_)
             | Self::UnknownFunctionSelector(_) => false,
         }
     }
@@ -275,7 +276,6 @@ impl TempoPrecompileError {
     /// - `PrecompileError::Fatal` — if the variant is [`Fatal`](Self::Fatal)
     pub fn into_precompile_result(self, gas: u64, reservoir: u64) -> PrecompileResult {
         let bytes = match self {
-            Self::NativeMultisigError(e) => e.abi_encode().into(),
             Self::StablecoinDEX(e) => e.abi_encode().into(),
             Self::TIP20(e) => e.abi_encode().into(),
             Self::TIP20Factory(e) => e.abi_encode().into(),
@@ -308,6 +308,7 @@ impl TempoPrecompileError {
             Self::StorageCreditsError(e) => e.abi_encode().into(),
             Self::CurrentCommitteeError(e) => e.abi_encode().into(),
             Self::ZoneFactoryError(e) => e.abi_encode().into(),
+            Self::NativeMultisigError(e) => e.abi_encode().into(),
             Self::OutOfGas => {
                 return Ok(PrecompileOutput::halt(PrecompileHalt::OutOfGas, reservoir));
             }
