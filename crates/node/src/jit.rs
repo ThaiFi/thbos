@@ -10,7 +10,7 @@ pub(crate) fn backend(
     let defaults = tempo_evm::jit::RuntimeTuning::default();
     let metrics = std::sync::Arc::new(tempo_evm::jit::Evm2Metrics::default());
     let backend = tempo_evm::jit::JitBackend::new(tempo_evm::jit::RuntimeConfig {
-        enabled: args.enabled,
+        enabled: args.enabled || args.blocking,
         blocking: args.blocking,
         debug_assertions: args.debug,
         single_error: false,
