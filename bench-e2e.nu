@@ -1395,7 +1395,7 @@ def "main e2e" [
     --bench-args: string = ""                           # Additional txgen generate arguments
     --baseline-env: string = ""                         # Environment vars for baseline node phases
     --feature-env: string = ""                          # Environment vars for feature node phases
-    --bench-env: string = ""                            # Environment vars for the sender process
+    --bench-env: string = "RUST_LOG=error"              # Environment vars for the sender process
     --baseline-name: string = ""                         # Baseline display name for summary
     --feature-name: string = ""                          # Feature display name for summary
     --baseline-hardfork: string = ""                     # Latest active hardfork for baseline phases
