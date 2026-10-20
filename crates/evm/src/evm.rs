@@ -77,6 +77,20 @@ impl TempoEvmFactory {
         ext.fee_manager = self.fee_manager.clone();
         ext
     }
+
+    /// Installs compiled execution for the configured Tempo hardfork.
+    #[cfg(feature = "jit")]
+    pub(crate) fn configure_jit(&self, evm: &mut TempoEvm<'_>) {
+        let spec = evm.config_spec_id();
+        if let Some((backend, expected_spec)) = &self.jit
+            && spec == *expected_spec
+            && spec.is_t1c()
+        {
+            evm.set_interpreter_runner(evm2_jit_runtime::evm2_evm::JitInterpreterRunner::new(
+                backend.clone(),
+            ));
+        }
+    }
 }
 
 impl reth_evm_ethereum::EvmFactory for TempoEvmFactory {
@@ -111,14 +125,7 @@ impl reth_evm_ethereum::EvmFactory for TempoEvmFactory {
         *evm.ext_mut() = ext;
         evm.set_precompiles(precompiles);
         #[cfg(feature = "jit")]
-        if let Some((backend, expected_spec)) = &self.jit
-            && spec == *expected_spec
-            && spec.is_t1c()
-        {
-            evm.set_interpreter_runner(evm2_jit_runtime::evm2_evm::JitInterpreterRunner::new(
-                backend.clone(),
-            ));
-        }
+        self.configure_jit(evm);
     }
 }
 

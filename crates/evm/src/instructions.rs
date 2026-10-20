@@ -139,7 +139,10 @@ pub(crate) fn sstore_inner(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{TempoBlockEnv, TempoEvmExt, TempoTxEnv, build_tempo_evm};
+    use crate::{
+        TempoBlockEnv, TempoEvmConfig, TempoEvmEnv, TempoEvmExt, TempoEvmFactory, TempoTxEnv,
+        build_tempo_evm, tempo_execution_config, test_utils::test_chainspec,
+    };
     use alloy_consensus::{Signed, TxLegacy, transaction::Recovered};
     use alloy_primitives::{Bytes, Signature, TxKind};
     use evm2::{
@@ -149,6 +152,7 @@ mod tests {
         evm::{AccountInfo, InMemoryDB, StateChangeSource, precompile::NoPrecompiles},
         interpreter::MessageExt,
     };
+    use reth_evm::BlockExecutorFactory;
     use reth_execution_types::{BlockState, TransactionChanges, native_account};
     use tempo_chainspec::hardfork::TempoHardfork;
     use tempo_precompiles::{STORAGE_CREDITS_ADDRESS, storage_credits::StorageCredits};
@@ -219,31 +223,36 @@ mod tests {
             &U256::from(initial_credit),
         );
 
-        let mut evm = build_tempo_evm(
+        let env = TempoEvmEnv::new_with_version(
             TempoHardfork::T7,
-            1,
             TempoBlockEnv::default(),
-            database,
-            NoPrecompiles::default(),
-            TempoEvmExt::default(),
+            *tempo_execution_config(TempoHardfork::T7, 1).version(),
         );
+        let factory =
+            TempoEvmFactory::new_with_precompiles(|_, _| Box::new(NoPrecompiles::default()));
         #[cfg(feature = "jit")]
         let jit_backend = if _jit {
-            let backend = crate::jit::JitBackend::new(crate::jit::RuntimeConfig {
-                blocking: true,
-                single_error: false,
-                gas_params: Some(evm.version().gas_params),
-                host: crate::jit::host_config(),
-                ..Default::default()
-            })
-            .unwrap();
-            evm.set_interpreter_runner(evm2_jit_runtime::evm2_evm::JitInterpreterRunner::new(
-                backend.clone(),
-            ));
-            Some(backend)
+            Some(
+                crate::jit::JitBackend::new(crate::jit::RuntimeConfig {
+                    blocking: true,
+                    single_error: false,
+                    gas_params: Some(env.version.gas_params),
+                    host: crate::jit::host_config(),
+                    ..Default::default()
+                })
+                .unwrap(),
+            )
         } else {
             None
         };
+        #[cfg(feature = "jit")]
+        let factory = if let Some(backend) = &jit_backend {
+            TempoEvmFactory::with_jit(backend.clone(), TempoHardfork::T7)
+        } else {
+            factory
+        };
+        let config = TempoEvmConfig::new(test_chainspec()).with_evm_factory(factory);
+        let mut evm = config.evm_with_env(database, env);
         let tx = TempoTxEnv::from(Recovered::new_unchecked(
             TempoTxEnvelope::Legacy(Signed::new_unhashed(
                 TxLegacy {
