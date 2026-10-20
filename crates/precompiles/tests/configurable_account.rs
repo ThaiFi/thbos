@@ -20,7 +20,7 @@ use tempo_evm::{TempoBlockEnv, evm::TempoEvm};
 use tempo_precompiles::{
     Precompile,
     configurable_account::{
-        ConfigurableAccount, UpgradeEligibility, initial_account_proof_gas, valid_account,
+        ConfigurableAccount, UpgradeEligibility, config, initial_account_proof_gas, valid_account,
     },
     input_cost,
     storage::{
@@ -29,12 +29,9 @@ use tempo_precompiles::{
 };
 use tempo_primitives::{
     MasterId, TempoAddressExt, UserTag,
-    transaction::{
-        ConfigurableAccountConfig, ConfigurableAccountOwner,
-        configurable_account::{
-            CONFIGURABLE_ACCOUNT_CREATE2_PREIMAGE_LEN, CONFIGURABLE_ACCOUNT_UPGRADE_DOMAIN,
-            MAX_CONFIGURABLE_ACCOUNT_OWNERS,
-        },
+    transaction::configurable_account::{
+        CONFIGURABLE_ACCOUNT_CREATE2_PREIMAGE_LEN, CONFIGURABLE_ACCOUNT_UPGRADE_DOMAIN,
+        MAX_CONFIGURABLE_ACCOUNT_OWNERS,
     },
 };
 
@@ -55,26 +52,6 @@ fn weighted_owners(
         .iter()
         .map(|&(owner, weight)| IConfigurableAccount::ConfigurableAccountOwner { owner, weight })
         .collect()
-}
-
-fn config(
-    salt: B256,
-    version: u64,
-    threshold: u8,
-    owners: &[IConfigurableAccount::ConfigurableAccountOwner],
-) -> ConfigurableAccountConfig {
-    ConfigurableAccountConfig {
-        salt,
-        version,
-        threshold,
-        owners: owners
-            .iter()
-            .map(|owner| ConfigurableAccountOwner {
-                owner: owner.owner,
-                weight: owner.weight,
-            })
-            .collect(),
-    }
 }
 
 fn call(sender: Address, call: impl SolCall) -> PrecompileOutput {

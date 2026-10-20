@@ -215,7 +215,8 @@ pub fn initial_account_proof_gas(config: &ConfigurableAccountConfig) -> Result<u
         .ok_or(TempoPrecompileError::OutOfGas)
 }
 
-fn config(
+/// Builds the configuration with the given `salt`, `version`, `threshold` and `owners`.
+pub fn config(
     salt: B256,
     version: u64,
     threshold: u8,
