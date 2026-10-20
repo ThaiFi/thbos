@@ -74,7 +74,8 @@ fn execute(input: &[u8], out: &mut [u8]) -> (i32, usize) {
 
 fn execute_transfers(c: &mut Criterion) {
     let mut group = c.benchmark_group("execute_transfers");
-    for count in [1, 10] {
+    // 500 transfers use ~26.7M gas, within the default 30M block gas limit.
+    for count in [1, 100, 500] {
         let input = transfers(count);
         let (_, len) = execute(&input, &mut []);
         let mut out = vec![0; len];
