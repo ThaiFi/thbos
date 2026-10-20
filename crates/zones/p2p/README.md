@@ -307,3 +307,7 @@ oversized frame.
 
 Upgrade every node before calling these methods through an rpc-follower: Commonware disconnects a
 peer that sends on a channel the receiver does not register.
+
+Each sequencer's list lives in its own `<datadir>/deposit-allowlist.json`, which consensus does
+not replicate; see the [operator runbook](../../../zones/docs/ZONES.md#sequencer-deposit-allowlist)
+for enabling the allowlist and for adding or restoring sequencers.

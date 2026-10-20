@@ -4,6 +4,11 @@
 //! bounces deposits whose L1 `sender` is not on this list by supplying zeroed decryption data,
 //! which the inbox treats as a failed decryption and refunds through the ordinary deposit
 //! bounce-back path. The check runs only where blocks are built, so it needs no hardfork.
+//!
+//! A sequencer with no persisted list is uninitialized and credits every deposit until its first
+//! write, so enabling the allowlist does not bounce deposits before the admin fills the list.
+//! Each sequencer keeps its own file, which consensus does not replicate; the operator runbook in
+//! `zones/docs/ZONES.md` covers enabling the allowlist and adding or restoring sequencers.
 
 use std::{
     collections::BTreeSet,
@@ -20,7 +25,7 @@ use eyre::{WrapErr as _, ensure};
 use jsonrpsee::{core::RpcResult, proc_macros::rpc, types::ErrorObjectOwned};
 use parking_lot::{Mutex, RwLock};
 use serde::{Deserialize, Serialize};
-use tracing::info;
+use tracing::{info, warn};
 use zone_l1::{abi::DecryptionData, failed_decryption};
 
 mod relay;
@@ -189,6 +194,10 @@ impl From<DepositAllowlistError> for ErrorObjectOwned {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct State {
+    /// Whether the list has been written, which is whether it is persisted. Until then the
+    /// sequencer credits every deposit.
+    #[serde(skip)]
+    initialized: bool,
     /// Nonce of the last applied signed write.
     nonce: u64,
     /// EIP-712 signing hash of the last applied signed write, so a retry of that write succeeds
@@ -198,26 +207,66 @@ struct State {
 }
 
 impl State {
-    /// Commitment to the list, logged so operators can compare sequencers.
-    fn list_hash(&self) -> B256 {
-        keccak256(
-            self.addresses
-                .iter()
-                .flat_map(|address| address.0.0)
-                .collect::<Vec<_>>(),
-        )
+    fn status(&self) -> DepositAllowlistStatus {
+        DepositAllowlistStatus {
+            initialized: self.initialized,
+            nonce: self.nonce,
+            list_hash: keccak256(
+                self.addresses
+                    .iter()
+                    .flat_map(|address| address.0.0)
+                    .collect::<Vec<_>>(),
+            ),
+            count: self.addresses.len(),
+        }
     }
 
     fn log(&self, message: &'static str) {
-        metrics::gauge!("zone_deposit_allowlist_addresses").set(self.addresses.len() as f64);
+        let status = self.status();
+        metrics::gauge!("zone_deposit_allowlist_addresses").set(status.count as f64);
         info!(
             target: "zone::allowlist",
-            nonce = self.nonce,
-            count = self.addresses.len(),
-            list_hash = %self.list_hash(),
+            initialized = status.initialized,
+            nonce = status.nonce,
+            count = status.count,
+            list_hash = %status.list_hash,
             "{message}"
         );
     }
+}
+
+/// Which version of the allowlist a sequencer holds, for comparing sequencers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DepositAllowlistStatus {
+    /// Whether the list has been written; an uninitialized sequencer credits every deposit.
+    pub(crate) initialized: bool,
+    /// Nonce of the last applied signed write; 0 before the first one.
+    pub(crate) nonce: u64,
+    /// Keccak-256 of the concatenated addresses in ascending order.
+    pub(crate) list_hash: B256,
+    pub(crate) count: usize,
+}
+
+/// A sequencer's allowlist and its status.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DepositAllowlistSnapshot {
+    #[serde(flatten)]
+    pub(crate) status: DepositAllowlistStatus,
+    /// Addresses in ascending order.
+    pub(crate) addresses: Vec<Address>,
+}
+
+/// One sequencer's entry in `zoneAdmin_getDepositAllowlistStatus`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SequencerAllowlistStatus {
+    /// The sequencer's P2P public key; omitted when a sequencer reports itself.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) sequencer: Option<String>,
+    #[serde(flatten)]
+    pub(crate) status: DepositAllowlistStatus,
 }
 
 /// Addresses whose L1 deposits the leader credits, persisted as JSON.
@@ -242,7 +291,7 @@ struct Inner {
 }
 
 impl DepositAllowlist {
-    /// Load the persisted list from `path`, starting empty when it does not exist yet.
+    /// Load the persisted list from `path`, starting uninitialized when it does not exist yet.
     pub fn load(path: PathBuf, admin: DepositAllowlistAdmin) -> eyre::Result<Self> {
         let state = if path.exists() {
             read_state(&path)?
@@ -250,6 +299,19 @@ impl DepositAllowlist {
             State::default()
         };
         state.log("Loaded deposit allowlist");
+        if !state.initialized {
+            warn!(
+                target: "zone::allowlist",
+                path = %path.display(),
+                "Deposit allowlist is uninitialized: this sequencer credits every deposit until the admin writes the list"
+            );
+        } else if state.addresses.is_empty() {
+            warn!(
+                target: "zone::allowlist",
+                path = %path.display(),
+                "Deposit allowlist is empty: this sequencer bounces every deposit while it leads"
+            );
+        }
         Ok(Self {
             inner: Arc::new(Inner {
                 path,
@@ -262,12 +324,25 @@ impl DepositAllowlist {
 
     /// Returns whether deposits from `sender` are credited.
     pub fn contains(&self, sender: &Address) -> bool {
-        self.inner.state.read().addresses.contains(sender)
+        let state = self.inner.state.read();
+        !state.initialized || state.addresses.contains(sender)
     }
 
     /// Returns the current list in ascending order.
     pub fn addresses(&self) -> Vec<Address> {
         self.inner.state.read().addresses.iter().copied().collect()
+    }
+
+    pub(crate) fn status(&self) -> DepositAllowlistStatus {
+        self.inner.state.read().status()
+    }
+
+    pub(crate) fn snapshot(&self) -> DepositAllowlistSnapshot {
+        let state = self.inner.state.read();
+        DepositAllowlistSnapshot {
+            status: state.status(),
+            addresses: state.addresses.iter().copied().collect(),
+        }
     }
 
     /// Add or remove `addresses`, persisting the result before it takes effect.
@@ -306,7 +381,7 @@ impl DepositAllowlist {
             let mut next = State {
                 nonce: write.nonce,
                 last_write: hash,
-                addresses: state.addresses.clone(),
+                ..state.clone()
             };
             match &write.write {
                 Write::Set { addresses, allowed } => {
@@ -327,7 +402,8 @@ impl DepositAllowlist {
             .map_err(|err| DepositAllowlistError::Internal(err.to_string()))?
     }
 
-    /// Replace the decryption data of every deposit whose sender is not allowed.
+    /// Replace the decryption data of every deposit whose sender is not allowed. An
+    /// uninitialized list allows every sender.
     ///
     /// `senders` holds the L1 sender of each user deposit in queue order; `prepare_many` emits
     /// exactly one entry in `decryptions` per user deposit in the same order. Returns the number
@@ -344,6 +420,9 @@ impl DepositAllowlist {
             decryptions.len()
         );
         let state = self.inner.state.read();
+        if !state.initialized {
+            return Ok(0);
+        }
         let mut rejected = 0;
         for (sender, decryption) in senders.iter().zip(decryptions) {
             if !state.addresses.contains(sender) {
@@ -362,9 +441,10 @@ impl DepositAllowlist {
     ) -> Result<(), DepositAllowlistError> {
         let _writer = self.inner.write_lock.lock();
         // Only writers change `state`, so this snapshot stays current until the swap below.
-        let Some(next) = next(&self.inner.state.read())? else {
+        let Some(mut next) = next(&self.inner.state.read())? else {
             return Ok(());
         };
+        next.initialized = true;
         if next.addresses.len() > MAX_DEPOSIT_ALLOWLIST_LEN {
             return Err(DepositAllowlistError::TooLarge {
                 len: next.addresses.len(),
@@ -419,10 +499,15 @@ pub(crate) trait DepositAllowlistApi {
         signature: Bytes,
     ) -> RpcResult<()>;
 
-    /// Returns the allowlist in ascending order. Through an RPC-only node, fails unless every
-    /// sequencer holds the same list.
+    /// Returns the allowlist and its status. Through an RPC-only node, fails unless every
+    /// sequencer holds the same list, naming each sequencer's status.
     #[method(name = "getDepositAllowlist")]
-    async fn get_deposit_allowlist(&self) -> RpcResult<Vec<Address>>;
+    async fn get_deposit_allowlist(&self) -> RpcResult<DepositAllowlistSnapshot>;
+
+    /// Returns each sequencer's allowlist status, so a sequencer that missed writes or is
+    /// uninitialized can be found and fixed with a signed replacement.
+    #[method(name = "getDepositAllowlistStatus")]
+    async fn get_deposit_allowlist_status(&self) -> RpcResult<Vec<SequencerAllowlistStatus>>;
 }
 
 #[jsonrpsee::core::async_trait]
@@ -462,16 +547,24 @@ impl DepositAllowlistApiServer for DepositAllowlist {
             .await?)
     }
 
-    async fn get_deposit_allowlist(&self) -> RpcResult<Vec<Address>> {
-        Ok(self.addresses())
+    async fn get_deposit_allowlist(&self) -> RpcResult<DepositAllowlistSnapshot> {
+        Ok(self.snapshot())
+    }
+
+    async fn get_deposit_allowlist_status(&self) -> RpcResult<Vec<SequencerAllowlistStatus>> {
+        Ok(vec![SequencerAllowlistStatus {
+            sequencer: None,
+            status: self.status(),
+        }])
     }
 }
 
 fn read_state(path: &Path) -> eyre::Result<State> {
     let file = File::open(path)
         .wrap_err_with(|| format!("failed to open deposit allowlist {}", path.display()))?;
-    let state: State = serde_json::from_reader(std::io::BufReader::new(file))
+    let mut state: State = serde_json::from_reader(std::io::BufReader::new(file))
         .wrap_err_with(|| format!("failed to parse deposit allowlist {}", path.display()))?;
+    state.initialized = true;
     ensure!(
         state.addresses.len() <= MAX_DEPOSIT_ALLOWLIST_LEN,
         "deposit allowlist {} holds {} addresses; the limit is {MAX_DEPOSIT_ALLOWLIST_LEN}",
@@ -580,21 +673,42 @@ mod tests {
         }
     }
 
+    fn valid_decryption() -> DecryptionData {
+        DecryptionData {
+            sharedSecret: B256::repeat_byte(1),
+            sharedSecretYParity: 0x03,
+            cpProof: ChaumPedersenProof {
+                s: B256::repeat_byte(2),
+                c: B256::repeat_byte(3),
+            },
+        }
+    }
+
     #[test]
-    fn starts_empty_and_persists_updates_across_restarts() {
+    fn starts_uninitialized_and_persists_updates_across_restarts() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("data").join(DEPOSIT_ALLOWLIST_FILE_NAME);
 
         let allowlist = load(path.clone());
-        assert!(allowlist.addresses().is_empty());
+        assert!(!allowlist.status().initialized);
         assert!(!path.exists(), "loading must not create the file");
+        // An uninitialized list credits every sender.
+        assert!(allowlist.contains(&BOB));
+        let mut decryptions = vec![valid_decryption()];
+        assert_eq!(
+            allowlist.reject_unlisted(&[BOB], &mut decryptions).unwrap(),
+            0
+        );
+        assert_eq!(decryptions, vec![valid_decryption()]);
 
         allowlist.set(&[ALICE, BOB], true).unwrap();
         allowlist
             .apply_signed(sign(set(&[ALICE], false), 7))
             .unwrap();
+        assert!(allowlist.status().initialized);
 
         let reloaded = load(path);
+        assert!(reloaded.status().initialized);
         assert_eq!(reloaded.addresses(), vec![BOB]);
         // The nonce survives the restart, so the applied write cannot be replayed afterwards.
         assert_eq!(
@@ -604,6 +718,32 @@ mod tests {
                 applied: 7
             })
         );
+    }
+
+    #[test]
+    fn a_written_empty_list_bounces_every_sender_across_restarts() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(DEPOSIT_ALLOWLIST_FILE_NAME);
+        let allowlist = alice_only(dir.path());
+
+        allowlist
+            .apply_signed(sign(set(&[ALICE], false), 1))
+            .unwrap();
+
+        // Emptying the list must not make it uninitialized again, before or after a restart.
+        for allowlist in [allowlist, load(path)] {
+            let status = allowlist.status();
+            assert!(status.initialized);
+            assert_eq!(status.count, 0);
+            let mut decryptions = vec![valid_decryption()];
+            assert_eq!(
+                allowlist
+                    .reject_unlisted(&[ALICE], &mut decryptions)
+                    .unwrap(),
+                1
+            );
+            assert_eq!(decryptions, vec![failed_decryption()]);
+        }
     }
 
     #[test]
@@ -792,14 +932,7 @@ mod tests {
     fn reject_unlisted_zeroes_only_unlisted_senders() {
         let dir = tempfile::tempdir().unwrap();
         let allowlist = alice_only(dir.path());
-        let valid = DecryptionData {
-            sharedSecret: B256::repeat_byte(1),
-            sharedSecretYParity: 0x03,
-            cpProof: ChaumPedersenProof {
-                s: B256::repeat_byte(2),
-                c: B256::repeat_byte(3),
-            },
-        };
+        let valid = valid_decryption();
         let mut decryptions = vec![valid.clone(), valid.clone(), valid.clone()];
 
         let rejected = allowlist

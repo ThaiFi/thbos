@@ -2499,9 +2499,9 @@ async fn test_deposit_policy_failure_bounces_to_tempo_refund_recipient() -> eyre
     Ok(())
 }
 
-/// With portal access open, the sequencer deposit allowlist credits listed senders, bounces
-/// unlisted senders back to their Tempo refund recipient, and applies list updates without a
-/// restart.
+/// With portal access open, an uninitialized sequencer deposit allowlist credits every sender.
+/// Once written, it credits listed senders, bounces unlisted senders back to their Tempo refund
+/// recipient, and applies list updates without a restart.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_deposit_allowlist_bounces_unlisted_senders() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
@@ -2523,7 +2523,6 @@ async fn test_deposit_allowlist_bounces_unlisted_senders() -> eyre::Result<()> {
             zone_chain_id: 0,
         },
     )?;
-    allowlist.replace(vec![listed_signer.address()])?;
 
     let zone = ZoneTestNode::start_from_l1_with_deposit_allowlist(
         l1.http_url(),
@@ -2537,9 +2536,16 @@ async fn test_deposit_allowlist_bounces_unlisted_senders() -> eyre::Result<()> {
     let mut listed = ZoneAccount::with_signer(listed_signer, &l1, &zone, portal_address);
     let mut unlisted = ZoneAccount::with_signer(unlisted_signer, &l1, &zone, portal_address);
     l1.fund_user(listed.address(), AMOUNT).await?;
-    l1.fund_user(unlisted.address(), 2 * AMOUNT).await?;
+    l1.fund_user(unlisted.address(), 3 * AMOUNT).await?;
     // Start the sequencer only after L1 setup so its shared signer cannot race the funding.
     let _sequencer = spawn_sequencer(&l1, &zone, portal_address, l1.dev_signer()).await;
+
+    // Until the first write, the list is uninitialized and every sender is credited.
+    assert_eq!(
+        unlisted.deposit(AMOUNT, L1_TIMEOUT, &zone).await?,
+        U256::from(AMOUNT)
+    );
+    allowlist.replace(vec![listed.address()])?;
 
     listed.deposit(AMOUNT, L1_TIMEOUT, &zone).await?;
 
@@ -2571,22 +2577,23 @@ async fn test_deposit_allowlist_bounces_unlisted_senders() -> eyre::Result<()> {
     assert_eq!(
         zone.balance_of(ZONE_TOKEN_ADDRESS, unlisted.address())
             .await?,
-        U256::ZERO,
+        U256::from(AMOUNT),
         "unlisted depositor was credited"
     );
 
     allowlist.set(&[unlisted.address()], true)?;
     let balance = unlisted.deposit(AMOUNT, L1_TIMEOUT, &zone).await?;
-    assert_eq!(balance, U256::from(AMOUNT));
+    assert_eq!(balance, U256::from(2 * AMOUNT));
 
     Ok(())
 }
 
 async fn get_deposit_allowlist(node: &ZoneTestNode) -> eyre::Result<Vec<Address>> {
-    Ok(node
+    let snapshot: serde_json::Value = node
         .provider()
         .raw_request("zoneAdmin_getDepositAllowlist".into(), ())
-        .await?)
+        .await?;
+    Ok(serde_json::from_value(snapshot["addresses"].clone())?)
 }
 
 mod allowlist_admin {
@@ -2731,6 +2738,21 @@ async fn test_rpc_node_relays_deposit_allowlist_to_every_sequencer() -> eyre::Re
         );
     }
     assert_eq!(get_deposit_allowlist(rpc).await?, vec![second]);
+
+    // Every sequencer reports the same version: the last applied nonce and the hash of the list.
+    let statuses: Vec<serde_json::Value> = rpc
+        .provider()
+        .raw_request("zoneAdmin_getDepositAllowlistStatus".into(), ())
+        .await?;
+    assert_eq!(statuses.len(), 3, "{statuses:?}");
+    let list_hash = alloy::primitives::keccak256(second.as_slice()).to_string();
+    for status in &statuses {
+        assert!(status["sequencer"].is_string(), "{status}");
+        assert_eq!(status["initialized"], true, "{status}");
+        assert_eq!(status["nonce"], 2, "{status}");
+        assert_eq!(status["count"], 1, "{status}");
+        assert_eq!(status["listHash"], list_hash.as_str(), "{status}");
+    }
 
     let l1 = &cluster.l1;
     let leader = &cluster.nodes[0];

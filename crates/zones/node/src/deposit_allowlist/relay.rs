@@ -20,20 +20,21 @@ use alloy_primitives::{Address, Bytes};
 use jsonrpsee::{core::RpcResult, types::ErrorObjectOwned};
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
-use tokio::sync::mpsc;
+use tokio::sync::{Semaphore, mpsc};
 use tracing::{debug, info, warn};
 use zone_p2p::{MAX_ALLOWLIST_PAYLOAD_SIZE, P2pCommand, P2pEvent, P2pPeerId};
 
 use super::{
     DepositAllowlist, DepositAllowlistAdmin, DepositAllowlistApiServer, DepositAllowlistError,
-    SignedWrite, Write,
+    DepositAllowlistSnapshot, DepositAllowlistStatus, SequencerAllowlistStatus, SignedWrite, Write,
 };
 
 /// How long a relayed request waits for every sequencer before failing.
 const RELAY_TIMEOUT: Duration = Duration::from_secs(10);
 /// How often an unacknowledged request is resent to the sequencers still missing.
 const RELAY_RETRY_INTERVAL: Duration = Duration::from_millis(500);
-/// Requests relayed at once; more fail fast so clients cannot flood the allowlist channel.
+/// Reads, and separately writes, relayed at once; more fail fast so clients cannot flood the
+/// allowlist channel.
 const MAX_IN_FLIGHT_RELAYS: usize = 4;
 
 /// An allowlist request relayed over P2P, tagged so acknowledgements match their request.
@@ -47,6 +48,7 @@ struct Update {
 enum Request {
     Write(SignedWrite),
     Get,
+    Status,
 }
 
 /// A sequencer's result for one relayed request, or the reason it was rejected.
@@ -58,10 +60,12 @@ struct Ack {
 
 #[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
 enum Response {
-    /// The write is persisted.
-    Applied,
+    /// The write is persisted, leaving the list at this status.
+    Applied(DepositAllowlistStatus),
     /// The list, answering `Get`.
-    Addresses(Vec<Address>),
+    Snapshot(DepositAllowlistSnapshot),
+    /// The list's status, answering `Status`.
+    Status(DepositAllowlistStatus),
 }
 
 type PendingAcks = Arc<Mutex<HashMap<u64, mpsc::UnboundedSender<(P2pPeerId, Ack)>>>>;
@@ -85,7 +89,9 @@ pub(crate) struct AllowlistRelay {
     commands: mpsc::Sender<P2pCommand>,
     /// Rejects writes the sequencers would reject before they use P2P bandwidth.
     admin: DepositAllowlistAdmin,
-    in_flight: Arc<tokio::sync::Semaphore>,
+    /// Bounds unauthenticated reads apart from signed writes, so reads cannot starve writes.
+    reads: Arc<Semaphore>,
+    writes: Arc<Semaphore>,
     pending: PendingAcks,
     /// Starts at a random value so a sequencer's late acknowledgement for a request from before
     /// a restart cannot match a new request.
@@ -104,7 +110,8 @@ impl AllowlistRelay {
             sequencers,
             commands,
             admin,
-            in_flight: Arc::new(tokio::sync::Semaphore::new(MAX_IN_FLIGHT_RELAYS)),
+            reads: Arc::new(Semaphore::new(MAX_IN_FLIGHT_RELAYS)),
+            writes: Arc::new(Semaphore::new(MAX_IN_FLIGHT_RELAYS)),
             pending: Default::default(),
             next_id: Arc::new(AtomicU64::new(rand::random())),
         }
@@ -133,9 +140,13 @@ impl AllowlistRelay {
     }
 
     /// Send `request` to every sequencer and return each one's result once all have answered.
-    async fn relay(&self, request: Request) -> RpcResult<Vec<(P2pPeerId, Response)>> {
-        let _permit = self
-            .in_flight
+    /// Fails fast when `limit` has no free permit.
+    async fn relay(
+        &self,
+        request: Request,
+        limit: &Semaphore,
+    ) -> RpcResult<Vec<(P2pPeerId, Response)>> {
+        let _permit = limit
             .try_acquire()
             .map_err(|_| DepositAllowlistError::Busy)?;
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
@@ -202,10 +213,10 @@ impl AllowlistRelay {
     async fn relay_write(&self, write: SignedWrite) -> RpcResult<()> {
         self.admin.authorize(&write)?;
         let unexpected = self
-            .relay(Request::Write(write))
+            .relay(Request::Write(write), &self.writes)
             .await?
             .into_iter()
-            .filter(|(_, response)| *response != Response::Applied)
+            .filter(|(_, response)| !matches!(response, Response::Applied(_)))
             .map(|(peer, _)| peer.to_string())
             .collect::<Vec<_>>();
         if unexpected.is_empty() {
@@ -260,32 +271,59 @@ impl DepositAllowlistApiServer for AllowlistRelay {
         Ok(())
     }
 
-    async fn get_deposit_allowlist(&self) -> RpcResult<Vec<Address>> {
-        let mut results = Vec::new();
-        for (peer, response) in self.relay(Request::Get).await? {
-            let Response::Addresses(addresses) = response else {
+    async fn get_deposit_allowlist(&self) -> RpcResult<DepositAllowlistSnapshot> {
+        let mut snapshots = Vec::new();
+        for (peer, response) in self.relay(Request::Get, &self.reads).await? {
+            let Response::Snapshot(snapshot) = response else {
                 return Err(relay_error(format!(
                     "unexpected read acknowledgement from {peer}"
                 )));
             };
-            results.push((peer, addresses));
+            snapshots.push((peer, snapshot));
         }
-        let mut results = results.into_iter();
-        let Some((_, first)) = results.next() else {
-            return Ok(Vec::new());
+        let Some((_, first)) = snapshots.first() else {
+            return Err(relay_error("no sequencers to read from".to_owned()));
         };
-        let diverged = results
-            .filter(|(_, addresses)| *addresses != first)
-            .map(|(peer, _)| peer.to_string())
-            .collect::<Vec<_>>();
-        if diverged.is_empty() {
-            Ok(first)
-        } else {
-            Err(relay_error(format!(
-                "sequencer allowlists differ; {} disagree with the first response",
-                diverged.join(", ")
-            )))
+        if snapshots.iter().all(|(_, snapshot)| {
+            (snapshot.status.initialized, snapshot.status.list_hash)
+                == (first.status.initialized, first.status.list_hash)
+        }) {
+            return Ok(first.clone());
         }
+        let statuses = snapshots
+            .iter()
+            .map(|(peer, snapshot)| {
+                let status = snapshot.status;
+                if status.initialized {
+                    format!(
+                        "{peer}: nonce {}, {} addresses, hash {}",
+                        status.nonce, status.count, status.list_hash
+                    )
+                } else {
+                    format!("{peer}: uninitialized")
+                }
+            })
+            .collect::<Vec<_>>();
+        Err(relay_error(format!(
+            "sequencer allowlists differ; {}",
+            statuses.join("; ")
+        )))
+    }
+
+    async fn get_deposit_allowlist_status(&self) -> RpcResult<Vec<SequencerAllowlistStatus>> {
+        self.relay(Request::Status, &self.reads)
+            .await?
+            .into_iter()
+            .map(|(peer, response)| match response {
+                Response::Status(status) => Ok(SequencerAllowlistStatus {
+                    sequencer: Some(peer.to_string()),
+                    status,
+                }),
+                _ => Err(relay_error(format!(
+                    "unexpected status acknowledgement from {peer}"
+                ))),
+            })
+            .collect()
     }
 }
 
@@ -326,7 +364,8 @@ pub(crate) async fn apply_relayed_updates(
         }
         let result = match (&allowlist, update.request) {
             (None, _) => Err(DepositAllowlistError::Disabled),
-            (Some(allowlist), Request::Get) => Ok(Response::Addresses(allowlist.addresses())),
+            (Some(allowlist), Request::Get) => Ok(Response::Snapshot(allowlist.snapshot())),
+            (Some(allowlist), Request::Status) => Ok(Response::Status(allowlist.status())),
             (Some(allowlist), Request::Write(write)) => {
                 let result = allowlist.apply_signed_blocking(write).await;
                 match &result {
@@ -337,7 +376,7 @@ pub(crate) async fn apply_relayed_updates(
                         warn!(target: "zone::allowlist", %peer, %error, "Rejected relayed deposit allowlist update")
                     }
                 }
-                result.map(|()| Response::Applied)
+                result.map(|()| Response::Applied(allowlist.status()))
             }
         };
         let ack = match encode_ack(update.id, result) {
@@ -396,12 +435,24 @@ mod tests {
             .collect()
     }
 
+    fn snapshot(addresses: Vec<Address>) -> Response {
+        Response::Snapshot(DepositAllowlistSnapshot {
+            status: DepositAllowlistStatus {
+                initialized: true,
+                nonce: u64::MAX,
+                list_hash: alloy_primitives::B256::repeat_byte(0xff),
+                count: addresses.len(),
+            },
+            addresses,
+        })
+    }
+
     #[test]
     fn a_full_list_fits_in_one_frame_both_ways() {
         let addresses = full_list();
-        let ack = encode_ack(u64::MAX, Ok(Response::Addresses(addresses.clone()))).unwrap();
+        let ack = encode_ack(u64::MAX, Ok(snapshot(addresses.clone()))).unwrap();
         let ack: Ack = serde_json::from_slice(&ack).unwrap();
-        assert_eq!(ack.result, Ok(Response::Addresses(addresses.clone())));
+        assert_eq!(ack.result, Ok(snapshot(addresses.clone())));
 
         let replace = serde_json::to_vec(&Update {
             id: u64::MAX,
@@ -424,7 +475,7 @@ mod tests {
     fn oversized_ack_becomes_an_error() {
         let mut addresses = full_list();
         addresses.extend(full_list());
-        let ack = encode_ack(7, Ok(Response::Addresses(addresses))).unwrap();
+        let ack = encode_ack(7, Ok(snapshot(addresses))).unwrap();
         assert!(ack.len() <= MAX_ALLOWLIST_PAYLOAD_SIZE);
         let ack: Ack = serde_json::from_slice(&ack).unwrap();
         assert_eq!(ack.id, 7);
