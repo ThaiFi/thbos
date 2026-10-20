@@ -53,10 +53,10 @@ where
     E: Rng + Spawner + commonware_runtime::Metrics + Clock,
 {
     Deferred(Deferred<E, Scheme<PublicKey, MinSig>, Inner, Block, FixedEpocher>),
-    Immediate(Inline<E, Scheme<PublicKey, MinSig>, Inner, Block, FixedEpocher>),
+    Immediate(ImmediateApplication<E>),
     Hardfork {
         deferred: Deferred<E, Scheme<PublicKey, MinSig>, Inner, Block, FixedEpocher>,
-        immediate: Box<Inline<E, Scheme<PublicKey, MinSig>, Inner, Block, FixedEpocher>>,
+        immediate: Box<ImmediateApplication<E>>,
         runtime: Arc<E>,
         marshal: Mailbox<Scheme<PublicKey, MinSig>, Standard<Block>>,
         chainspec: Arc<TempoChainSpec>,
@@ -64,6 +64,8 @@ where
         deferred_verifications: Counter,
     },
 }
+
+type ImmediateApplication<E> = Inline<E, Scheme<PublicKey, MinSig>, Inner, Block, FixedEpocher>;
 
 impl<E> Clone for Application<E>
 where
