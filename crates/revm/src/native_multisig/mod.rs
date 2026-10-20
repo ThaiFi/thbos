@@ -111,7 +111,7 @@ pub fn authorizations(tx: &TempoTxEnv) -> [Option<NativeAuthorization<'_>>; 2] {
 }
 
 /// Validates the account state every transaction role depends on, returning regular and state
-/// intrinsic gas. Does no signature or quorum verification of its own (see [`verify`]), except
+/// intrinsic gas. Does no signature or quorum verification of its own (see `verify`), except
 /// that T14 key-authorization and access-key identities are recovered to name the accounts
 /// whose root-key retirement is checked.
 ///
