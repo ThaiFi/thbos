@@ -237,11 +237,6 @@ on:
         type: boolean
         required: true
         default: false
-      tcp-highres:
-        description: Collect and process high-resolution validator TCP samples.
-        type: boolean
-        required: true
-        default: false
       valscope:
         description: Register live ValScope targets for each benchmark phase.
         type: boolean
@@ -933,6 +928,12 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Isolate Google Cloud CLI state
+        run: |
+          benchmark_sdk_config="$RUNNER_TEMP/gcloud-benchmark-status"
+          mkdir -p "$benchmark_sdk_config"
+          echo "CLOUDSDK_CONFIG=$benchmark_sdk_config" >> "$GITHUB_ENV"
+
       - name: Authenticate to Google Cloud
         uses: tempoxyz/gh-actions/vendor/google-github-actions/auth@e813067e922303348ee5aad965f745803cc24f1f # 2026-10-02T09-56-31Z-e813067e
         with:
@@ -943,12 +944,6 @@ jobs:
         uses: tempoxyz/gh-actions/vendor/google-github-actions/setup-gcloud@e813067e922303348ee5aad965f745803cc24f1f # 2026-10-02T09-56-31Z-e813067e
         with:
           project_id: chain-benchmarking-zygis
-
-      - name: Isolate Google Cloud CLI state
-        run: |
-          benchmark_sdk_config="$RUNNER_TEMP/gcloud-benchmark-status"
-          mkdir -p "$benchmark_sdk_config"
-          echo "CLOUDSDK_CONFIG=$benchmark_sdk_config" >> "$GITHUB_ENV"
 
       - name: Read benchmark progress
         run: |
