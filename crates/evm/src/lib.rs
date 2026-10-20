@@ -55,8 +55,8 @@ use tempo_precompiles::{error::Result as TempoResult, storage::StorageActions};
 use tempo_revm::{TempoTxEnv, evm::TempoContext, gas_params::tempo_gas_params_with_amsterdam};
 
 pub use tempo_revm::{
-    FeeTokenResolver, ProtocolFeeContext, ProtocolFeeManager, TempoBlockEnv, TempoFeeManager,
-    TempoInvalidTransaction, TempoStateAccess,
+    FeeTokenResolver, ProtocolFeeContext, ProtocolFeeManager, ResolvedFeeToken, TempoBlockEnv,
+    TempoFeeManager, TempoInvalidTransaction, TempoStateAccess,
 };
 
 #[cfg(test)]
@@ -214,6 +214,7 @@ impl ConfigureEvm for TempoEvmConfig {
                     .epoch_length()
                     .unwrap_or(NonZeroU64::MIN),
                 proposer_public_key: header.consensus_context.map(|ctx| ctx.proposer),
+                multisig_recovery_factory: self.chain_spec().info.multisig_recovery_factory(),
             },
         })
     }
@@ -269,6 +270,7 @@ impl ConfigureEvm for TempoEvmConfig {
                     .epoch_length()
                     .unwrap_or(NonZeroU64::MIN),
                 proposer_public_key: attributes.consensus_context.map(|ctx| ctx.proposer),
+                multisig_recovery_factory: self.chain_spec().info.multisig_recovery_factory(),
             },
         })
     }
