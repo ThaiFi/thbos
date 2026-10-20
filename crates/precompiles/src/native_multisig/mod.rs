@@ -125,12 +125,14 @@ impl NativeMultisig {
         if self.tx_origin.t_read()? != sender {
             return Err(NativeMultisigError::upgrade_must_be_only_call().into());
         }
-        let eligibility = self.upgrade_eligibility.t_read()?;
-        if eligibility == UpgradeEligibility::NotSoleCall {
-            return Err(NativeMultisigError::upgrade_must_be_only_call().into());
-        }
-        if eligibility == UpgradeEligibility::NotPrimitiveRoot {
-            return Err(NativeMultisigError::primitive_root_required().into());
+        match self.upgrade_eligibility.t_read()? {
+            UpgradeEligibility::NotSoleCall => {
+                return Err(NativeMultisigError::upgrade_must_be_only_call().into());
+            }
+            UpgradeEligibility::NotPrimitiveRoot => {
+                return Err(NativeMultisigError::primitive_root_required().into());
+            }
+            UpgradeEligibility::PrimitiveRoot => {}
         }
         let has_code = self
             .storage
