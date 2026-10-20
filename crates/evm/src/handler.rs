@@ -1,6 +1,7 @@
 //! Tempo EVM Handler implementation.
 
 mod config;
+pub(crate) mod configurable_account;
 
 pub use self::config::{
     TempoBlockEnv, TempoBlockExt, TempoConfig, TempoConfigSelector, TempoEvmExt, TempoEvmTypes,
@@ -13,6 +14,7 @@ use crate::{
     signature_gas::{
         account_signature_verification_gas, calldata_tokens, tempo_signature_verification_gas,
     },
+    transaction_error::NativeMultisigError,
 };
 use alloy_primitives::{Address, KECCAK256_EMPTY, TxKind, U256};
 use evm2::{
@@ -209,11 +211,11 @@ fn calculate_key_authorization_gas(
     key_auth: &tempo_primitives::transaction::SignedKeyAuthorization,
     gas_params: &GasParams,
     spec: TempoHardfork,
-) -> (u64, u64) {
+) -> Result<(u64, u64), TempoPrecompileError> {
     // All signature types pay ECRECOVER_GAS (3k) as the baseline since
     // primitive_signature_verification_gas assumes ecrecover is already in base 21k.
     // For KeyAuthorization, we're doing an additional signature verification.
-    let sig_gas = ECRECOVER_GAS + account_signature_verification_gas(&key_auth.signature);
+    let sig_gas = ECRECOVER_GAS + account_signature_verification_gas(&key_auth.signature)?;
 
     let num_limits = key_auth
         .authorization
@@ -271,13 +273,13 @@ fn calculate_key_authorization_gas(
         let state_gas =
             u64::from(gas_params.get(GasId::SstoreSetState)).saturating_mul(num_sstores);
 
-        (regular_gas, state_gas)
+        Ok((regular_gas, state_gas))
     } else {
         // Pre-T1B: Original heuristic constants
-        (
+        Ok((
             KEY_AUTH_BASE_GAS + sig_gas + num_limits * KEY_AUTH_PER_LIMIT_GAS,
             0,
-        )
+        ))
     }
 }
 
@@ -286,7 +288,7 @@ fn key_authorization_gas(
     authorization: &tempo_primitives::transaction::SignedKeyAuthorization,
     host: &Evm<'_, TempoEvmTypes>,
     spec: TempoHardfork,
-) -> (u64, u64) {
+) -> Result<(u64, u64), TempoPrecompileError> {
     calculate_key_authorization_gas(authorization, &host.version().gas_params, spec)
 }
 
@@ -307,10 +309,7 @@ fn key_authorization_gas(
 ///   - Pre-T1B: 27k base + 3k ecrecover + 22k per spending limit
 ///   - T1B+: ecrecover + SLOAD + SSTORE × (1 + N limits)
 /// - Floor gas calculation (EIP-7623, Prague+)
-fn intrinsic_gas(
-    host: &Evm<'_, TempoEvmTypes>,
-    aa: &TempoAaTx,
-) -> Result<(u64, u64, u64), TempoInvalidTransaction> {
+fn intrinsic_gas(host: &Evm<'_, TempoEvmTypes>, aa: &TempoAaTx) -> HandlerResult<(u64, u64, u64)> {
     let signed = aa.inner();
     let tx = signed.tx();
     let spec = host.config_spec_id();
@@ -321,7 +320,7 @@ fn intrinsic_gas(
     let mut tokens = 0u64;
 
     // 2. Signature verification gas
-    regular = regular.saturating_add(tempo_signature_verification_gas(signed.signature()));
+    regular = regular.saturating_add(tempo_signature_verification_gas(signed.signature())?);
 
     // 3. Per-call overhead: cold account access for calls after the first. The 21k base stipend
     // already covers the first call's target access.
@@ -337,7 +336,7 @@ fn intrinsic_gas(
     for authorization in &tx.tempo_authorization_list {
         regular = regular
             .saturating_add(u64::from(params.get(GasId::TxEip7702PerEmptyAccountCost)))
-            .saturating_add(tempo_signature_verification_gas(authorization.signature()));
+            .saturating_add(tempo_signature_verification_gas(authorization.signature())?);
         state = state.saturating_add(params.eip7702_auth_state_gas());
         if spec.is_t1() && authorization.nonce == 0 {
             // TIP-1000: Storage pricing updates for launch
@@ -350,7 +349,7 @@ fn intrinsic_gas(
     // 5. Key authorization costs (if present)
     if let Some(authorization) = &tx.key_authorization {
         let (auth_regular, auth_state) =
-            calculate_key_authorization_gas(authorization, params, spec);
+            calculate_key_authorization_gas(authorization, params, spec)?;
         regular = regular.saturating_add(auth_regular);
         state = state.saturating_add(auth_state);
     }
@@ -360,7 +359,7 @@ fn intrinsic_gas(
         // Note: Transaction value is not allowed in AA transactions as there is no balances in accounts yet.
         // Check added in https://github.com/tempoxyz/tempo/pull/759
         if !call.value.is_zero() {
-            return Err(TempoInvalidTransaction::ValueTransferNotAllowedInAATx);
+            return Err(TempoInvalidTransaction::ValueTransferNotAllowedInAATx.into());
         }
         // 4a. Calldata gas using EVM2's token pricing.
         tokens = tokens.saturating_add(calldata_tokens(&call.input));
@@ -492,8 +491,15 @@ fn validate_key_authorization(
     let Some(key_auth) = tx.key_authorization.as_ref() else {
         return Ok(());
     };
+    if configurable_account::grant_delegate(aa).is_some() && !spec.is_t14() {
+        return Err(NativeMultisigError::UnsupportedContext.into());
+    }
 
-    let access_key = access_key_id(aa)?;
+    // Configurable-account roles are bound by `configurable_account::verify` instead.
+    let native = configurable_account::authorizations(aa)
+        .iter()
+        .any(Option::is_some);
+    let access_key = if native { None } else { access_key_id(aa)? };
     let same_tx_auth_use = access_key == Some(key_auth.key_id);
     if access_key.is_some() && !same_tx_auth_use && !spec.is_t6() {
         return Err(TempoInvalidTransaction::AccessKeyCannotAuthorizeOtherKeys);
@@ -540,10 +546,14 @@ fn validate_key_authorization(
         });
     }
 
-    let signer = key_auth
-        .recover_signer()
+    let signer = (!native || !spec.is_t6())
+        .then(|| key_auth.recover_signer())
+        .transpose()
         .map_err(|_| TempoInvalidTransaction::KeyAuthorizationSignatureRecoveryFailed)?;
-    if !spec.is_t6() && signer != aa.signer() {
+    if let Some(signer) = signer
+        && !spec.is_t6()
+        && signer != aa.signer()
+    {
         return Err(TempoInvalidTransaction::KeyAuthorizationNotSignedByRoot {
             expected: aa.signer(),
             actual: signer,
@@ -569,7 +579,9 @@ fn validate_key_authorization(
         });
     }
 
-    if spec.is_t6() {
+    if spec.is_t6()
+        && let Some(signer) = signer
+    {
         if signer != aa.signer() && key_auth.account.is_none() {
             return Err(TempoInvalidTransaction::KeychainValidationFailed {
                 reason: "admin-signed key authorization account mismatch".into(),
@@ -749,7 +761,7 @@ fn prepare_keychain(
         && let Some(key_authorization) = key_authorization
     {
         let signer = key_authorization
-            .recover_signer()
+            .recover_account()
             .map_err(|_| TempoInvalidTransaction::KeyAuthorizationSignatureRecoveryFailed)?;
         if signer != aa.signer() {
             let signature_type: u8 = key_authorization.signature.key_type().into();
@@ -960,6 +972,11 @@ fn apply_one_authorization(
     let Ok(authority) = authorization.recover_authority() else {
         return Ok(None);
     };
+    // T14: a configurable account's root key is retired, so it can no longer delegate.
+    let spec = host.config_spec_id();
+    if configurable_account::retired_authority(host, authority, spec)? {
+        return Ok(None);
+    }
     let mut account = host.state_mut().account(&authority)?;
     account.warm();
     // Historically, the sender was touched before authorization processing, making even an
@@ -1352,6 +1369,17 @@ fn prepare_aa(
         return Err(TempoInvalidTransaction::SubblockTransactionsDisabled.into());
     }
 
+    // A configurable-account quorum cannot sign an EIP-7702 delegation.
+    if tx.tempo_authorization_list.iter().any(|authorization| {
+        authorization
+            .signature()
+            .primitive_signature_type()
+            .is_none()
+    }) {
+        return Err(
+            TempoInvalidTransaction::from(NativeMultisigError::InvalidSignatureContext).into(),
+        );
+    }
     // Validate AA transaction structure (calls list, CREATE rules)
     validate_calls(&tx.calls, !tx.tempo_authorization_list.is_empty())
         .map_err(TempoInvalidTransaction::from)?;
@@ -1429,6 +1457,12 @@ fn prepare_aa(
         timestamp,
     )?;
 
+    // Configurable-account state checks load more accounts, so transaction warmth goes first.
+    warm_base_accounts(request.host, caller, tx.calls[0].to);
+    warm_access_list(request.host, &tx.access_list);
+    let (native_gas, native_state_gas) =
+        configurable_account::validate_state(request.host, request.envelope, spec)?;
+
     // Route to the AA gas calculation and validation path.
     let (mut intrinsic, mut initial_state_gas, floor_gas) =
         intrinsic_gas(request.host, request.tx.inner())?;
@@ -1477,16 +1511,22 @@ fn prepare_aa(
         // initial validation. This CREATE case must not use the unbounded gas fallback.
         validate_intrinsic_gas(tx.gas_limit, intrinsic, initial_state_gas)?;
     }
+    intrinsic = intrinsic.saturating_add(native_gas);
+    initial_state_gas = initial_state_gas.saturating_add(native_state_gas);
+    // Recheck only the configurable-account costs: Genesis 2D nonce gas is added after the
+    // historical sufficiency check above.
+    if native_gas != 0 || native_state_gas != 0 {
+        validate_intrinsic_gas(tx.gas_limit, intrinsic, initial_state_gas)?;
+    }
 
     validate_execution_gas_limit_cap(request.host.version(), tx.gas_limit, intrinsic, floor_gas)?;
-
-    warm_base_accounts(request.host, caller, tx.calls[0].to);
-    warm_access_list(request.host, &tx.access_list);
 
     // Collect fees for the transaction.
     let fee_context = TempoHandlerHooks::resolve_fee_context(request.host, request.envelope)?;
 
     let create_nonce = apply_nonce(request.host, request.envelope, request.tx.inner())?;
+    // Owner quorums are verified after the nonce checks and before the access-key checks.
+    configurable_account::verify(request.envelope.execution_context(), request.tx.inner())?;
 
     // For Keychain signatures, validate the acting access key before fee collection when it
     // already exists. Same-tx auth+use is the exception: that key is registered only after fees
@@ -1593,6 +1633,7 @@ fn execute_aa(
             )
         };
     reservoir += state_refund;
+    configurable_account::register_commitments(request.host, request.tx.inner())?;
     let mut result = execute_batch(
         request.host,
         caller,

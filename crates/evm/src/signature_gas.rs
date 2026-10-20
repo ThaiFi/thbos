@@ -1,4 +1,7 @@
 use evm2::interpreter::gas::{COLD_SLOAD_COST, STANDARD_TOKEN_COST};
+use tempo_precompiles::{
+    ECRECOVER_GAS, error::Result, signature_verifier::multisig_verification_gas,
+};
 use tempo_primitives::transaction::{AccountSignature, PrimitiveSignature, TempoSignature};
 
 /// Additional gas for P256 signature verification.
@@ -30,11 +33,14 @@ pub(crate) fn primitive_signature_verification_gas(signature: &PrimitiveSignatur
 
 /// Verification cost beyond the baseline signature charge, without keychain processing.
 #[inline]
-pub(crate) fn account_signature_verification_gas(signature: &AccountSignature) -> u64 {
+pub(crate) fn account_signature_verification_gas(signature: &AccountSignature) -> Result<u64> {
     match signature {
-        AccountSignature::Primitive(signature) => primitive_signature_verification_gas(signature),
-        // TODO: Configurable account verification gas is implemented in #7578.
-        AccountSignature::ConfigurableAccount(_) => 0,
+        AccountSignature::Primitive(signature) => {
+            Ok(primitive_signature_verification_gas(signature))
+        }
+        AccountSignature::ConfigurableAccount(signature) => {
+            Ok(multisig_verification_gas(signature)?.saturating_sub(ECRECOVER_GAS))
+        }
     }
 }
 
@@ -43,14 +49,16 @@ pub(crate) fn account_signature_verification_gas(signature: &AccountSignature) -
 /// For keychain signatures, adds key validation overhead to the inner signature cost. Returns the
 /// additional gas required beyond the base transaction cost.
 #[inline]
-pub(crate) fn tempo_signature_verification_gas(signature: &TempoSignature) -> u64 {
+pub(crate) fn tempo_signature_verification_gas(signature: &TempoSignature) -> Result<u64> {
     match signature {
-        TempoSignature::Primitive(prim_sig) => primitive_signature_verification_gas(prim_sig),
+        TempoSignature::Primitive(prim_sig) => Ok(primitive_signature_verification_gas(prim_sig)),
         TempoSignature::Keychain(keychain_sig) => {
-            account_signature_verification_gas(&keychain_sig.signature) + KEYCHAIN_VALIDATION_GAS
+            Ok(account_signature_verification_gas(&keychain_sig.signature)?
+                + KEYCHAIN_VALIDATION_GAS)
         }
-        // TODO: Configurable account verification gas is implemented in #7578.
-        TempoSignature::ConfigurableAccount(_) => 0,
+        TempoSignature::ConfigurableAccount(signature) => {
+            Ok(multisig_verification_gas(signature)?.saturating_sub(ECRECOVER_GAS))
+        }
     }
 }
 
