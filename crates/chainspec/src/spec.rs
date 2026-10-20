@@ -36,9 +36,6 @@ macro_rules! tempo_genesis_info {
             #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
             #[serde(rename_all = "camelCase")]
             pub struct TempoGenesisInfo {
-                /// Development-only TIP-1110 factory; public networks remain unconfigured.
-                #[serde(skip_serializing_if = "Option::is_none")]
-                multisig_recovery_factory: Option<Address>,
                 /// The epoch length used by consensus.
                 #[serde(skip_serializing_if = "Option::is_none")]
                 epoch_length: Option<NonZeroU64>,
@@ -50,6 +47,9 @@ macro_rules! tempo_genesis_info {
                     #[serde(skip_serializing_if = "Option::is_none")]
                     [<$variant:lower _time>]: Option<u64>,
                 )*
+                /// Development-only TIP-1110 factory; public networks remain unconfigured.
+                #[serde(skip_serializing_if = "Option::is_none")]
+                multisig_recovery_factory: Option<Address>,
             }
 
             impl TempoGenesisInfo {
