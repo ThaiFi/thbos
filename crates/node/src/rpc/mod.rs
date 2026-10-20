@@ -8,7 +8,7 @@ pub mod simulate;
 pub mod token;
 
 pub use admin::{TempoAdminApi, TempoAdminApiServer};
-use alloy_primitives::B256;
+use alloy_primitives::{B256, Bytes};
 use alloy_rpc_types_eth::{Log, ReceiptWithBloom};
 pub use consensus::{TempoConsensusApiServer, TempoConsensusRpc};
 pub use eth_ext::{TempoEthExt, TempoEthExtApiServer};
@@ -480,6 +480,27 @@ where
         self.inner
             .send_pool_transaction(origin, tx)
             .map_err(Into::into)
+    }
+
+    fn send_raw_transaction(
+        &self,
+        tx: Bytes,
+    ) -> impl Future<Output = Result<B256, Self::Error>> + Send {
+        async move {
+            let permit = self
+                .acquire_owned_tracing()
+                .await
+                .map_err(|_| EthApiError::InternalBlockingTaskError)?;
+            let transaction = self
+                .spawn_tracing(move |this| {
+                    let _permit = permit;
+                    let transaction = this.recover_raw_pool_transaction(&tx)?;
+                    Ok(WithEncoded::new(tx, transaction))
+                })
+                .await?;
+            self.send_pool_transaction(TransactionOrigin::Local, transaction)
+                .await
+        }
     }
 }
 

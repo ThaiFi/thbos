@@ -1,15 +1,17 @@
 use crate::utils::{TestNodeBuilder, setup_test_token};
 use alloy::{
     consensus::Transaction,
-    primitives::{Address, Bytes, TxKind, U256},
+    primitives::{Address, Bytes, Signature, TxKind, U256},
     providers::{Provider, ProviderBuilder},
     rpc::types::TransactionRequest,
     signers::SignerSync,
 };
+use alloy_eips::Encodable2718;
 use alloy_network::TransactionResponse;
+use futures::FutureExt;
 use reth_e2e_test_utils::{receipt::PendingTransactionExt, wallet::test_signer};
 use reth_primitives_traits::SignerRecoverable;
-use reth_rpc_eth_api::helpers::LoadState;
+use reth_rpc_eth_api::helpers::{EthTransactions, LoadState, SpawnBlocking};
 use reth_transaction_pool::{TransactionOrigin, TransactionPool};
 use tempo_alloy::rpc::TempoTransactionRequest;
 use tempo_chainspec::spec::TEMPO_T1_BASE_FEE;
@@ -139,6 +141,70 @@ async fn test_next_available_nonce_for_2d_key_includes_pending_txs() -> eyre::Re
             .next_available_nonce_for(&request(nonce_key))
             .await?,
         1
+    );
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_raw_transaction_recovery_preserves_rpc_errors() -> eyre::Result<()> {
+    let setup = TestNodeBuilder::new().build_with_node_access().await?;
+    let eth_api = setup.node.rpc.inner.eth_api().clone();
+    let invalid_signature: TempoTxEnvelope = TempoTransaction {
+        calls: vec![Call {
+            to: TxKind::Call(Address::ZERO),
+            value: U256::ZERO,
+            input: Bytes::new(),
+        }],
+        ..Default::default()
+    }
+    .into_signed(Signature::new(U256::ZERO, U256::ZERO, false).into())
+    .into();
+
+    for raw in [
+        Bytes::new(),
+        Bytes::from_static(&[0xff]),
+        Bytes::from_static(&[2, 0x80]),
+        Bytes::from(invalid_signature.encoded_2718()),
+    ] {
+        let expected = jsonrpsee::types::ErrorObjectOwned::from(
+            eth_api.recover_raw_pool_transaction(&raw).unwrap_err(),
+        );
+        let actual = jsonrpsee::types::ErrorObjectOwned::from(
+            eth_api.send_raw_transaction(raw).await.unwrap_err(),
+        );
+        assert_eq!(actual, expected);
+    }
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_raw_transaction_recovery_waits_for_cpu_capacity() -> eyre::Result<()> {
+    let setup = TestNodeBuilder::new().build_with_node_access().await?;
+    let eth_api = setup.node.rpc.inner.eth_api().clone();
+    let guard = eth_api.tracing_task_guard().clone();
+    let mut permits = Vec::new();
+    while let Some(permit) = guard.clone().acquire_owned().now_or_never() {
+        permits.push(permit?);
+    }
+    assert!(!permits.is_empty());
+    let request = eth_api.send_raw_transaction(Bytes::new());
+    tokio::pin!(request);
+
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(20), &mut request)
+            .await
+            .is_err()
+    );
+    drop(permits);
+    let actual = tokio::time::timeout(std::time::Duration::from_secs(5), request)
+        .await?
+        .unwrap_err();
+    let expected = eth_api.recover_raw_pool_transaction(&[]).unwrap_err();
+    assert_eq!(
+        jsonrpsee::types::ErrorObjectOwned::from(actual),
+        jsonrpsee::types::ErrorObjectOwned::from(expected),
     );
 
     Ok(())
