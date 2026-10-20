@@ -919,10 +919,11 @@ jobs:
     runs-on: depot-ubuntu-latest-8
     timeout-minutes: 10
     permissions:
+      actions: read
       contents: read
       id-token: write
+      packages: read
     env:
-      CLOUDSDK_CONFIG: ${{ runner.temp }}/gcloud-benchmark-status
       BENCHMARK_RUN_IDS: ${{ inputs.diagnostic_run_ids }}
     steps:
       - name: Secure runner
@@ -942,6 +943,12 @@ jobs:
         uses: tempoxyz/gh-actions/vendor/google-github-actions/setup-gcloud@e813067e922303348ee5aad965f745803cc24f1f # 2026-10-02T09-56-31Z-e813067e
         with:
           project_id: chain-benchmarking-zygis
+
+      - name: Isolate Google Cloud CLI state
+        run: |
+          benchmark_sdk_config="$RUNNER_TEMP/gcloud-benchmark-status"
+          mkdir -p "$benchmark_sdk_config"
+          echo "CLOUDSDK_CONFIG=$benchmark_sdk_config" >> "$GITHUB_ENV"
 
       - name: Read benchmark progress
         run: |
