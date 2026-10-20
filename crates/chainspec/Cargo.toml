@@ -62,6 +62,7 @@ serde = [
     "tempo-hardfork/serde",
     "alloy-eips/serde",
     "alloy-primitives/serde",
+    "evm2?/serde",
     "tempo-contracts/serde",
     "tempo-primitives/serde"
 ]
