@@ -28,7 +28,9 @@ use tempo_primitives::{
     MasterId, TempoAddressExt, UserTag,
     transaction::{
         MultisigConfig, MultisigOwner,
-        multisig::{MULTISIG_ACCOUNT_CREATE2_PREIMAGE_LEN, MULTISIG_UPGRADE_DOMAIN},
+        multisig::{
+            MAX_MULTISIG_OWNERS, MULTISIG_ACCOUNT_CREATE2_PREIMAGE_LEN, MULTISIG_UPGRADE_DOMAIN,
+        },
     },
 };
 
@@ -358,6 +360,24 @@ fn update_config_rejects_invalid_current_and_next_configs() {
             version: 0,
             threshold: 1,
             owners: self_owned,
+        };
+        assert_reverts(
+            update(account, &current, 1, &owners),
+            NativeMultisigError::invalid_config(),
+        );
+
+        // So does one with too many owners to encode.
+        let too_many = (0..=MAX_MULTISIG_OWNERS)
+            .map(|i| INativeMultisig::MultisigOwner {
+                owner: Address::with_last_byte(i as u8 + 1),
+                weight: 1,
+            })
+            .collect();
+        let current = INativeMultisig::MultisigConfig {
+            salt: B256::ZERO,
+            version: 0,
+            threshold: 1,
+            owners: too_many,
         };
         assert_reverts(
             update(account, &current, 1, &owners),
