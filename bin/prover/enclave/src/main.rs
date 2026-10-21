@@ -118,8 +118,14 @@ impl Cli {
                 )
             })?;
             let chain_id = genesis.config.chain_id;
+            let spec = TempoChainSpec::try_from_genesis(genesis).map_err(|error| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("invalid Tempo genesis {}: {error}", path.display()),
+                )
+            })?;
             specs
-                .insert(chain_id, Arc::new(TempoChainSpec::from_genesis(genesis)))
+                .insert(chain_id, Arc::new(spec))
                 .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
             tracing::info!(chain_id, path = %path.display(), "loaded trusted custom Tempo genesis");
         }
