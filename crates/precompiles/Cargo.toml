@@ -112,6 +112,10 @@ required-features = ["test-utils"]
 name = "root_key_retired"
 required-features = ["test-utils"]
 
+[[test]]
+name = "signature_verifier"
+required-features = ["test-utils"]
+
 [[bench]]
 name = "tempo_precompiles"
 harness = false

@@ -1,6 +1,10 @@
 pub mod dispatch;
 
-use crate::{SIGNATURE_VERIFIER_ADDRESS, account_keychain::AccountKeychain, error::Result};
+use crate::{
+    SIGNATURE_VERIFIER_ADDRESS,
+    account_keychain::{AccountKeychain, AuthorizedKey},
+    error::Result,
+};
 use alloy::primitives::{Address, B256, Bytes};
 use tempo_contracts::precompiles::SignatureVerifierError;
 use tempo_precompiles_macros::contract;
@@ -8,6 +12,7 @@ use tempo_primitives::transaction::{
     SignatureType,
     tt_signature::{KeychainSignature, PrimitiveSignature, TempoSignature},
 };
+use tracing::trace;
 
 /// Gas cost for secp256k1 signature verification.
 const SECP256K1_VERIFY_GAS: u64 = 3_000;
@@ -44,30 +49,79 @@ impl SignatureVerifier {
             .map_err(|_| SignatureVerifierError::invalid_signature().into())
     }
 
+    /// Returns whether `signature` is an active access-key signature for `account`.
+    ///
+    /// From T14, `false` when the recovered key ID has a nonzero account commitment (TIP-1112):
+    /// its bare root authority is retired, whichever grant it is used under.
     pub fn verify_keychain(&self, account: Address, hash: B256, signature: Bytes) -> Result<bool> {
-        let (embedded_account, key_id) = self.recover_keychain_key(hash, signature)?;
-        if embedded_account != account {
+        let key = self.recover_keychain_key(hash, signature)?;
+        if key.account != account || self.is_retired_root(key.key_id)? {
             return Ok(false);
         }
 
-        AccountKeychain::new().is_active_key(account, key_id)
+        Ok(self
+            .registered_key(account, key.key_id, key.signature_type)?
+            .is_some())
     }
 
+    /// Returns whether `signature` is an active admin access-key signature for `account`, or its
+    /// root key's.
+    ///
+    /// From T14, `false` when the recovered key ID has a nonzero account commitment (TIP-1112),
+    /// including the implicit root of `account` itself.
     pub fn verify_keychain_admin(
         &self,
         account: Address,
         hash: B256,
         signature: Bytes,
     ) -> Result<bool> {
-        let (embedded_account, key_id) = self.recover_keychain_key(hash, signature)?;
-        if embedded_account != account {
+        let key = self.recover_keychain_key(hash, signature)?;
+        if key.account != account || self.is_retired_root(key.key_id)? {
             return Ok(false);
         }
 
-        AccountKeychain::new().is_admin_key(account, key_id)
+        // The root is implicitly admin without a stored access-key grant.
+        if key.key_id == account {
+            return Ok(true);
+        }
+        Ok(self
+            .registered_key(account, key.key_id, key.signature_type)?
+            .is_some_and(|key| key.is_admin))
     }
 
-    fn recover_keychain_key(&self, hash: B256, signature: Bytes) -> Result<(Address, Address)> {
+    /// Returns whether `key_id` is a retired root key (TIP-1112): from T14, an address with a
+    /// nonzero account commitment no longer acts through its own key. Reads the commitment at call
+    /// time, so a migration earlier in the block counts.
+    fn is_retired_root(&self, key_id: Address) -> Result<bool> {
+        Ok(self.storage.spec().is_t14() && !self.storage.config_commitment(key_id)?.is_zero())
+    }
+
+    /// Returns the active access key, or `None` when the keychain rejects it.
+    fn registered_key(
+        &self,
+        account: Address,
+        key_id: Address,
+        signature_type: u8,
+    ) -> Result<Option<AuthorizedKey>> {
+        let timestamp = self.storage.timestamp().saturating_to::<u64>();
+        // Pre-T14 verification ignored the stored type; preserve that behavior on replay.
+        let expected_type = self.storage.spec().is_t14().then_some(signature_type);
+        match AccountKeychain::new().validate_keychain_authorization(
+            account,
+            key_id,
+            timestamp,
+            expected_type,
+        ) {
+            Ok(key) => Ok(Some(key)),
+            Err(err) if err.is_system_error() => Err(err),
+            Err(err) => {
+                trace!(?err, %account, %key_id, "keychain rejected the key");
+                Ok(None)
+            }
+        }
+    }
+
+    fn recover_keychain_key(&self, hash: B256, signature: Bytes) -> Result<RecoveredKeychainKey> {
         let sig = TempoSignature::from_bytes(&signature)
             .map_err(|_| SignatureVerifierError::invalid_format())?;
         let keychain_sig = sig
@@ -79,9 +133,23 @@ impl SignatureVerifier {
         }
 
         let signing_hash = KeychainSignature::signing_hash(hash, keychain_sig.user_address);
-        let key_id = self.recover(signing_hash, keychain_sig.signature.to_bytes())?;
-        Ok((keychain_sig.user_address, key_id))
+        let signature = &keychain_sig.signature;
+        let key_id = self.recover(signing_hash, signature.to_bytes())?;
+        Ok(RecoveredKeychainKey {
+            account: keychain_sig.user_address,
+            key_id,
+            signature_type: signature.signature_type().into(),
+        })
     }
+}
+
+/// The access key a keychain signature was made with, and the account it claims to act for.
+struct RecoveredKeychainKey {
+    /// Account embedded in the keychain signature.
+    account: Address,
+    key_id: Address,
+    /// Signature type byte of the inner primitive signature.
+    signature_type: u8,
 }
 
 #[cfg(test)]

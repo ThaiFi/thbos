@@ -1127,10 +1127,17 @@ impl AccountKeychain {
     /// Internal predicate for root/admin status.
     ///
     /// Warning: this returns true when `key_id == account`, because the root key
-    /// is implicitly admin even when it is not stored as an access key.
+    /// is implicitly admin even when it is not stored as an access key. From T14 that holds
+    /// only while `account` has a zero commitment (TIP-1112); a retired root falls through to the
+    /// stored row, which is never an admin row for `key_id == account` (`authorize_key_internal`
+    /// rejects it). The commitment is read only on the `key_id == account` branch.
     pub fn is_admin_key(&self, account: Address, key_id: Address) -> Result<bool> {
         if key_id == account {
-            return Ok(true);
+            let retired =
+                self.storage.spec().is_t14() && !self.storage.config_commitment(account)?.is_zero();
+            if !retired {
+                return Ok(true);
+            }
         }
 
         let current_timestamp = self.storage.timestamp().saturating_to::<u64>();
