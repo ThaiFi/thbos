@@ -166,7 +166,7 @@ impl Access {
 }
 
 #[derive(Clone, Copy, Debug)]
-pub(super) enum GrantCase {
+enum GrantCase {
     PrimitiveGrant,
     NativeGrant,
     PrimitiveGrantAndUse,
@@ -176,24 +176,16 @@ pub(super) enum GrantCase {
 }
 
 #[derive(Clone, Copy, Debug)]
-pub(super) enum Warmth {
+enum Warmth {
     Cold,
     Loaded,
     AccessList,
     Coinbase,
 }
 
-#[derive(Clone, Copy, Debug)]
-enum GrantBindingCase {
-    Matching,
-    WrongTarget,
-    WrongType,
-    UnrelatedSigner,
-}
-
 /// Everything that varies between the grant scenarios.
 #[derive(Clone)]
-pub(super) struct Scenario {
+struct Scenario {
     spec: TempoHardfork,
     case: GrantCase,
     warmth: Warmth,
@@ -243,6 +235,14 @@ impl Scenario {
         self.authorization = Some(authorization);
         self
     }
+}
+
+#[derive(Clone, Copy, Debug)]
+enum GrantBindingCase {
+    Matching,
+    WrongTarget,
+    WrongType,
+    UnrelatedSigner,
 }
 
 /// A ready-to-run scenario.

@@ -31,7 +31,7 @@ mod cost;
 mod native_access;
 mod registration;
 
-pub(super) const FACTORY: Address = Address::repeat_byte(0x71);
+const FACTORY: Address = Address::repeat_byte(0x71);
 
 /// A one-owner, threshold-one account configuration and its owner key.
 struct Native {

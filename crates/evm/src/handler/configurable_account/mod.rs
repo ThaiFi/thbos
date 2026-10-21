@@ -351,6 +351,16 @@ pub(crate) fn register_commitments(
     Ok(())
 }
 
+/// Gas for loading one account: a warm read, plus the cold surcharge when it was not yet accessed.
+pub(crate) fn account_access_gas(gas: &GasParams, is_cold: bool) -> u64 {
+    u64::from(gas.get(GasId::WarmStorageReadCost))
+        + if is_cold {
+            gas.cold_account_additional_cost()
+        } else {
+            0
+        }
+}
+
 /// Loads and warms `address` once, reading its code, emptiness, nonce and commitment.
 fn load_account(
     host: &mut Evm<'_, TempoEvmTypes>,
@@ -572,16 +582,6 @@ fn grant_delegate_access_gas(
         ));
     }
     Ok(0)
-}
-
-/// Gas for loading one account: a warm read, plus the cold surcharge when it was not yet accessed.
-fn account_access_gas(gas: &GasParams, is_cold: bool) -> u64 {
-    u64::from(gas.get(GasId::WarmStorageReadCost))
-        + if is_cold {
-            gas.cold_account_additional_cost()
-        } else {
-            0
-        }
 }
 
 #[cfg(test)]

@@ -1374,10 +1374,7 @@ fn prepare_aa(
             .primitive_signature_type()
             .is_none()
     }) {
-        return Err(TempoInvalidTransaction::from(
-            ConfigurableAccountError::InvalidSignatureContext,
-        )
-        .into());
+        return Err(ConfigurableAccountError::InvalidSignatureContext.into());
     }
     // Validate AA transaction structure (calls list, CREATE rules)
     validate_calls(&tx.calls, !tx.tempo_authorization_list.is_empty())
