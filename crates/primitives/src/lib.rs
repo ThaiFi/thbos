@@ -33,6 +33,11 @@ extern crate alloc;
 pub mod account;
 
 use once_cell as _;
+/// `reth-evm` is a dependency only to enable its `account-ext` feature, see `Cargo.toml`.
+#[cfg(feature = "rpc")]
+mod reth_evm_account_ext {
+    use reth_evm as _;
+}
 
 /// Tempo block.
 pub type Block = alloy_consensus::Block<TempoTxEnvelope, TempoHeader>;
