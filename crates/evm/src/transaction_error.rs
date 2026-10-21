@@ -387,6 +387,12 @@ impl From<TempoInvalidTransaction> for HandlerError {
     }
 }
 
+impl From<ConfigurableAccountError> for HandlerError {
+    fn from(error: ConfigurableAccountError) -> Self {
+        TempoInvalidTransaction::ConfigurableAccount(error).into()
+    }
+}
+
 impl From<&'static str> for TempoInvalidTransaction {
     fn from(err: &'static str) -> Self {
         Self::CallsValidation(err)

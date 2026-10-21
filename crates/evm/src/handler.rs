@@ -491,14 +491,12 @@ fn validate_key_authorization(
     let Some(key_auth) = tx.key_authorization.as_ref() else {
         return Ok(());
     };
-    if configurable_account::grant_delegate(aa).is_some() && !spec.is_t14() {
+    if aa.grant_delegate().is_some() && !spec.is_t14() {
         return Err(ConfigurableAccountError::UnsupportedContext.into());
     }
 
     // Configurable-account roles are bound by `configurable_account::verify` instead.
-    let native = configurable_account::authorizations(aa)
-        .iter()
-        .any(Option::is_some);
+    let native = aa.native_authorizations().iter().any(Option::is_some);
     let access_key = if native { None } else { access_key_id(aa)? };
     let same_tx_auth_use = access_key == Some(key_auth.key_id);
     if access_key.is_some() && !same_tx_auth_use && !spec.is_t6() {
