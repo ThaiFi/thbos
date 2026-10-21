@@ -1195,6 +1195,81 @@ fn native_grant_recipient_code_change_rejects_stale_replay() {
     );
 }
 
+#[test]
+fn replay_rejects_a_root_key_retired_since_the_parent_state() {
+    let config = activation_config();
+    let block = TempoBlock::uncle(TempoHeader {
+        inner: Header {
+            number: 1,
+            timestamp: 10,
+            gas_limit: 30_000_000,
+            base_fee_per_gas: Some(0),
+            parent_beacon_block_root: Some(B256::ZERO),
+            ..Default::default()
+        },
+        general_gas_limit: 30_000_000,
+        ..Default::default()
+    })
+    .seal_slow();
+    let mut f = Fixture::with_parent(false);
+    let account = f.account;
+    let executed = f.primitive(3, vec![f.getter()]);
+    let result = f.run(&executed);
+    assert!(result.status, "{result:?}");
+    let call = Call {
+        to: TxKind::Call(PATH_USD_ADDRESS),
+        value: U256::ZERO,
+        input: Bytes::new(),
+    };
+    // The account's root key signs as the sender, then as the fee payer of another sender.
+    let sent = f.primitive(4, vec![call.clone()]);
+    let sender = signer(5);
+    let sponsored_tx = sponsored(aa_tx(0, vec![call]), &f.owner, sender.address());
+    let signature = sender
+        .sign_hash_sync(&sponsored_tx.signature_hash())
+        .unwrap();
+    let sponsored_tx = sponsored_tx.into_signed(signature.into());
+    let cases = [
+        ("sender", sent, account),
+        ("fee payer", sponsored_tx, sender.address()),
+    ];
+    let replay_error = |f: &Fixture, tx: &AASigned, from: Address| {
+        let mut executor = config.executor_for_block(f.chain_db(), &block).unwrap();
+        assert_eq!(executor.evm().config_spec_id(), TempoHardfork::T14);
+        let recovered = TempoTxEnvelope::AA(tx.clone()).with_signer(from);
+        executor
+            .execute_transaction_with_actions(
+                recovered.as_recovered_ref(),
+                StorageActionReplay {
+                    result: result.clone(),
+                    actions: vec![],
+                    expiring_nonce: None,
+                    validator_fee: U256::ZERO,
+                },
+                |_| {},
+            )
+            .err()
+            .and_then(|error| StorageActionReplayError::from_block_execution_error(&error))
+    };
+    for (role, tx, from) in &cases {
+        assert_ne!(
+            replay_error(&f, tx, *from),
+            Some(StorageActionReplayError::RootKeyRetired),
+            "{role} before the retirement"
+        );
+    }
+    // The recorded actions came from the parent state, so only the executor sees a root key
+    // retired since: replay must reject it in both roles rather than commit the actions.
+    retire(&mut f, account);
+    for (role, tx, from) in &cases {
+        assert_eq!(
+            replay_error(&f, tx, *from),
+            Some(StorageActionReplayError::RootKeyRetired),
+            "{role}"
+        );
+    }
+}
+
 fn activation_config() -> TempoEvmConfig {
     let factory = Address::repeat_byte(0x71);
     let mut genesis = DEV.genesis().clone();
