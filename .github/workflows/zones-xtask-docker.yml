@@ -1,0 +1,128 @@
+name: Zones xtask Docker Build (branch)
+run-name: "Zones xtask image from ${{ inputs.branch || github.ref_name }} requested by ${{ github.actor }}"
+
+# Builds and publishes only tempo-zone-xtask from a branch in this repository,
+# so unmerged xtask changes can be run against a zone without a full Zones
+# release build. Branch images never receive release, latest, edge or nightly tags.
+on:
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: "Branch in tempoxyz/tempo to build (blank builds the branch this workflow runs from)"
+        type: string
+        default: ""
+
+permissions: {}
+
+concurrency:
+  group: zones-xtask-docker-${{ inputs.branch || github.ref_name }}
+  cancel-in-progress: true
+
+env:
+  REGISTRY: ghcr.io/tempoxyz
+
+jobs:
+  build-and-push:
+    name: Build and push tempo-zone-xtask
+    if: github.repository == 'tempoxyz/tempo'
+    runs-on: depot-ubuntu-latest-16
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+    steps:
+      - name: Secure runner
+        uses: tempoxyz/gh-actions/actions/secure-runner@35019557465e3c38ee3468be171771fd73577584 # 2026-10-20T06-22-38Z-35019557
+
+      - name: Resolve branch head
+        id: source
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          INPUT_BRANCH: ${{ inputs.branch }}
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+        with:
+          script: |
+            let branch = process.env.INPUT_BRANCH.trim();
+            if (!branch) {
+              if (process.env.REF_TYPE !== 'branch') {
+                throw new Error('Run from a branch or set the branch input');
+              }
+              branch = process.env.REF_NAME;
+            }
+            // Only branches of this repository: never fork or pull request refs.
+            const { data } = await github.rest.repos.getBranch({ ...context.repo, branch });
+            const sha = data.commit.sha;
+            if (!/^[0-9a-f]{40}$/.test(sha)) {
+              throw new Error(`Branch ${branch} did not resolve to a commit SHA`);
+            }
+            const tag = `branch-${branch.toLowerCase().replace(/[^a-z0-9_.-]+/g, '-').replace(/^[-.]+/, '')}`.slice(0, 128);
+            core.setOutput('branch', branch);
+            core.setOutput('sha', sha);
+            core.setOutput('short_sha', sha.slice(0, 7));
+            core.setOutput('branch_tag', tag);
+            await core.summary
+              .addHeading('tempo-zone-xtask build source')
+              .addTable([
+                [{ data: 'Field', header: true }, { data: 'Value', header: true }],
+                ['Branch', branch],
+                ['Commit', sha],
+              ])
+              .write();
+
+      - name: Check out branch head
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ steps.source.outputs.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+          submodules: recursive
+
+      - uses: tempoxyz/gh-actions/vendor/depot/setup-action@35019557465e3c38ee3468be171771fd73577584 # 2026-10-20T06-22-38Z-35019557
+
+      - name: Docker metadata for tempo-zone-xtask
+        id: meta
+        uses: tempoxyz/gh-actions/vendor/docker/metadata-action@35019557465e3c38ee3468be171771fd73577584 # 2026-10-20T06-22-38Z-35019557
+        with:
+          images: |
+            ${{ env.REGISTRY }}/tempo-zone-xtask
+          bake-target: tempo-zone-xtask
+          flavor: latest=false
+          labels: |
+            org.opencontainers.image.revision=${{ steps.source.outputs.sha }}
+          tags: |
+            type=raw,value=${{ steps.source.outputs.branch_tag }}
+            type=raw,value=sha-${{ steps.source.outputs.short_sha }}
+
+      - name: Log in to Container Registry
+        uses: tempoxyz/gh-actions/vendor/docker/login-action@35019557465e3c38ee3468be171771fd73577584 # 2026-10-20T06-22-38Z-35019557
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push tempo-zone-xtask
+        uses: tempoxyz/gh-actions/vendor/depot/bake-action@35019557465e3c38ee3468be171771fd73577584 # 2026-10-20T06-22-38Z-35019557
+        with:
+          provenance: false
+          files: |
+            zones/docker/docker-bake.hcl
+            ${{ steps.meta.outputs.bake-file }}
+          targets: tempo-zone-xtask
+          project: 0c6tg19qsp
+          push: true
+        env:
+          VERGEN_GIT_SHA: ${{ steps.source.outputs.sha }}
+          VERGEN_GIT_SHA_SHORT: ${{ steps.source.outputs.short_sha }}
+
+      - name: Summarize published tags
+        env:
+          TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          {
+            echo '### Published tempo-zone-xtask images'
+            echo
+            while IFS= read -r tag; do
+              if [[ -n "$tag" ]]; then echo "- \`$tag\`"; fi
+            done <<< "$TAGS"
+          } >> "$GITHUB_STEP_SUMMARY"
