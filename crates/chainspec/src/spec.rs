@@ -7,7 +7,6 @@ use crate::{
 };
 use alloc::{boxed::Box, sync::Arc, vec::Vec};
 use alloy_eips::eip7840::BlobParams;
-use alloy_evm::eth::spec::EthExecutorSpec;
 use alloy_genesis::Genesis;
 use alloy_primitives::{Address, B256, U256, bytes};
 use core::num::NonZeroU64;
@@ -23,7 +22,7 @@ use reth_network_peers::NodeRecord;
 use serde_json::Error;
 #[cfg(feature = "std")]
 use std::sync::LazyLock;
-use tempo_contracts::precompiles::NATIVE_MULTISIG_ADDRESS;
+use tempo_contracts::precompiles::CONFIGURABLE_ACCOUNT_ADDRESS;
 use tempo_hardfork::TempoHardfork;
 use tempo_primitives::{TempoHeader, account::decode_config_commitment};
 
@@ -39,9 +38,6 @@ macro_rules! tempo_genesis_info {
             #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
             #[serde(rename_all = "camelCase")]
             pub struct TempoGenesisInfo {
-                /// Development-only TIP-1110 factory; public networks remain unconfigured.
-                #[serde(skip_serializing_if = "Option::is_none")]
-                multisig_recovery_factory: Option<Address>,
                 /// The epoch length used by consensus.
                 #[serde(skip_serializing_if = "Option::is_none")]
                 epoch_length: Option<NonZeroU64>,
@@ -53,6 +49,10 @@ macro_rules! tempo_genesis_info {
                     #[serde(skip_serializing_if = "Option::is_none")]
                     [<$variant:lower _time>]: Option<u64>,
                 )*
+                /// Development-only TIP-1110 factory; public networks remain unconfigured.
+                // TODO: set the canonical TIP-1110 recovery factory for public networks before T14 activation
+                #[serde(skip_serializing_if = "Option::is_none")]
+                configurable_account_recovery_factory: Option<Address>,
             }
 
             impl TempoGenesisInfo {
@@ -73,10 +73,6 @@ macro_rules! tempo_genesis_info {
 tempo_hardfork::tempo_post_genesis_hardforks!(tempo_genesis_info);
 
 impl TempoGenesisInfo {
-    /// Explicit custom-chain factory shared by execution, pool validation, and RPC.
-    pub const fn multisig_recovery_factory(&self) -> Option<Address> {
-        self.multisig_recovery_factory
-    }
     /// Extract Tempo genesis info from genesis extra_fields
     fn extract_from(genesis: &Genesis) -> Self {
         genesis
@@ -92,6 +88,11 @@ impl TempoGenesisInfo {
 
     pub fn general_gas_limit(&self) -> Option<u64> {
         self.general_gas_limit
+    }
+
+    /// Returns the TIP-1110 configurable account recovery factory configured in genesis, if any.
+    pub const fn configurable_account_recovery_factory(&self) -> Option<Address> {
+        self.configurable_account_recovery_factory
     }
 }
 
@@ -230,25 +231,34 @@ impl TempoChainSpec {
         let mut info = TempoGenesisInfo::extract_from(&genesis);
         // Parse this field separately so the legacy fallback for unrelated extras cannot
         // silently disable native authorization on an explicitly configured chain.
-        info.multisig_recovery_factory = genesis
+        info.configurable_account_recovery_factory = genesis
             .config
             .extra_fields
-            .get_deserialized::<Option<Address>>("multisigRecoveryFactory")
+            .get_deserialized::<Option<Address>>("configurableAccountRecoveryFactory")
             .transpose()?
             .flatten();
         if info
-            .multisig_recovery_factory
+            .configurable_account_recovery_factory
             .is_some_and(|address| !valid_native_address(address))
         {
             return Err(GenesisError::ReservedRecoveryFactory);
         }
         let t14_active = info.t14_time.is_some_and(|time| time <= genesis.timestamp);
+        // Only T14 activation changes how account extensions decode.
+        let commitment_hardfork = if t14_active {
+            TempoHardfork::T14
+        } else {
+            TempoHardfork::Genesis
+        };
         if t14_active {
-            let marker = genesis.alloc.entry(NATIVE_MULTISIG_ADDRESS).or_default();
+            let marker = genesis
+                .alloc
+                .entry(CONFIGURABLE_ACCOUNT_ADDRESS)
+                .or_default();
             if marker.code.as_ref().is_none_or(|code| code.is_empty()) {
                 marker.code = Some(bytes!("ef"));
             }
-            if let Some(factory) = info.multisig_recovery_factory {
+            if let Some(factory) = info.configurable_account_recovery_factory {
                 let account = genesis.alloc.entry(factory).or_default();
                 account.code = Some(bytes!("ef"));
                 account.nonce = Some(account.nonce.unwrap_or_default().max(1));
@@ -258,12 +268,10 @@ impl TempoChainSpec {
         // Check the final alloc: reservations above can install code on an account
         // whose original extension was valid. A hash alone cannot prove its derivation.
         for (address, account) in &genesis.alloc {
-            let commitment =
-                decode_config_commitment(&account.extension, t14_active).map_err(|error| {
-                    GenesisError::InvalidAccountExtension {
-                        address: *address,
-                        error,
-                    }
+            let commitment = decode_config_commitment(&account.extension, commitment_hardfork)
+                .map_err(|error| GenesisError::InvalidAccountExtension {
+                    address: *address,
+                    error,
                 })?;
             if commitment.is_zero() {
                 continue;
@@ -274,7 +282,7 @@ impl TempoChainSpec {
             if account.code.as_ref().is_some_and(|code| !code.is_empty()) {
                 return Err(GenesisError::CommittedAccountHasCode(*address));
             }
-            if Some(*address) == info.multisig_recovery_factory {
+            if Some(*address) == info.configurable_account_recovery_factory {
                 return Err(GenesisError::CommittedRecoveryFactory(*address));
             }
         }
@@ -463,12 +471,6 @@ impl EthereumHardforks for TempoChainSpec {
     }
 }
 
-impl EthExecutorSpec for TempoChainSpec {
-    fn deposit_contract_address(&self) -> Option<Address> {
-        self.inner.deposit_contract_address()
-    }
-}
-
 /// Generates the Tempo hardfork query trait for all post-Genesis hardforks.
 macro_rules! tempo_hardforks_trait {
     ($($variant:ident),* $(,)?) => {
@@ -541,9 +543,9 @@ impl TempoConsensusSpec for TempoChainSpec {
 /// Why [`TempoChainSpec::try_from_genesis`] rejected a genesis.
 #[derive(Debug)]
 pub enum GenesisError {
-    /// `multisigRecoveryFactory` does not deserialize as an optional address.
+    /// `configurableAccountRecoveryFactory` does not deserialize as an optional address.
     Json(Error),
-    /// `multisigRecoveryFactory` is zero or a reserved address.
+    /// `configurableAccountRecoveryFactory` is zero or a reserved address.
     ReservedRecoveryFactory,
     /// The account extension of `address` is not a valid config commitment.
     ///
@@ -575,9 +577,9 @@ impl core::fmt::Display for GenesisError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::Json(error) => core::fmt::Display::fmt(error, f),
-            Self::ReservedRecoveryFactory => {
-                f.write_str("multisigRecoveryFactory must be a nonzero, non-reserved address")
-            }
+            Self::ReservedRecoveryFactory => f.write_str(
+                "configurableAccountRecoveryFactory must be a nonzero, non-reserved address",
+            ),
             Self::InvalidAccountExtension { address, error } => {
                 write!(f, "invalid account extension for {address}: {error}")
             }
@@ -1064,9 +1066,17 @@ mod tests {
             assert!(cs.is_t12_active_at_timestamp(1791900000));
             assert_eq!(cs.tempo_hardfork_at(1791900000), TempoHardfork::T12);
             assert_eq!(cs.tempo_hardfork_at(1791900001), TempoHardfork::T12);
-            assert!(!cs.is_t13_active_at_timestamp(u64::MAX));
+
+            // Before T13 activation (1793718000 = Nov 3rd 2026 16:00 CET)
+            assert!(!cs.is_t13_active_at_timestamp(1793717999));
+            assert_eq!(cs.tempo_hardfork_at(1793717999), TempoHardfork::T12);
+
+            // At and after T13 activation
+            assert!(cs.is_t13_active_at_timestamp(1793718000));
+            assert_eq!(cs.tempo_hardfork_at(1793718000), TempoHardfork::T13);
+            assert_eq!(cs.tempo_hardfork_at(1793718001), TempoHardfork::T13);
             assert!(!cs.is_t14_active_at_timestamp(u64::MAX));
-            assert_eq!(cs.tempo_hardfork_at(u64::MAX), TempoHardfork::T12);
+            assert_eq!(cs.tempo_hardfork_at(u64::MAX), TempoHardfork::T13);
         }
 
         #[test]
@@ -1184,9 +1194,17 @@ mod tests {
             assert!(cs.is_t12_active_at_timestamp(1791468000));
             assert_eq!(cs.tempo_hardfork_at(1791468000), TempoHardfork::T12);
             assert_eq!(cs.tempo_hardfork_at(1791468001), TempoHardfork::T12);
-            assert!(!cs.is_t13_active_at_timestamp(u64::MAX));
+
+            // Before T13 activation (1793286000 = Oct 29th 2026 16:00 CET)
+            assert!(!cs.is_t13_active_at_timestamp(1793285999));
+            assert_eq!(cs.tempo_hardfork_at(1793285999), TempoHardfork::T12);
+
+            // At and after T13 activation
+            assert!(cs.is_t13_active_at_timestamp(1793286000));
+            assert_eq!(cs.tempo_hardfork_at(1793286000), TempoHardfork::T13);
+            assert_eq!(cs.tempo_hardfork_at(1793286001), TempoHardfork::T13);
             assert!(!cs.is_t14_active_at_timestamp(u64::MAX));
-            assert_eq!(cs.tempo_hardfork_at(u64::MAX), TempoHardfork::T12);
+            assert_eq!(cs.tempo_hardfork_at(u64::MAX), TempoHardfork::T13);
         }
 
         #[test]
@@ -1306,7 +1324,7 @@ mod tests {
             Address::ZERO,
             Address::with_last_byte(1),
             Address::from_word(U256::from(256).into()),
-            NATIVE_MULTISIG_ADDRESS,
+            CONFIGURABLE_ACCOUNT_ADDRESS,
             PATH_USD_ADDRESS,
             Address::new_virtual(Default::default(), Default::default()),
             address!("5ad0000000000000000000000000000000000001"),
@@ -1323,7 +1341,7 @@ mod tests {
             factory
                 .config
                 .extra_fields
-                .insert("multisigRecoveryFactory".into(), json!(address));
+                .insert("configurableAccountRecoveryFactory".into(), json!(address));
             let error = TempoChainSpec::try_from_genesis(factory).unwrap_err();
             assert!(
                 matches!(error, GenesisError::ReservedRecoveryFactory),
@@ -1360,7 +1378,7 @@ mod tests {
                 invalid
                     .config
                     .extra_fields
-                    .insert("multisigRecoveryFactory".into(), json!(address));
+                    .insert("configurableAccountRecoveryFactory".into(), json!(address));
             }
             let error = TempoChainSpec::try_from_genesis(invalid).unwrap_err();
             // The factory row fails the code check too: T14 installs `0xEF` on the factory, and
@@ -1412,7 +1430,7 @@ mod tests {
         genesis
             .config
             .extra_fields
-            .insert("multisigRecoveryFactory".into(), json!(factory));
+            .insert("configurableAccountRecoveryFactory".into(), json!(factory));
         let account = genesis.alloc.entry(factory).or_default();
         account.balance = U256::from(42);
         account.nonce = Some(7);
@@ -1426,7 +1444,10 @@ mod tests {
             account.storage.as_ref().unwrap()[&B256::ZERO],
             B256::repeat_byte(9)
         );
-        assert_eq!(spec.info.multisig_recovery_factory(), Some(factory));
+        assert_eq!(
+            spec.info.configurable_account_recovery_factory(),
+            Some(factory)
+        );
         assert_ne!(
             spec.genesis_header().inner.state_root,
             ChainSpec::from_genesis(genesis.clone())
@@ -1437,10 +1458,10 @@ mod tests {
             genesis
                 .config
                 .extra_fields
-                .insert("multisigRecoveryFactory".into(), invalid);
+                .insert("configurableAccountRecoveryFactory".into(), invalid);
             assert!(TempoChainSpec::try_from_genesis(genesis.clone()).is_err());
         }
-        assert_eq!(PRESTO.info.multisig_recovery_factory(), None);
-        assert_eq!(MODERATO.info.multisig_recovery_factory(), None);
+        assert_eq!(PRESTO.info.configurable_account_recovery_factory(), None);
+        assert_eq!(MODERATO.info.configurable_account_recovery_factory(), None);
     }
 }
