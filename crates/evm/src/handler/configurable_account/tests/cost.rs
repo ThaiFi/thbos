@@ -123,7 +123,7 @@ impl MaximumQuorums {
         })
     }
 
-    fn verify(&self, invalid_final: bool, sponsored: bool) -> Result<(), NativeMultisigError> {
+    fn verify(&self, invalid_final: bool, sponsored: bool) -> Result<(), ConfigurableAccountError> {
         // Include the actual optional secp recovery, not merely its fixture bytes.
         if sponsored {
             assert_eq!(
@@ -162,7 +162,7 @@ fn native_maximum_two_quorums_and_optional_sponsor() {
         fixture.verify(false, sponsored).unwrap();
         assert!(matches!(
             fixture.verify(true, sponsored),
-            Err(NativeMultisigError::OwnerSignatureRecoveryFailed { approval_index: 7 })
+            Err(ConfigurableAccountError::OwnerSignatureRecoveryFailed { approval_index: 7 })
         ));
     }
 }

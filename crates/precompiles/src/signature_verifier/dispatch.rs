@@ -33,7 +33,7 @@ const MAX_APPROVALS_RLP_PAYLOAD: usize = MAX_CONFIGURABLE_ACCOUNT_SIGNATURES
         payload_length: MAX_CONFIGURABLE_ACCOUNT_OWNER_SIGNATURE_BYTES,
     }
     .length_with_payload();
-const MAX_MULTISIG_RLP_PAYLOAD: usize = 21
+const MAX_CONFIGURABLE_ACCOUNT_RLP_PAYLOAD: usize = 21
     + Header {
         list: true,
         payload_length: MAX_CONFIG_RLP_PAYLOAD,
@@ -44,11 +44,11 @@ const MAX_MULTISIG_RLP_PAYLOAD: usize = 21
         payload_length: MAX_APPROVALS_RLP_PAYLOAD,
     }
     .length_with_payload();
-const MAX_MULTISIG_CALLDATA_LEN: usize = 4
+const MAX_CONFIGURABLE_ACCOUNT_CALLDATA_LEN: usize = 4
     + 32 * 4
     + (1 + Header {
         list: true,
-        payload_length: MAX_MULTISIG_RLP_PAYLOAD,
+        payload_length: MAX_CONFIGURABLE_ACCOUNT_RLP_PAYLOAD,
     }
     .length_with_payload())
     .next_multiple_of(32);
@@ -60,9 +60,9 @@ impl Precompile for SignatureVerifier {
         }
 
         let max_len = if self.storage.spec().is_t14()
-            && calldata.starts_with(&ISignatureVerifier::verifyMultisigCall::SELECTOR)
+            && calldata.starts_with(&ISignatureVerifier::verifyConfigurableAccountCall::SELECTOR)
         {
-            MAX_MULTISIG_CALLDATA_LEN
+            MAX_CONFIGURABLE_ACCOUNT_CALLDATA_LEN
         } else {
             MAX_CALLDATA_LEN
         };
@@ -89,8 +89,8 @@ impl Precompile for SignatureVerifier {
                         self.verify_keychain_admin(c.account, c.hash, c.signature)
                     }),
                     #[schedule(since = T14)]
-                    verifyMultisig(call) => view(call, |c| {
-                        self.verify_multisig(c.account, c.hash, &c.signature)
+                    verifyConfigurableAccount(call) => view(call, |c| {
+                        self.verify_configurable_account(c.account, c.hash, &c.signature)
                     }),
                 }
             }
@@ -236,10 +236,10 @@ mod tests {
     }
 
     #[test]
-    fn test_verify_multisig_selector_rejected_before_t14() -> eyre::Result<()> {
+    fn test_verify_configurable_account_selector_rejected_before_t14() -> eyre::Result<()> {
         let mut storage = HashMapStorageProvider::new_with_spec(1, TempoHardfork::T13);
         StorageCtx::enter(&mut storage, || {
-            let calldata = ISignatureVerifier::verifyMultisigCall {
+            let calldata = ISignatureVerifier::verifyConfigurableAccountCall {
                 account: Address::repeat_byte(0x71),
                 hash: B256::ZERO,
                 signature: vec![0x05].into(),
@@ -660,7 +660,7 @@ mod tests {
     }
 
     #[test]
-    fn test_max_multisig_calldata_fits_size_guard() {
+    fn test_max_configurable_account_calldata_fits_size_guard() {
         let owners = (1..=u8::try_from(MAX_CONFIGURABLE_ACCOUNT_OWNERS)
             .expect("owner count fits in u8"))
             .map(|index| ConfigurableAccountOwner {
@@ -686,12 +686,12 @@ mod tests {
             vec![approval; MAX_CONFIGURABLE_ACCOUNT_SIGNATURES],
         )
         .unwrap();
-        let calldata = ISignatureVerifier::verifyMultisigCall {
+        let calldata = ISignatureVerifier::verifyConfigurableAccountCall {
             account: signature.account(),
             hash: B256::ZERO,
             signature: TempoSignature::ConfigurableAccount(signature).to_bytes(),
         }
         .abi_encode();
-        assert!(calldata.len() <= MAX_MULTISIG_CALLDATA_LEN);
+        assert!(calldata.len() <= MAX_CONFIGURABLE_ACCOUNT_CALLDATA_LEN);
     }
 }

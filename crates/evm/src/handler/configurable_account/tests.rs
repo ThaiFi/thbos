@@ -6,7 +6,9 @@ use alloy_signer::SignerSync;
 use alloy_signer_local::PrivateKeySigner;
 use evm2::evm::{InMemoryDB, precompile::NoPrecompiles};
 use std::iter::repeat_with;
-use tempo_precompiles::{signature_verifier::multisig_verification_gas, storage::keccak_cost};
+use tempo_precompiles::{
+    signature_verifier::configurable_account_verification_gas, storage::keccak_cost,
+};
 use tempo_primitives::{
     AASigned, TempoTxEnvelope,
     account::encode_config_commitment,
@@ -161,14 +163,14 @@ fn gas_params(evm: &TempoEvm<'_>) -> GasParams {
     evm.version().gas_params.clone()
 }
 
-fn native_error(error: &HandlerError) -> Option<&NativeMultisigError> {
+fn native_error(error: &HandlerError) -> Option<&ConfigurableAccountError> {
     error
         .external_ref::<TempoInvalidTransaction>()
         .and_then(transaction_native_error)
 }
 
-fn transaction_native_error(error: &TempoInvalidTransaction) -> Option<&NativeMultisigError> {
-    if let TempoInvalidTransaction::NativeMultisig(error) = error {
+fn transaction_native_error(error: &TempoInvalidTransaction) -> Option<&ConfigurableAccountError> {
+    if let TempoInvalidTransaction::ConfigurableAccount(error) = error {
         Some(error)
     } else {
         None
@@ -227,7 +229,7 @@ fn native_hash_gas_layout_matches_all_owner_counts() {
             96
         );
         assert_eq!(
-            multisig_verification_gas(&signature).unwrap(),
+            configurable_account_verification_gas(&signature).unwrap(),
             calldata + keccak_cost(75 + 21 * count).unwrap() + keccak_cost(96).unwrap() + 3_000,
             "verification gas for {count} owners"
         );
@@ -347,7 +349,7 @@ fn native_state_registration_gas_and_registered_v0() {
     assert!(
         matches!(
             native_error(&error),
-            Some(NativeMultisigError::ConfigurationCommitmentMismatch { expected, actual })
+            Some(ConfigurableAccountError::ConfigurationCommitmentMismatch { expected, actual })
                 if *expected == B256::repeat_byte(0x99) && *actual == hash
         ),
         "{error:?}"
@@ -400,7 +402,7 @@ fn native_contexts_fail_closed_and_simulation_is_explicit() {
         assert!(
             matches!(
                 native_error(&error),
-                Some(NativeMultisigError::UnsupportedContext)
+                Some(ConfigurableAccountError::UnsupportedContext)
             ),
             "{spec:?}: {error:?}"
         );
@@ -418,7 +420,7 @@ fn native_contexts_fail_closed_and_simulation_is_explicit() {
     assert!(
         matches!(
             native_error(&error),
-            Some(NativeMultisigError::AccountMismatch { expected, actual })
+            Some(ConfigurableAccountError::AccountMismatch { expected, actual })
                 if *expected == other && *actual == account
         ),
         "{error:?}"
@@ -428,7 +430,7 @@ fn native_contexts_fail_closed_and_simulation_is_explicit() {
     assert!(
         matches!(
             native_error(&error),
-            Some(NativeMultisigError::FactoryNotConfigured)
+            Some(ConfigurableAccountError::FactoryNotConfigured)
         ),
         "{error:?}"
     );
@@ -440,7 +442,7 @@ fn native_contexts_fail_closed_and_simulation_is_explicit() {
     assert!(
         matches!(
             transaction_native_error(&error),
-            Some(NativeMultisigError::Quorum(
+            Some(ConfigurableAccountError::Quorum(
                 ConfigurableAccountQuorumError::SignerNotOwner
             ))
         ),
@@ -464,32 +466,32 @@ fn native_error_classification_preserves_state_dependent_errors() {
     let address = Address::repeat_byte(0x22);
     for (error, bad) in [
         (
-            NativeMultisigError::AccountMismatch {
+            ConfigurableAccountError::AccountMismatch {
                 expected: address,
                 actual: Address::ZERO,
             },
             true,
         ),
-        (NativeMultisigError::InvalidSignatureContext, true),
+        (ConfigurableAccountError::InvalidSignatureContext, true),
         (
-            NativeMultisigError::OwnerSignatureRecoveryFailed { approval_index: 0 },
+            ConfigurableAccountError::OwnerSignatureRecoveryFailed { approval_index: 0 },
             true,
         ),
-        (NativeMultisigError::UnsupportedContext, false),
-        (NativeMultisigError::FactoryNotConfigured, false),
+        (ConfigurableAccountError::UnsupportedContext, false),
+        (ConfigurableAccountError::FactoryNotConfigured, false),
         (
-            NativeMultisigError::InvalidAccount { account: address },
+            ConfigurableAccountError::InvalidAccount { account: address },
             false,
         ),
         (
-            NativeMultisigError::ConfigurationCommitmentMismatch {
+            ConfigurableAccountError::ConfigurationCommitmentMismatch {
                 expected: B256::ZERO,
                 actual: B256::repeat_byte(1),
             },
             false,
         ),
     ] {
-        let error = TempoInvalidTransaction::NativeMultisig(error);
+        let error = TempoInvalidTransaction::ConfigurableAccount(error);
         assert_eq!(error.is_bad_transaction(), bad, "{error}");
     }
 }
@@ -552,7 +554,7 @@ fn native_approvals_reject_invalid_quorums(threshold: u8) {
         assert!(
             matches!(
                 result,
-                Err(NativeMultisigError::Quorum(
+                Err(ConfigurableAccountError::Quorum(
                     ConfigurableAccountQuorumError::ExcessSignatures
                 ))
             ),

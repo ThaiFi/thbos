@@ -28,8 +28,8 @@ pub(super) struct P256Key {
     pub(super) address: Address,
 }
 
-/// A single-owner multisig whose owner holds all of `threshold`, with that owner's signature over `hash`.
-struct MultisigFixture {
+/// A single-owner configurable account whose owner holds all of `threshold`, with that owner's signature over `hash`.
+struct ConfigurableAccountFixture {
     factory: Address,
     config: ConfigurableAccountConfig,
     account: Address,
@@ -70,13 +70,14 @@ fn keychain_verification_rejects_configurable_account() -> eyre::Result<()> {
                     weight: 1,
                 }],
             };
-            let multisig = ConfigurableAccountSignature::try_new(
+            let configurable_account = ConfigurableAccountSignature::try_new(
                 claimed_account,
                 config,
                 vec![PrimitiveSignature::default()],
             )
             .unwrap();
-            let signature = TempoSignature::Keychain(KeychainSignature::new(account, multisig));
+            let signature =
+                TempoSignature::Keychain(KeychainSignature::new(account, configurable_account));
             let verifier = SignatureVerifier::new();
             for result in [
                 verifier.verify_keychain(account, B256::ZERO, signature.to_bytes()),
@@ -226,7 +227,7 @@ fn test_verify_invalid_secp256k1_signature_reverts() -> eyre::Result<()> {
     })
 }
 
-fn multisig_signature(
+fn configurable_account_signature(
     account: Address,
     config: ConfigurableAccountConfig,
     hash: B256,
@@ -248,20 +249,25 @@ fn multisig_signature(
     .to_vec())
 }
 
-fn verify_multisig(account: Address, hash: B256, signature: Vec<u8>) -> eyre::Result<bool> {
-    let calldata = ISignatureVerifier::verifyMultisigCall {
+fn verify_configurable_account(
+    account: Address,
+    hash: B256,
+    signature: Vec<u8>,
+) -> eyre::Result<bool> {
+    let calldata = ISignatureVerifier::verifyConfigurableAccountCall {
         account,
         hash,
         signature: signature.into(),
     }
     .abi_encode();
     let output = SignatureVerifier::new().call(&calldata, Address::ZERO)?;
-    Ok(ISignatureVerifier::verifyMultisigCall::abi_decode_returns(
-        output.bytes(),
-    )?)
+    Ok(ISignatureVerifier::verifyConfigurableAccountCall::abi_decode_returns(output.bytes())?)
 }
 
-fn multisig_fixture(signer: &PrivateKeySigner, threshold: u8) -> eyre::Result<MultisigFixture> {
+fn configurable_account_fixture(
+    signer: &PrivateKeySigner,
+    threshold: u8,
+) -> eyre::Result<ConfigurableAccountFixture> {
     let factory = Address::repeat_byte(0x71);
     let config = ConfigurableAccountConfig {
         salt: B256::ZERO,
@@ -274,8 +280,8 @@ fn multisig_fixture(signer: &PrivateKeySigner, threshold: u8) -> eyre::Result<Mu
     };
     let account = config.derive_account(factory).unwrap();
     let hash = B256::repeat_byte(0x42);
-    let signature = multisig_signature(account, config.clone(), hash, &[signer])?;
-    Ok(MultisigFixture {
+    let signature = configurable_account_signature(account, config.clone(), hash, &[signer])?;
+    Ok(ConfigurableAccountFixture {
         factory,
         config,
         account,
@@ -285,18 +291,22 @@ fn multisig_fixture(signer: &PrivateKeySigner, threshold: u8) -> eyre::Result<Mu
 }
 
 #[test]
-fn test_verify_multisig_unregistered_and_registered() -> eyre::Result<()> {
-    let MultisigFixture {
+fn test_verify_configurable_account_unregistered_and_registered() -> eyre::Result<()> {
+    let ConfigurableAccountFixture {
         factory,
         config,
         account,
         hash,
         signature,
-    } = multisig_fixture(&PrivateKeySigner::random(), 200)?;
+    } = configurable_account_fixture(&PrivateKeySigner::random(), 200)?;
     let mut storage = HashMapStorageProvider::new_with_spec(1, TempoHardfork::T14);
     storage.set_configurable_account_recovery_factory(factory);
     StorageCtx::enter(&mut storage, || {
-        assert!(verify_multisig(account, hash, signature.clone())?);
+        assert!(verify_configurable_account(
+            account,
+            hash,
+            signature.clone()
+        )?);
         assert_eq!(StorageCtx.config_commitment(account)?, B256::ZERO);
 
         StorageCtx.set_config_commitment(
@@ -304,13 +314,17 @@ fn test_verify_multisig_unregistered_and_registered() -> eyre::Result<()> {
             config.commitment().unwrap(),
             ConfigCommitmentWriteGas::Intrinsic,
         )?;
-        assert!(verify_multisig(account, hash, signature.clone())?);
-        assert!(!verify_multisig(
+        assert!(verify_configurable_account(
+            account,
+            hash,
+            signature.clone()
+        )?);
+        assert!(!verify_configurable_account(
             Address::repeat_byte(0x72),
             hash,
             signature.clone()
         )?);
-        let wrong_hash_call = ISignatureVerifier::verifyMultisigCall {
+        let wrong_hash_call = ISignatureVerifier::verifyConfigurableAccountCall {
             account,
             hash: B256::repeat_byte(0x43),
             signature: signature.clone().into(),
@@ -325,26 +339,26 @@ fn test_verify_multisig_unregistered_and_registered() -> eyre::Result<()> {
             B256::repeat_byte(0x12),
             ConfigCommitmentWriteGas::Precompile,
         )?;
-        assert!(!verify_multisig(account, hash, signature)?);
+        assert!(!verify_configurable_account(account, hash, signature)?);
         Ok(())
     })
 }
 
 #[test]
-fn test_verify_multisig_rejects_invalid_state_and_signature() -> eyre::Result<()> {
+fn test_verify_configurable_account_rejects_invalid_state_and_signature() -> eyre::Result<()> {
     let signer = PrivateKeySigner::random();
-    let MultisigFixture {
+    let ConfigurableAccountFixture {
         factory,
         config,
         account,
         hash,
         signature,
-    } = multisig_fixture(&signer, 1)?;
+    } = configurable_account_fixture(&signer, 1)?;
     let mut storage = HashMapStorageProvider::new_with_spec(1, TempoHardfork::T14);
     storage.set_configurable_account_recovery_factory(factory);
     StorageCtx::enter(&mut storage, || {
         let call = |signature: Vec<u8>| {
-            let calldata = ISignatureVerifier::verifyMultisigCall {
+            let calldata = ISignatureVerifier::verifyConfigurableAccountCall {
                 account,
                 hash,
                 signature: signature.into(),
@@ -355,15 +369,16 @@ fn test_verify_multisig_rejects_invalid_state_and_signature() -> eyre::Result<()
         expect_precompile_revert(&call(vec![0x05]), SignatureVerifierError::invalid_format());
 
         let wrong_signer = PrivateKeySigner::random();
-        let wrong_approval = multisig_signature(account, config.clone(), hash, &[&wrong_signer])?;
+        let wrong_approval =
+            configurable_account_signature(account, config.clone(), hash, &[&wrong_signer])?;
         expect_precompile_revert(
             &call(wrong_approval),
             SignatureVerifierError::invalid_signature(),
         );
-        assert!(!verify_multisig(
+        assert!(!verify_configurable_account(
             account,
             hash,
-            multisig_signature(
+            configurable_account_signature(
                 account,
                 ConfigurableAccountConfig {
                     salt: B256::repeat_byte(1),
@@ -375,13 +390,13 @@ fn test_verify_multisig_rejects_invalid_state_and_signature() -> eyre::Result<()
         )?);
 
         StorageCtx.set_code(account, Bytes::from_static(&[0x60, 0x00]))?;
-        assert!(!verify_multisig(account, hash, signature)?);
+        assert!(!verify_configurable_account(account, hash, signature)?);
         Ok(())
     })
 }
 
 #[test]
-fn verify_multisig_staticcall_charges_gas_and_halts_when_short() -> eyre::Result<()> {
+fn verify_configurable_account_staticcall_charges_gas_and_halts_when_short() -> eyre::Result<()> {
     use evm2::{
         BaseEvmConfigSelector, Evm, EvmTypesHost, ExecutionConfig, SpecId,
         evm::{InMemoryDB, precompile::NoPrecompiles},
@@ -407,14 +422,14 @@ fn verify_multisig_staticcall_charges_gas_and_halts_when_short() -> eyre::Result
         type Host<'a> = Evm<'a, Self>;
     }
 
-    let MultisigFixture {
+    let ConfigurableAccountFixture {
         factory,
         config,
         account,
         hash,
         signature,
-    } = multisig_fixture(&PrivateKeySigner::random(), 1)?;
-    let calldata = ISignatureVerifier::verifyMultisigCall {
+    } = configurable_account_fixture(&PrivateKeySigner::random(), 1)?;
+    let calldata = ISignatureVerifier::verifyConfigurableAccountCall {
         account,
         hash,
         signature: signature.clone().into(),
@@ -426,7 +441,7 @@ fn verify_multisig_staticcall_charges_gas_and_halts_when_short() -> eyre::Result
     let expected = input_cost(spec, calldata.len())?
         + u64::from(version.gas_params.get(GasId::WarmStorageReadCost))
         + version.gas_params.cold_account_additional_cost()
-        + multisig_verification_gas(parsed.as_configurable_account().unwrap())?
+        + configurable_account_verification_gas(parsed.as_configurable_account().unwrap())?
         + initial_account_proof_gas(&config)?;
 
     let call = |gas_limit| {
@@ -455,9 +470,9 @@ fn verify_multisig_staticcall_charges_gas_and_halts_when_short() -> eyre::Result
     };
 
     let (output, gas_used) = call(expected);
-    assert!(ISignatureVerifier::verifyMultisigCall::abi_decode_returns(
-        output?.bytes()
-    )?);
+    assert!(
+        ISignatureVerifier::verifyConfigurableAccountCall::abi_decode_returns(output?.bytes())?
+    );
     assert_eq!(gas_used, expected);
     assert!(matches!(
         call(expected - 1).0,

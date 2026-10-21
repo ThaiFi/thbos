@@ -238,7 +238,7 @@ pub enum TempoInvalidTransaction {
 
     /// Native account authorization failure.
     #[error(transparent)]
-    NativeMultisig(#[from] NativeMultisigError),
+    ConfigurableAccount(#[from] ConfigurableAccountError),
 
     /// A primitive key acted alone in `role` for an account with a nonzero configuration
     /// commitment (TIP-1112).
@@ -282,15 +282,15 @@ impl TempoInvalidTransaction {
             | Self::LegacyKeychainSignature
             | Self::CallsValidation(_) => true,
 
-            Self::NativeMultisig(error) => match error {
-                NativeMultisigError::OwnerSignatureRecoveryFailed { .. }
-                | NativeMultisigError::AccountMismatch { .. }
-                | NativeMultisigError::InvalidSignatureContext
-                | NativeMultisigError::Quorum(_) => true,
-                NativeMultisigError::UnsupportedContext
-                | NativeMultisigError::FactoryNotConfigured
-                | NativeMultisigError::InvalidAccount { .. }
-                | NativeMultisigError::ConfigurationCommitmentMismatch { .. } => false,
+            Self::ConfigurableAccount(error) => match error {
+                ConfigurableAccountError::OwnerSignatureRecoveryFailed { .. }
+                | ConfigurableAccountError::AccountMismatch { .. }
+                | ConfigurableAccountError::InvalidSignatureContext
+                | ConfigurableAccountError::Quorum(_) => true,
+                ConfigurableAccountError::UnsupportedContext
+                | ConfigurableAccountError::FactoryNotConfigured
+                | ConfigurableAccountError::InvalidAccount { .. }
+                | ConfigurableAccountError::ConfigurationCommitmentMismatch { .. } => false,
             },
 
             // State- or fork-dependent: may resolve as the chain advances.
@@ -314,24 +314,24 @@ impl TempoInvalidTransaction {
 
 /// Native account authorization failure (TIP-1112).
 #[derive(Clone, Debug, PartialEq, Eq, Hash, thiserror::Error)]
-pub enum NativeMultisigError {
+pub enum ConfigurableAccountError {
     /// Native authorization is not active in this execution context.
-    #[error("native multisig is unavailable in this execution context")]
+    #[error("configurable account is unavailable in this execution context")]
     UnsupportedContext,
     /// A native signature appears in a role that forbids it.
-    #[error("native multisig signature is forbidden in this transaction role")]
+    #[error("configurable account signature is forbidden in this transaction role")]
     InvalidSignatureContext,
     /// The configurable account recovery factory is not configured.
-    #[error("native multisig recovery factory is not configured")]
+    #[error("recovery factory is not configured")]
     FactoryNotConfigured,
     /// The account cannot hold a native configuration.
-    #[error("invalid multisig account {account}")]
+    #[error("invalid configurable account {account}")]
     InvalidAccount {
         /// Rejected account.
         account: Address,
     },
     /// The native signature names an account other than the transaction sender.
-    #[error("multisig signer account mismatch: expected {expected}, actual {actual}")]
+    #[error("configurable account signer mismatch: expected {expected}, actual {actual}")]
     AccountMismatch {
         /// Transaction sender.
         expected: Address,
@@ -339,7 +339,9 @@ pub enum NativeMultisigError {
         actual: Address,
     },
     /// The supplied configuration does not match the stored commitment.
-    #[error("multisig configuration commitment mismatch: expected {expected}, actual {actual}")]
+    #[error(
+        "configurable account configuration commitment mismatch: expected {expected}, actual {actual}"
+    )]
     ConfigurationCommitmentMismatch {
         /// Stored commitment.
         expected: B256,
@@ -347,7 +349,7 @@ pub enum NativeMultisigError {
         actual: B256,
     },
     /// An owner signature could not be recovered.
-    #[error("invalid multisig owner signature at approval {approval_index}")]
+    #[error("invalid configurable account owner signature at approval {approval_index}")]
     OwnerSignatureRecoveryFailed {
         /// Index of the failing approval.
         approval_index: usize,

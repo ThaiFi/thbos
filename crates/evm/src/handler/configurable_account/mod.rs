@@ -4,7 +4,7 @@
 use super::TempoEvmTypes;
 use crate::{
     ExecutionContext, TempoAaTx, TempoInvalidTransaction, TempoTxEnv,
-    transaction_error::{NativeMultisigError, RootKeyRole},
+    transaction_error::{ConfigurableAccountError, RootKeyRole},
 };
 use alloy_consensus::Transaction as _;
 use alloy_eips::eip7702::{RecoveredAuthority, RecoveredAuthorization};
@@ -43,12 +43,12 @@ pub(crate) struct NativeAuthorization<'a> {
 impl NativeAuthorization<'_> {
     /// Verifies owner signatures and quorum against the supplied configuration.
     /// Does not check account state, eligibility, or gas affordability; see [`validate_state`].
-    fn verify(&self) -> Result<(), NativeMultisigError> {
+    fn verify(&self) -> Result<(), ConfigurableAccountError> {
         self.signature
             .verify_approvals(self.inner_digest)
             .map_err(|error| match error {
                 ConfigurableAccountQuorumError::OwnerSignatureRecoveryFailed { approval_index } => {
-                    NativeMultisigError::OwnerSignatureRecoveryFailed { approval_index }
+                    ConfigurableAccountError::OwnerSignatureRecoveryFailed { approval_index }
                 }
                 ConfigurableAccountQuorumError::ZeroThreshold
                 | ConfigurableAccountQuorumError::EmptySignatures
@@ -57,7 +57,7 @@ impl NativeAuthorization<'_> {
                 | ConfigurableAccountQuorumError::SignerNotOwner
                 | ConfigurableAccountQuorumError::SignersNotAscending
                 | ConfigurableAccountQuorumError::WeightBelowThreshold => {
-                    NativeMultisigError::Quorum(error)
+                    ConfigurableAccountError::Quorum(error)
                 }
             })
     }
@@ -98,8 +98,8 @@ fn load_account(
     })
 }
 
-fn invalid(error: NativeMultisigError) -> HandlerError {
-    TempoInvalidTransaction::NativeMultisig(error).into()
+fn invalid(error: ConfigurableAccountError) -> HandlerError {
+    TempoInvalidTransaction::ConfigurableAccount(error).into()
 }
 
 /// Outer (direct or delegated) role, then inline grant role; either slot may be absent.
@@ -314,16 +314,16 @@ fn validate_native_roles(
     // Context rejection must not depend on factory configuration or account reads.
     if roles.iter().any(Option::is_some) {
         if aa.signature().is_legacy_keychain() {
-            return Err(invalid(NativeMultisigError::InvalidSignatureContext));
+            return Err(invalid(ConfigurableAccountError::InvalidSignatureContext));
         }
         if !spec.is_t14() {
-            return Err(invalid(NativeMultisigError::UnsupportedContext));
+            return Err(invalid(ConfigurableAccountError::UnsupportedContext));
         }
     }
     if spec.is_t14() && aa.signature().is_keychain() {
         let account = load_account(host, caller, spec)?;
         if !account.commitment.is_zero() && account.has_code {
-            return Err(invalid(NativeMultisigError::InvalidAccount {
+            return Err(invalid(ConfigurableAccountError::InvalidAccount {
                 account: caller,
             }));
         }
@@ -339,7 +339,7 @@ fn validate_native_roles(
     if let Some(signature) = aa.signature().as_configurable_account()
         && signature.account() != caller
     {
-        return Err(invalid(NativeMultisigError::AccountMismatch {
+        return Err(invalid(ConfigurableAccountError::AccountMismatch {
             expected: caller,
             actual: signature.account(),
         }));
@@ -348,7 +348,7 @@ fn validate_native_roles(
         .block()
         .ext
         .configurable_account_recovery_factory()
-        .ok_or_else(|| invalid(NativeMultisigError::FactoryNotConfigured))?;
+        .ok_or_else(|| invalid(ConfigurableAccountError::FactoryNotConfigured))?;
     let mut accounts = Vec::with_capacity(2);
     let mut extra_gas = 0;
     let mut state_gas = 0;
@@ -356,13 +356,13 @@ fn validate_native_roles(
         let signature = role.signature;
         let address = signature.account();
         if !valid_account(address, spec) {
-            return Err(invalid(NativeMultisigError::InvalidAccount {
+            return Err(invalid(ConfigurableAccountError::InvalidAccount {
                 account: address,
             }));
         }
         let account = load_account(host, address, spec)?;
         if account.has_code {
-            return Err(invalid(NativeMultisigError::InvalidAccount {
+            return Err(invalid(ConfigurableAccountError::InvalidAccount {
                 account: address,
             }));
         }
@@ -376,12 +376,15 @@ fn validate_native_roles(
             .map_err(|error| {
                 invalid(match error {
                     ConfigurableAccountStateError::CommitmentMismatch { expected, actual } => {
-                        NativeMultisigError::ConfigurationCommitmentMismatch { expected, actual }
+                        ConfigurableAccountError::ConfigurationCommitmentMismatch {
+                            expected,
+                            actual,
+                        }
                     }
                     ConfigurableAccountStateError::UnregisteredVersion { .. }
                     | ConfigurableAccountStateError::FactoryNotConfigured
                     | ConfigurableAccountStateError::InitialAccountMismatch { .. } => {
-                        NativeMultisigError::InvalidAccount { account: address }
+                        ConfigurableAccountError::InvalidAccount { account: address }
                     }
                 })
             })?;

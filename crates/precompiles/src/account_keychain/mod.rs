@@ -81,7 +81,7 @@ pub enum StoredSignatureType {
     Secp256k1,
     P256,
     WebAuthn,
-    Multisig,
+    ConfigurableAccount,
 }
 
 impl TryFrom<SignatureType> for StoredSignatureType {
@@ -92,7 +92,7 @@ impl TryFrom<SignatureType> for StoredSignatureType {
             SignatureType::Secp256k1 => Ok(Self::Secp256k1),
             SignatureType::P256 => Ok(Self::P256),
             SignatureType::WebAuthn => Ok(Self::WebAuthn),
-            SignatureType::ConfigurableAccount => Ok(Self::Multisig),
+            SignatureType::ConfigurableAccount => Ok(Self::ConfigurableAccount),
             _ => Err(AccountKeychainError::invalid_signature_type().into()),
         }
     }
@@ -104,7 +104,7 @@ impl From<StoredSignatureType> for SignatureType {
             StoredSignatureType::Secp256k1 => Self::Secp256k1,
             StoredSignatureType::P256 => Self::P256,
             StoredSignatureType::WebAuthn => Self::WebAuthn,
-            StoredSignatureType::Multisig => Self::ConfigurableAccount,
+            StoredSignatureType::ConfigurableAccount => Self::ConfigurableAccount,
         }
     }
 }
@@ -242,7 +242,7 @@ impl AccountKeychain {
     /// - `ExpiryInPast` — expiry must be in the future (enforced since T0)
     /// - `KeyAlreadyExists` — a key with this ID is already registered
     /// - `KeyAlreadyRevoked` — revoked keys cannot be re-authorized
-    /// - `InvalidSignatureType` — unsupported type, including Multisig before T14
+    /// - `InvalidSignatureType` — unsupported type, including ConfigurableAccount before T14
     pub fn authorize_key(
         &mut self,
         msg_sender: Address,
@@ -309,7 +309,9 @@ impl AccountKeychain {
         }
 
         // Before T14, value 3 followed the unsupported-type path after these reads.
-        self.ensure_multisig_type_active(signature_type == SignatureType::ConfigurableAccount)?;
+        self.ensure_configurable_account_type_active(
+            signature_type == SignatureType::ConfigurableAccount,
+        )?;
         let signature_type = StoredSignatureType::try_from(signature_type)?;
 
         // TIP-1011 fields are hardfork-gated at T3, so reject them before mutating state.
@@ -1229,14 +1231,16 @@ impl AccountKeychain {
             return Err(AccountKeychainError::key_expired().into());
         }
 
-        self.ensure_multisig_type_active(key.signature_type == StoredSignatureType::Multisig)?;
+        self.ensure_configurable_account_type_active(
+            key.signature_type == StoredSignatureType::ConfigurableAccount,
+        )?;
 
         Ok(key)
     }
 
-    /// Rejects the multisig signature type before T14.
-    fn ensure_multisig_type_active(&self, is_multisig: bool) -> Result<()> {
-        if is_multisig && !self.storage.spec().is_t14() {
+    /// Rejects the configurable account signature type before T14.
+    fn ensure_configurable_account_type_active(&self, is_configurable_account: bool) -> Result<()> {
+        if is_configurable_account && !self.storage.spec().is_t14() {
             return Err(AccountKeychainError::invalid_signature_type().into());
         }
         Ok(())
@@ -1249,7 +1253,7 @@ impl AccountKeychain {
     /// * `key_id` - The key identifier to validate
     /// * `current_timestamp` - Current block timestamp for expiry check
     /// * `expected_sig_type` - The signature type from the actual signature (0=Secp256k1, 1=P256,
-    ///   2=WebAuthn, 3=Multisig). Pass `None` to skip validation (for backward compatibility pre-T1).
+    ///   2=WebAuthn, 3=ConfigurableAccount). Pass `None` to skip validation (for backward compatibility pre-T1).
     ///
     /// # Errors
     /// - `KeyAlreadyRevoked` — the key has been permanently revoked
@@ -1871,7 +1875,7 @@ mod tests {
     }
 
     #[test]
-    fn test_multisig_delegate_grant_guards() -> eyre::Result<()> {
+    fn test_configurable_account_delegate_grant_guards() -> eyre::Result<()> {
         #[derive(Clone, Copy, Debug)]
         enum Selector {
             Authorize,
@@ -1968,7 +1972,7 @@ mod tests {
     }
 
     #[test]
-    fn test_multisig_delegate_use_checks_type_and_fork() -> eyre::Result<()> {
+    fn test_configurable_account_delegate_use_checks_type_and_fork() -> eyre::Result<()> {
         for spec in [
             TempoHardfork::T11,
             TempoHardfork::T12,
@@ -1981,7 +1985,7 @@ mod tests {
                 let parent = Address::repeat_byte(1);
                 let delegate = Address::repeat_byte(2);
                 keychain.keys[parent][delegate].write(AuthorizedKey {
-                    signature_type: StoredSignatureType::Multisig,
+                    signature_type: StoredSignatureType::ConfigurableAccount,
                     expiry: u64::MAX,
                     ..Default::default()
                 })?;

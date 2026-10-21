@@ -14,7 +14,7 @@ use crate::{
     signature_gas::{
         account_signature_verification_gas, calldata_tokens, tempo_signature_verification_gas,
     },
-    transaction_error::NativeMultisigError,
+    transaction_error::ConfigurableAccountError,
 };
 use alloy_primitives::{Address, KECCAK256_EMPTY, TxKind, U256};
 use evm2::{
@@ -492,7 +492,7 @@ fn validate_key_authorization(
         return Ok(());
     };
     if configurable_account::grant_delegate(aa).is_some() && !spec.is_t14() {
-        return Err(NativeMultisigError::UnsupportedContext.into());
+        return Err(ConfigurableAccountError::UnsupportedContext.into());
     }
 
     // Configurable-account roles are bound by `configurable_account::verify` instead.
@@ -1376,9 +1376,10 @@ fn prepare_aa(
             .primitive_signature_type()
             .is_none()
     }) {
-        return Err(
-            TempoInvalidTransaction::from(NativeMultisigError::InvalidSignatureContext).into(),
-        );
+        return Err(TempoInvalidTransaction::from(
+            ConfigurableAccountError::InvalidSignatureContext,
+        )
+        .into());
     }
     // Validate AA transaction structure (calls list, CREATE rules)
     validate_calls(&tx.calls, !tx.tempo_authorization_list.is_empty())

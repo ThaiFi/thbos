@@ -335,7 +335,7 @@ fn native_getter_observes_first_registration_during_execution() {
 }
 
 #[test]
-fn multisig_authorization_list_entries_are_rejected() {
+fn configurable_account_authorization_list_entries_are_rejected() {
     let parent = Address::repeat_byte(1);
     let native = Native::random();
     for spec in [TempoHardfork::T13, TempoHardfork::T14] {
@@ -366,7 +366,7 @@ fn multisig_authorization_list_entries_are_rejected() {
             .expect("a configurable-account authorization-list entry is rejected");
             assert_eq!(
                 native_error(&error),
-                Some(&NativeMultisigError::InvalidSignatureContext),
+                Some(&ConfigurableAccountError::InvalidSignatureContext),
                 "{spec:?}: {error:?}"
             );
         }

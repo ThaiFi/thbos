@@ -23,7 +23,7 @@ use tempo_chainspec::TempoChainSpec;
 use tempo_contracts::precompiles::{CONFIGURABLE_ACCOUNT_ADDRESS, IConfigurableAccount};
 use tempo_evm::{
     TempoEvm, TempoEvmConfig, TempoInvalidTransaction, TempoTxEnv,
-    transaction_error::{NativeMultisigError, RootKeyRole},
+    transaction_error::{ConfigurableAccountError, RootKeyRole},
 };
 use tempo_precompiles::{PATH_USD_ADDRESS, storage::StorageCtx, test_util::TIP20Setup};
 use tempo_primitives::{
@@ -274,7 +274,7 @@ fn configurable_account_signature_must_name_the_sender() {
     );
     assert_eq!(
         invalid(&mut evm, &recovered(envelope, other)),
-        TempoInvalidTransaction::NativeMultisig(NativeMultisigError::AccountMismatch {
+        TempoInvalidTransaction::ConfigurableAccount(ConfigurableAccountError::AccountMismatch {
             expected: other,
             actual: account,
         })
@@ -300,6 +300,8 @@ fn configurable_account_with_code_cannot_sign() {
     );
     assert_eq!(
         invalid(&mut evm, &recovered(envelope, account)),
-        TempoInvalidTransaction::NativeMultisig(NativeMultisigError::InvalidAccount { account })
+        TempoInvalidTransaction::ConfigurableAccount(ConfigurableAccountError::InvalidAccount {
+            account
+        })
     );
 }

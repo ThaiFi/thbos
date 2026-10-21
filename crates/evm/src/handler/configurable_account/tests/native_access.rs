@@ -293,7 +293,7 @@ impl Access {
     }
 }
 
-fn assert_native_error(error: &HandlerError, expected: &NativeMultisigError, context: &str) {
+fn assert_native_error(error: &HandlerError, expected: &ConfigurableAccountError, context: &str) {
     assert_eq!(native_error(error), Some(expected), "{context}: {error:?}");
 }
 
@@ -309,7 +309,11 @@ fn native_grant_type_is_gated_in_handler(spec: TempoHardfork) {
         assert!(result.unwrap().0);
     } else {
         let error = result.unwrap_err();
-        assert_native_error(&error, &NativeMultisigError::UnsupportedContext, "gate");
+        assert_native_error(
+            &error,
+            &ConfigurableAccountError::UnsupportedContext,
+            "gate",
+        );
     }
 }
 
@@ -341,7 +345,7 @@ fn native_handler_rejects_account_code(case: GrantCase) {
             let error = result.unwrap_err();
             assert_native_error(
                 &error,
-                &NativeMultisigError::InvalidAccount { account },
+                &ConfigurableAccountError::InvalidAccount { account },
                 &format!("{case:?}"),
             );
         } else if matches!(case, GrantCase::PrimitiveGrantAndUse) {
@@ -435,7 +439,7 @@ fn native_handler_binds_grant_roles(case: GrantBindingCase) {
 
 #[test_case::test_case(GrantCase::PrimitiveAdminGrant; "primitive_parent")]
 #[test_case::test_case(GrantCase::NativeAdminGrant; "configurable_parent")]
-fn multisig_admin_can_sign_inline_grant(case: GrantCase) {
+fn configurable_account_admin_can_sign_inline_grant(case: GrantCase) {
     let access = Access::new();
     let parent = if matches!(case, GrantCase::NativeAdminGrant) {
         access.parent.account()

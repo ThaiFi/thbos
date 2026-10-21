@@ -1,6 +1,6 @@
 use evm2::interpreter::gas::{COLD_SLOAD_COST, STANDARD_TOKEN_COST};
 use tempo_precompiles::{
-    ECRECOVER_GAS, error::Result, signature_verifier::multisig_verification_gas,
+    ECRECOVER_GAS, error::Result, signature_verifier::configurable_account_verification_gas,
 };
 use tempo_primitives::transaction::{AccountSignature, PrimitiveSignature, TempoSignature};
 
@@ -39,7 +39,7 @@ pub(crate) fn account_signature_verification_gas(signature: &AccountSignature) -
             Ok(primitive_signature_verification_gas(signature))
         }
         AccountSignature::ConfigurableAccount(signature) => {
-            Ok(multisig_verification_gas(signature)?.saturating_sub(ECRECOVER_GAS))
+            Ok(configurable_account_verification_gas(signature)?.saturating_sub(ECRECOVER_GAS))
         }
     }
 }
@@ -57,7 +57,7 @@ pub(crate) fn tempo_signature_verification_gas(signature: &TempoSignature) -> Re
                 + KEYCHAIN_VALIDATION_GAS)
         }
         TempoSignature::ConfigurableAccount(signature) => {
-            Ok(multisig_verification_gas(signature)?.saturating_sub(ECRECOVER_GAS))
+            Ok(configurable_account_verification_gas(signature)?.saturating_sub(ECRECOVER_GAS))
         }
     }
 }

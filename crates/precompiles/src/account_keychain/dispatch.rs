@@ -15,7 +15,7 @@ impl Precompile for AccountKeychain {
             return err;
         }
 
-        // T11's strict ABI decoder rejected enum value 3 before Multisig existed.
+        // T11's strict ABI decoder rejected enum value 3 before ConfigurableAccount existed.
         // All authorization entrypoints put signatureType in the second ABI word.
         if self.storage.spec().is_t11()
             && !self.storage.spec().is_t14()
@@ -134,7 +134,7 @@ mod tests {
     };
 
     #[test]
-    fn multisig_key_type_preserves_pre_t14_rejection() -> eyre::Result<()> {
+    fn configurable_account_key_type_preserves_pre_t14_rejection() -> eyre::Result<()> {
         for spec in TempoHardfork::VARIANTS
             .iter()
             .copied()

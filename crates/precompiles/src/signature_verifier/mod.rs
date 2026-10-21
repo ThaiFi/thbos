@@ -81,7 +81,12 @@ impl SignatureVerifier {
             .is_some_and(|key| key.is_admin))
     }
 
-    fn verify_multisig(&self, account: Address, hash: B256, bytes: &[u8]) -> Result<bool> {
+    fn verify_configurable_account(
+        &self,
+        account: Address,
+        hash: B256,
+        bytes: &[u8],
+    ) -> Result<bool> {
         let signature = TempoSignature::from_bytes(bytes)
             .map_err(|_| SignatureVerifierError::invalid_format())?;
         let Some(signature) = signature.as_configurable_account() else {
@@ -101,7 +106,7 @@ impl SignatureVerifier {
         } else {
             0
         };
-        let verification_gas = multisig_verification_gas(signature)?
+        let verification_gas = configurable_account_verification_gas(signature)?
             .checked_add(initial_proof_gas)
             .ok_or(TempoPrecompileError::OutOfGas)?;
         self.storage.deduct_gas(verification_gas)?;
@@ -189,11 +194,13 @@ struct RecoveredKeychainKey {
     signature_type: u8,
 }
 
-/// Full multisig verification cost for a registered account, before account access.
+/// Full configurable account verification cost for a registered account, before account access.
 /// Initial address derivation is charged separately when the stored commitment is zero.
 ///
 /// Fails with `OutOfGas` if the cost overflows `u64`.
-pub fn multisig_verification_gas(signature: &ConfigurableAccountSignature) -> Result<u64> {
+pub fn configurable_account_verification_gas(
+    signature: &ConfigurableAccountSignature,
+) -> Result<u64> {
     let mut witness = rlp::encode(signature.account());
     signature.config().encode(&mut witness);
     signature
