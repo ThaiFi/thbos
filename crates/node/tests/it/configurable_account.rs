@@ -316,12 +316,10 @@ fn simulated_configurable_account_signature_must_name_the_sender() {
     // State-aware preprocessing binds the mock to `from`; install one for another account to
     // reach the handler guard.
     let request = TempoTransactionRequest {
-        inner: TransactionRequest {
-            from: Some(other),
-            to: Some(TxKind::Call(DELEGATE)),
-            gas: Some(5_000_000),
-            ..Default::default()
-        },
+        inner: TransactionRequest::default()
+            .from(other)
+            .to(DELEGATE)
+            .gas_limit(5_000_000),
         fee_token: Some(PATH_USD_ADDRESS),
         key_type: Some(SignatureType::ConfigurableAccount),
         configurable_account_simulation: Some(spec.clone()),
@@ -358,12 +356,10 @@ fn simulated_webauthn_approvals_charge_worst_case_data() {
             }],
         };
         let request = TempoTransactionRequest {
-            inner: TransactionRequest {
-                from: Some(account),
-                to: Some(TxKind::Call(DELEGATE)),
-                gas: Some(5_000_000),
-                ..Default::default()
-            },
+            inner: TransactionRequest::default()
+                .from(account)
+                .to(DELEGATE)
+                .gas_limit(5_000_000),
             fee_token: Some(PATH_USD_ADDRESS),
             key_type: Some(SignatureType::ConfigurableAccount),
             configurable_account_simulation_signature: Some(spec.mock_signature(account).unwrap()),
