@@ -92,6 +92,12 @@ pub struct TempoGenesisInfo {
     /// Activation timestamp for T14 hardfork.
     #[serde(skip_serializing_if = "Option::is_none")]
     t14_time: Option<u64>,
+    /// THBOS (ThaiFi): the base fee switches to the THBOS schedule
+    /// (`THBOS_BASE_FEE_FLOOR` / `THBOS_BASE_FEE_CAP` in
+    /// `tempo_hardfork::constants::gas`) at this timestamp; before it
+    /// the upstream TIP-1067 values apply.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    thbos_time: Option<u64>,
 }
 
 impl TempoGenesisInfo {
@@ -106,6 +112,11 @@ impl TempoGenesisInfo {
 
     pub fn epoch_length(&self) -> Option<NonZeroU64> {
         self.epoch_length
+    }
+
+    /// Returns the THBOS fee-schedule switch timestamp, if scheduled.
+    pub const fn thbos_time(&self) -> Option<u64> {
+        self.thbos_time
     }
 
     pub fn general_gas_limit(&self) -> Option<u64> {
@@ -415,9 +426,20 @@ impl EthChainSpec for TempoChainSpec {
                 .inner
                 .base_fee_per_gas
                 .expect("tempo blocks are expected to have a base fee");
-            Some(tempo_t7_next_block_base_fee(
+            let (floor, cap) = if self
+                .info
+                .thbos_time()
+                .is_some_and(|t| target_timestamp >= t)
+            {
+                (THBOS_BASE_FEE_FLOOR, THBOS_BASE_FEE_CAP)
+            } else {
+                (TEMPO_T7_BASE_FEE_FLOOR, TEMPO_T7_BASE_FEE_CAP)
+            };
+            Some(tempo_t7_next_block_base_fee_in(
                 parent_base_fee,
                 parent.inner.gas_used,
+                floor,
+                cap,
             ))
         } else if target_fork.is_t1() {
             Some(TEMPO_T1_BASE_FEE)
