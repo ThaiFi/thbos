@@ -24,6 +24,13 @@ use Party::{Delegate, Payer};
 
 const COMMITMENT: B256 = B256::repeat_byte(0x11);
 
+/// The payer of a channel, or the separate signer it authorizes to sign vouchers.
+#[derive(Clone, Copy)]
+enum Party {
+    Payer,
+    Delegate,
+}
+
 /// Storage at T14, with a commitment on each of `committed`, running at `spec`.
 fn storage_at(spec: TempoHardfork, committed: &[Address]) -> HashMapStorageProvider {
     let mut storage = HashMapStorageProvider::new_with_spec(1, T14);
@@ -99,13 +106,6 @@ fn permit_by_a_root_with_a_commitment_is_rejected_from_t14() {
             assert_eq!(nonce, U256::ONE, "{name}");
         }
     }
-}
-
-/// The payer of a channel, or the separate signer it authorizes to sign vouchers.
-#[derive(Clone, Copy)]
-enum Party {
-    Payer,
-    Delegate,
 }
 
 /// Opens a channel from a fresh payer, authorizing a separate signer when `signer` is the
