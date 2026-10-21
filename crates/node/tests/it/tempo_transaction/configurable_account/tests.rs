@@ -1584,6 +1584,23 @@ async fn parallel_builder_runs_voucher_redemption_after_same_block_migration(
         !rejected.status(),
         "{redeem:?} of a migrated payer's voucher succeeded: {rejected:?}"
     );
+    // The receipt carries no revert data, so replay the transaction for it: it must have reverted
+    // because the payer's root key is retired, not for any other reason.
+    let trace: Value = provider
+        .raw_request(
+            "debug_traceTransaction".into(),
+            (hashes[1], json!({ "tracer": "callTracer" })),
+        )
+        .await?;
+    let reverted = from_value::<Bytes>(trace["output"].clone())?;
+    let retired = ITIP20ChannelReserve::RootKeyRetired {
+        account: migrating.address(),
+    };
+    assert_eq!(
+        reverted,
+        Bytes::from(retired.abi_encode()),
+        "{redeem:?}: {trace}"
+    );
     let accepted = provider
         .get_transaction_receipt(hashes[2])
         .await?
