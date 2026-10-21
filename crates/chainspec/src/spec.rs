@@ -42,6 +42,12 @@ macro_rules! tempo_genesis_info {
                 /// Optional override for the general (non-payment) gas limit.
                 #[serde(skip_serializing_if = "Option::is_none")]
                 general_gas_limit: Option<u64>,
+                /// THBOS (ThaiFi): the base fee switches to the THBOS schedule
+                /// (`THBOS_BASE_FEE_FLOOR` / `THBOS_BASE_FEE_CAP` in
+                /// `tempo_hardfork::constants::gas`) at this timestamp; before it
+                /// the upstream TIP-1067 values apply.
+                #[serde(skip_serializing_if = "Option::is_none")]
+                thbos_time: Option<u64>,
                 $(
                     #[doc = concat!("Activation timestamp for the ", stringify!($variant), " hardfork.")]
                     #[serde(skip_serializing_if = "Option::is_none")]
@@ -91,6 +97,11 @@ impl TempoGenesisInfo {
     /// Returns the TIP-1110 configurable account recovery factory configured in genesis, if any.
     pub const fn configurable_account_recovery_factory(&self) -> Option<Address> {
         self.configurable_account_recovery_factory
+    }
+
+    /// Returns the THBOS fee-schedule switch timestamp, if scheduled.
+    pub const fn thbos_time(&self) -> Option<u64> {
+        self.thbos_time
     }
 }
 
@@ -183,6 +194,15 @@ impl TempoChainSpec {
     /// Returns the default RPC URL for following this chain.
     pub fn default_follow_url(&self) -> Option<&'static str> {
         self.default_follow_url
+    }
+
+    /// Returns whether the THBOS base-fee schedule is active at `timestamp`.
+    ///
+    /// THBOS (ThaiFi): scheduled via the optional `thbosTime` genesis config field.
+    /// Until it activates, the upstream TIP-1067 floor/cap apply so that blocks
+    /// produced before the switch validate unchanged.
+    pub fn is_thbos_fee_active_at_timestamp(&self, timestamp: u64) -> bool {
+        self.info.thbos_time().is_some_and(|t| timestamp >= t)
     }
 
     /// Returns the shared gas limit for the given timestamp and block gas limit.
@@ -377,9 +397,16 @@ impl EthChainSpec for TempoChainSpec {
                 .inner
                 .base_fee_per_gas
                 .expect("tempo blocks are expected to have a base fee");
-            Some(tempo_t7_next_block_base_fee(
+            let (floor, cap) = if self.is_thbos_fee_active_at_timestamp(target_timestamp) {
+                (THBOS_BASE_FEE_FLOOR, THBOS_BASE_FEE_CAP)
+            } else {
+                (TEMPO_T7_BASE_FEE_FLOOR, TEMPO_T7_BASE_FEE_CAP)
+            };
+            Some(tempo_t7_next_block_base_fee_in(
                 parent_base_fee,
                 parent.inner.gas_used,
+                floor,
+                cap,
             ))
         } else if target_fork.is_t1() {
             Some(TEMPO_T1_BASE_FEE)
