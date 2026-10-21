@@ -31,7 +31,6 @@ alloy-genesis.workspace = true
 once_cell.workspace = true
 alloy-primitives.workspace = true
 alloy-eips.workspace = true
-alloy-rlp.workspace = true
 eyre = { workspace = true, optional = true }
 serde.workspace = true
 serde_json.workspace = true
@@ -47,7 +46,6 @@ std = [
     "alloy-eips/std",
     "alloy-genesis/std",
     "alloy-primitives/std",
-    "alloy-rlp/std",
     "commonware-cryptography?/std",
     "evm2?/std",
     "once_cell/std",

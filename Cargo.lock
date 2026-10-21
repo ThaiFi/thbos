@@ -14235,7 +14235,6 @@ dependencies = [
  "alloy-eips",
  "alloy-genesis",
  "alloy-primitives",
- "alloy-rlp",
  "clap",
  "commonware-codec",
  "commonware-cryptography",

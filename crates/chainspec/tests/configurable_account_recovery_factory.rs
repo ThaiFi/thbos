@@ -47,7 +47,7 @@ fn t14_genesis_reserves_the_marker_and_an_unallocated_recovery_factory() {
     genesis.alloc.remove(&CONFIGURABLE_ACCOUNT_ADDRESS);
     genesis.alloc.remove(&factory);
 
-    let spec = TempoChainSpec::try_from_genesis(genesis).unwrap();
+    let spec = TempoChainSpec::from_genesis(genesis);
 
     let alloc = &spec.genesis().alloc;
     let marker = &alloc[&CONFIGURABLE_ACCOUNT_ADDRESS];
@@ -55,4 +55,25 @@ fn t14_genesis_reserves_the_marker_and_an_unallocated_recovery_factory() {
     let factory = &alloc[&factory];
     assert_eq!(factory.code, Some(Bytes::from_static(&[0xef])));
     assert_eq!(factory.nonce, Some(1));
+}
+
+#[test]
+fn t14_genesis_treats_a_zero_recovery_factory_as_unset() {
+    let mut genesis = DEV.genesis().clone();
+    genesis
+        .config
+        .extra_fields
+        .insert("t14Time".into(), json!(0));
+    let unset = TempoChainSpec::from_genesis(genesis.clone());
+    genesis.config.extra_fields.insert(
+        "configurableAccountRecoveryFactory".into(),
+        json!(Address::ZERO),
+    );
+
+    let zero = TempoChainSpec::from_genesis(genesis);
+
+    assert_eq!(
+        zero.genesis_header().inner.state_root,
+        unset.genesis_header().inner.state_root
+    );
 }
