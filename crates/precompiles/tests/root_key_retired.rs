@@ -88,7 +88,7 @@ fn permit_by_a_root_with_a_commitment_is_rejected_from_t14() {
         let (owner, result, nonce) = permit(spec, committed);
         if rejected {
             assert_eq!(
-                result.unwrap_err(),
+                result.expect_err(name),
                 TIP20Error::root_key_retired(owner).into(),
                 "{name}"
             );
@@ -196,7 +196,7 @@ fn voucher_by_a_signer_with_a_commitment_is_rejected_from_t14() {
         let (signer, result) = settle(spec, signer, committed);
         if rejected {
             assert_eq!(
-                result.unwrap_err(),
+                result.expect_err(name),
                 TIP20ChannelReserveError::root_key_retired(signer).into(),
                 "{name}"
             );

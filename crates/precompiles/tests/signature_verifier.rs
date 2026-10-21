@@ -204,6 +204,8 @@ fn keychain_verification_by_retired_roots_and_stored_key_types() {
             Signer => vec![signer.address()],
             Account => vec![account],
         };
+        let case =
+            format!("{spec:?}, {signer_type:?} signer, grant: {grant:?}, committed: {committed:?}");
         let mut storage = storage_at(spec, account, signer.address(), grant, &committed_addresses);
         let signature = keychain_signature(&signer, account);
         let actual = StorageCtx::enter(&mut storage, || {
@@ -211,16 +213,13 @@ fn keychain_verification_by_retired_roots_and_stored_key_types() {
             (
                 verifier
                     .verify_keychain(account, HASH, signature.clone())
-                    .unwrap(),
+                    .expect(&case),
                 verifier
                     .verify_keychain_admin(account, HASH, signature)
-                    .unwrap(),
+                    .expect(&case),
             )
         });
-        assert_eq!(
-            actual, expected,
-            "{spec:?}, {signer_type:?} signer, grant: {grant:?}, committed: {committed:?}"
-        );
+        assert_eq!(actual, expected, "{case}");
     }
 }
 
