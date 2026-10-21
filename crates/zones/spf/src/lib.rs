@@ -703,6 +703,7 @@ mod tests {
     };
     use reth_evm::{ConfigureEvm, Database as _, DynDatabase};
     use reth_execution_types::{BlockState, BundleSource, TransactionChanges};
+    use reth_primitives_traits::AccountExtension;
     use reth_trie_common::{
         EMPTY_ROOT_HASH, LeafNode, Nibbles, TrieAccount, TrieNode, root::state_root_unhashed,
     };
@@ -829,7 +830,13 @@ mod tests {
             }
             None => EMPTY_ROOT_HASH,
         };
-        let account = TrieAccount::new(nonce, balance, storage_root, code_hash);
+        let account = TrieAccount {
+            nonce,
+            balance,
+            storage_root,
+            code_hash,
+            extension: AccountExtension::new(),
+        };
         let account_node = TrieNode::Leaf(LeafNode::new(
             Nibbles::unpack(keccak256(address)),
             alloy_rlp::encode(account),
@@ -1110,8 +1117,11 @@ mod tests {
         assert!(state.state().contains_key(&address));
 
         let expected_account = TrieAccount {
+            nonce: 0,
             balance: U256::from(42),
-            ..Default::default()
+            storage_root: EMPTY_ROOT_HASH,
+            code_hash: alloy_consensus::constants::KECCAK_EMPTY,
+            extension: AccountExtension::new(),
         };
         let expected_root = state_root_unhashed([(address, expected_account)]);
         assert_eq!(
