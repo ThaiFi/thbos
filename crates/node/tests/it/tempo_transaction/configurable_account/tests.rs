@@ -244,11 +244,18 @@ async fn configurable_account_rpc_registration_revert_retry_and_rotation() -> ey
     // it (TIP-1112).
     env.setup.node.wait_for_pool_removal([stale]).await?;
     let tx = account.transaction(&env, vec![noop()]);
-    assert!(
-        reject(&env, tx.clone(), account.sign(&tx)?)
-            .await?
-            .contains("commitment mismatch")
-    );
+    reject_with(
+        &env,
+        tx.clone(),
+        account.sign(&tx)?,
+        TempoInvalidTransaction::ConfigurableAccount(
+            ConfigurableAccountError::ConfigurationCommitmentMismatch {
+                expected: next.commitment().unwrap(),
+                actual: account.config.commitment().unwrap(),
+            },
+        ),
+    )
+    .await?;
     account.config = next;
     account.owners = replacement.owners;
     let signature = account.sign(&tx)?;
@@ -510,15 +517,18 @@ async fn configurable_account_rpc_delegate_rotation_preserves_grant_and_spending
             U256::from(100),
         )],
     );
-    assert!(
-        reject(
-            &env,
-            tx.clone(),
-            delegate.as_delegate(&tx, parent.address, false)?
-        )
-        .await?
-        .contains("commitment mismatch")
-    );
+    reject_with(
+        &env,
+        tx.clone(),
+        delegate.as_delegate(&tx, parent.address, false)?,
+        TempoInvalidTransaction::ConfigurableAccount(
+            ConfigurableAccountError::ConfigurationCommitmentMismatch {
+                expected: next.commitment().unwrap(),
+                actual: delegate.config.commitment().unwrap(),
+            },
+        ),
+    )
+    .await?;
     delegate.config = next;
     delegate.owners = replacement.owners;
     let signature = delegate.as_delegate(&tx, parent.address, false)?;
@@ -579,12 +589,6 @@ async fn configurable_account_rpc_maximum_mixed_quorums_and_validation_cost_orde
         "{error}"
     );
     env.fund_account(parent.address).await?;
-    let error = reject(
-        &env,
-        tx.clone(),
-        delegate.as_delegate(&tx, parent.address, false)?,
-    )
-    .await?;
     let expected = match parent.owners.last().unwrap() {
         OwnerKey::Secp(_) => {
             ConfigurableAccountError::Quorum(ConfigurableAccountQuorumError::SignerNotOwner)
@@ -592,12 +596,14 @@ async fn configurable_account_rpc_maximum_mixed_quorums_and_validation_cost_orde
         OwnerKey::P256 { .. } => {
             ConfigurableAccountError::OwnerSignatureRecoveryFailed { approval_index: 7 }
         }
-    }
-    .to_string();
-    assert!(
-        error.contains(&expected),
-        "expected signature16 failure {expected}, got {error}"
-    );
+    };
+    reject_with(
+        &env,
+        tx.clone(),
+        delegate.as_delegate(&tx, parent.address, false)?,
+        TempoInvalidTransaction::ConfigurableAccount(expected),
+    )
+    .await?;
     assert_eq!(commitment(&env, parent.address).await?, B256::ZERO);
     assert_eq!(commitment(&env, delegate.address).await?, B256::ZERO);
 
@@ -778,7 +784,16 @@ async fn retired_root_rpc_rejects_send_and_allows_calls() -> eyre::Result<()> {
         // The root key cannot send any more, whatever the transaction does.
         let tx = account.transaction(&env, vec![noop()]);
         let signature = TempoSignature::Primitive(root.sign(tx.signature_hash())?);
-        reject_retired_root(&env, tx, signature, account.address).await?;
+        reject_with(
+            &env,
+            tx,
+            signature,
+            TempoInvalidTransaction::RootKeyRetired {
+                account: account.address,
+                role: RootKeyRole::Sender,
+            },
+        )
+        .await?;
 
         // The witness still can, and the rejected transaction used no nonce.
         let tx = account.transaction(&env, vec![noop()]);
@@ -878,7 +893,16 @@ async fn root_transaction_queued_behind_migration_is_not_included() -> eyre::Res
     resent.max_priority_fee_per_gas *= 2;
     resent.max_fee_per_gas *= 2;
     let signature = TempoSignature::Primitive(root.sign(resent.signature_hash())?);
-    reject_retired_root(&env, resent, signature, account.address).await?;
+    reject_with(
+        &env,
+        resent,
+        signature,
+        TempoInvalidTransaction::RootKeyRetired {
+            account: account.address,
+            role: RootKeyRole::Sender,
+        },
+    )
+    .await?;
     Ok(())
 }
 

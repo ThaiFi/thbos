@@ -357,29 +357,29 @@ async fn reject(
     Ok(rejection(env, tx, signature).await.to_string())
 }
 
-/// Requires the RPC to reject `tx` with exactly the error the node reports for the retired root
-/// key of `account` signing as the transaction sender.
-async fn reject_retired_root(
-    env: &Localnet,
-    tx: TempoTransaction,
-    signature: TempoSignature,
-    account: Address,
-) -> eyre::Result<()> {
-    let error = rejection(env, tx, signature).await;
-    let retired = TempoInvalidTransaction::RootKeyRetired {
-        account,
-        role: RootKeyRole::Sender,
-    };
+/// Requires `error` to be a JSON-RPC error response of `code` with exactly `message`.
+fn assert_rpc_error(error: &TransportError, code: i32, message: &str) -> eyre::Result<()> {
     let payload = error
         .as_error_resp()
         .ok_or_else(|| eyre!("not a JSON-RPC error response: {error:?}"))?;
-    assert_eq!(
-        payload.code,
-        i64::from(EthRpcErrorCode::InvalidInput.code()),
-        "{error:?}"
-    );
-    assert_eq!(payload.message, retired.to_string(), "{error:?}");
+    assert_eq!(payload.code, i64::from(code), "{error:?}");
+    assert_eq!(payload.message, message, "{error:?}");
     Ok(())
+}
+
+/// Requires the RPC to reject `tx` with exactly the error the node reports for `invalid`.
+async fn reject_with(
+    env: &Localnet,
+    tx: TempoTransaction,
+    signature: TempoSignature,
+    invalid: TempoInvalidTransaction,
+) -> eyre::Result<()> {
+    let error = rejection(env, tx, signature).await;
+    assert_rpc_error(
+        &error,
+        EthRpcErrorCode::InvalidInput.code(),
+        &invalid.to_string(),
+    )
 }
 
 async fn environment() -> eyre::Result<Localnet> {
