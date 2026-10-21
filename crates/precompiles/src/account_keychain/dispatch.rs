@@ -6,7 +6,7 @@ use alloy::{
     primitives::{Address, B256, Bytes},
     sol_types::SolCall,
 };
-use evm2::{PrecompileError, precompiles::PrecompileResult};
+use evm2::precompiles::PrecompileResult;
 use tempo_contracts::precompiles::{AccountKeychainError, IAccountKeychain};
 
 impl Precompile for AccountKeychain {
@@ -29,7 +29,7 @@ impl Precompile for AccountKeychain {
             .any(|selector| calldata.starts_with(selector))
             && calldata.get(36..68) == Some(B256::with_last_byte(3).as_slice())
         {
-            return Err(PrecompileError::Revert(Bytes::new()));
+            return self.storage.revert_result(Bytes::new());
         }
 
         dispatch!(

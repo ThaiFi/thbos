@@ -2,7 +2,6 @@ use super::{tempo_transaction::MAX_WEBAUTHN_SIGNATURE_LENGTH, tt_signature::Prim
 use alloc::vec::Vec;
 use alloy_primitives::{Address, B256, Keccak256, b256, keccak256};
 use alloy_rlp::{BufMut, Decodable, Encodable, Error as RlpError};
-use tempo_contracts::SAFE_DEPLOYER_ADDRESS;
 
 /// Tempo signature type byte for configurable account signatures.
 pub const SIGNATURE_TYPE_CONFIGURABLE_ACCOUNT: u8 = 0x05;
@@ -24,13 +23,6 @@ pub const CONFIGURABLE_ACCOUNT_DOMAIN: &[u8] = b"tempo:configurable-account:acco
 
 /// Domain prefix for the salt of an account migrated in place (TIP-1113).
 pub const CONFIGURABLE_ACCOUNT_UPGRADE_DOMAIN: &[u8] = b"tempo:configurable-account:upgrade";
-
-/// Safe Singleton Factory used to deploy the recovery factory, beacon and implementations.
-pub const RECOVERY_SINGLETON_FACTORY: Address = SAFE_DEPLOYER_ADDRESS;
-
-/// Expected runtime-code hash of [`RECOVERY_SINGLETON_FACTORY`].
-pub const RECOVERY_SINGLETON_FACTORY_RUNTIME_HASH: B256 =
-    b256!("2fa86add0aed31f33a762c9d88e807c475bd51d0f52bd0955754b2608f7e4989");
 
 /// Keccak-256 of the account proxy creation code. The creation code is identical for every
 /// account, takes no constructor arguments and embeds the beacon address as a constant.

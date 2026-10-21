@@ -80,4 +80,5 @@ reth = [
 asm-keccak = [
     "alloy-primitives/asm-keccak",
     "alloy/asm-keccak",
+    "reth-evm/asm-keccak",
 ]

@@ -16,139 +16,13 @@ use tempo_precompiles::{
 use tempo_primitives::transaction::{KeychainSignature, SignatureType, SignedKeyAuthorization};
 
 /// A parent account (primitive or configurable) granting access to a configurable delegate.
-pub(super) struct Access {
+struct Access {
     parent: Native,
     delegate: Native,
 }
 
-#[derive(Clone, Copy, Debug)]
-pub(super) enum GrantCase {
-    PrimitiveGrant,
-    NativeGrant,
-    PrimitiveGrantAndUse,
-    NativeGrantAndUse,
-    PrimitiveAdminGrant,
-    NativeAdminGrant,
-}
-
-#[derive(Clone, Copy, Debug)]
-pub(super) enum Warmth {
-    Cold,
-    Loaded,
-    AccessList,
-    Coinbase,
-}
-
-#[derive(Clone, Copy, Debug)]
-enum GrantBindingCase {
-    Matching,
-    WrongTarget,
-    WrongType,
-    UnrelatedSigner,
-}
-
-/// Everything that varies between the grant scenarios.
-#[derive(Clone)]
-pub(super) struct Scenario {
-    pub(super) spec: TempoHardfork,
-    pub(super) case: GrantCase,
-    pub(super) warmth: Warmth,
-    pub(super) gas_limit: u64,
-    pub(super) nonce_key: U256,
-    pub(super) nonce: u64,
-    pub(super) first_call_create: bool,
-    pub(super) authorization: Option<SignedKeyAuthorization>,
-}
-
-impl Scenario {
-    pub(super) fn new(case: GrantCase, warmth: Warmth) -> Self {
-        Self {
-            spec: TempoHardfork::T14,
-            case,
-            warmth,
-            gas_limit: 1_000_000,
-            nonce_key: U256::ZERO,
-            nonce: 3,
-            first_call_create: false,
-            authorization: None,
-        }
-    }
-
-    pub(super) fn with_gas_limit(mut self, gas_limit: u64) -> Self {
-        self.gas_limit = gas_limit;
-        self
-    }
-
-    pub(super) fn with_nonce(mut self, nonce_key: U256, nonce: u64) -> Self {
-        self.nonce_key = nonce_key;
-        self.nonce = nonce;
-        self
-    }
-
-    pub(super) fn with_spec(mut self, spec: TempoHardfork) -> Self {
-        self.spec = spec;
-        self
-    }
-
-    pub(super) fn with_first_call_create(mut self) -> Self {
-        self.first_call_create = true;
-        self
-    }
-
-    pub(super) fn with_authorization(mut self, authorization: SignedKeyAuthorization) -> Self {
-        self.authorization = Some(authorization);
-        self
-    }
-}
-
-/// A ready-to-run scenario.
-pub(super) struct Setup {
-    pub(super) evm: TempoEvm<'static>,
-    pub(super) env: TempoTxEnv,
-    pub(super) caller: Address,
-}
-
-impl Setup {
-    /// Runs the transaction and commits it, returning `(success, tx_gas_used)`.
-    pub(super) fn run(&mut self) -> HandlerResult<(bool, u64)> {
-        self.evm
-            .transact(&Recovered::new_unchecked(self.env.clone(), self.caller))
-            .map(|executed| {
-                let result = executed.commit();
-                (result.status, result.tx_gas_used())
-            })
-    }
-
-    /// Runs `prepare_aa` only, without executing the calls.
-    pub(super) fn prepare(&mut self) -> HandlerResult<PreparedAa> {
-        prepare_aa(&mut TxRequest {
-            envelope: &self.env,
-            tx: Recovered::new_unchecked(self.env.as_aa().unwrap(), self.caller),
-            host: &mut self.evm,
-            _non_exhaustive: (),
-        })
-    }
-
-    /// Warms the transaction's base accounts and access list, then returns the configurable
-    /// account gas and state gas that `prepare_aa` adds to the intrinsic cost.
-    pub(super) fn native_gas(&mut self) -> HandlerResult<(u64, u64)> {
-        let tx = self.env.as_aa().unwrap().inner().tx();
-        warm_base_accounts(&mut self.evm, self.caller, tx.calls[0].to);
-        warm_access_list(&mut self.evm, &tx.access_list);
-        let spec = self.evm.config_spec_id();
-        validate_state(&mut self.evm, &self.env, spec)
-    }
-
-    pub(super) fn account(&mut self, address: Address) -> Option<AccountInfo> {
-        self.evm
-            .state_mut()
-            .account_info_untracked(&address)
-            .unwrap()
-    }
-}
-
 impl Access {
-    pub(super) fn new() -> Self {
+    fn new() -> Self {
         let key = |byte| PrivateKeySigner::from_bytes(&B256::repeat_byte(byte)).unwrap();
         Self {
             parent: Native::new(key(1)),
@@ -156,15 +30,15 @@ impl Access {
         }
     }
 
-    pub(super) fn delegate(&self) -> Address {
+    fn delegate(&self) -> Address {
         self.delegate.account()
     }
 
-    pub(super) fn delegate_config(&self) -> &ConfigurableAccountConfig {
+    fn delegate_config(&self) -> &ConfigurableAccountConfig {
         &self.delegate.config
     }
 
-    pub(super) fn parent_config(&self) -> &ConfigurableAccountConfig {
+    fn parent_config(&self) -> &ConfigurableAccountConfig {
         &self.parent.config
     }
 
@@ -174,9 +48,7 @@ impl Access {
         if native {
             self.parent.sign(digest).into()
         } else {
-            AccountSignature::Primitive(PrimitiveSignature::Secp256k1(
-                self.parent.key.sign_hash_sync(&digest).unwrap(),
-            ))
+            AccountSignature::from(self.parent.key.sign_hash_sync(&digest).unwrap())
         }
     }
 
@@ -188,7 +60,7 @@ impl Access {
         grant.into_signed(signature)
     }
 
-    pub(super) fn setup(&self, scenario: Scenario) -> Setup {
+    fn setup(&self, scenario: Scenario) -> Setup {
         let Scenario {
             spec,
             case,
@@ -293,6 +165,132 @@ impl Access {
     }
 }
 
+/// A ready-to-run scenario.
+pub(super) struct Setup {
+    pub(super) evm: TempoEvm<'static>,
+    pub(super) env: TempoTxEnv,
+    pub(super) caller: Address,
+}
+
+impl Setup {
+    /// Runs the transaction and commits it, returning `(success, tx_gas_used)`.
+    pub(super) fn run(&mut self) -> HandlerResult<(bool, u64)> {
+        self.evm
+            .transact(&Recovered::new_unchecked(self.env.clone(), self.caller))
+            .map(|executed| {
+                let result = executed.commit();
+                (result.status, result.tx_gas_used())
+            })
+    }
+
+    /// Runs `prepare_aa` only, without executing the calls.
+    pub(super) fn prepare(&mut self) -> HandlerResult<PreparedAa> {
+        prepare_aa(&mut TxRequest {
+            envelope: &self.env,
+            tx: Recovered::new_unchecked(self.env.as_aa().unwrap(), self.caller),
+            host: &mut self.evm,
+            _non_exhaustive: (),
+        })
+    }
+
+    /// Warms the transaction's base accounts and access list, then returns the configurable
+    /// account gas and state gas that `prepare_aa` adds to the intrinsic cost.
+    fn native_gas(&mut self) -> HandlerResult<(u64, u64)> {
+        let tx = self.env.as_aa().unwrap().inner().tx();
+        warm_base_accounts(&mut self.evm, self.caller, tx.calls[0].to);
+        warm_access_list(&mut self.evm, &tx.access_list);
+        let spec = self.evm.config_spec_id();
+        validate_state(&mut self.evm, &self.env, spec)
+    }
+
+    pub(super) fn account(&mut self, address: Address) -> Option<AccountInfo> {
+        self.evm
+            .state_mut()
+            .account_info_untracked(&address)
+            .unwrap()
+    }
+}
+
+/// Everything that varies between the grant scenarios.
+#[derive(Clone)]
+struct Scenario {
+    spec: TempoHardfork,
+    case: GrantCase,
+    warmth: Warmth,
+    gas_limit: u64,
+    nonce_key: U256,
+    nonce: u64,
+    first_call_create: bool,
+    authorization: Option<SignedKeyAuthorization>,
+}
+
+impl Scenario {
+    fn new(case: GrantCase, warmth: Warmth) -> Self {
+        Self {
+            spec: TempoHardfork::T14,
+            case,
+            warmth,
+            gas_limit: 1_000_000,
+            nonce_key: U256::ZERO,
+            nonce: 3,
+            first_call_create: false,
+            authorization: None,
+        }
+    }
+
+    fn with_gas_limit(mut self, gas_limit: u64) -> Self {
+        self.gas_limit = gas_limit;
+        self
+    }
+
+    fn with_nonce(mut self, nonce_key: U256, nonce: u64) -> Self {
+        self.nonce_key = nonce_key;
+        self.nonce = nonce;
+        self
+    }
+
+    fn with_spec(mut self, spec: TempoHardfork) -> Self {
+        self.spec = spec;
+        self
+    }
+
+    fn with_first_call_create(mut self) -> Self {
+        self.first_call_create = true;
+        self
+    }
+
+    fn with_authorization(mut self, authorization: SignedKeyAuthorization) -> Self {
+        self.authorization = Some(authorization);
+        self
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+enum GrantCase {
+    PrimitiveGrant,
+    NativeGrant,
+    PrimitiveGrantAndUse,
+    NativeGrantAndUse,
+    PrimitiveAdminGrant,
+    NativeAdminGrant,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum Warmth {
+    Cold,
+    Loaded,
+    AccessList,
+    Coinbase,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum GrantBindingCase {
+    Matching,
+    WrongTarget,
+    WrongType,
+    UnrelatedSigner,
+}
+
 fn assert_native_error(error: &HandlerError, expected: &ConfigurableAccountError, context: &str) {
     assert_eq!(native_error(error), Some(expected), "{context}: {error:?}");
 }
@@ -392,9 +390,7 @@ fn native_handler_binds_grant_roles(case: GrantBindingCase) {
     } else {
         &access.parent.key
     };
-    let signature = AccountSignature::Primitive(PrimitiveSignature::Secp256k1(
-        signer.sign_hash_sync(&grant.signature_hash()).unwrap(),
-    ));
+    let signature = AccountSignature::from(signer.sign_hash_sync(&grant.signature_hash()).unwrap());
     let authorization = grant.into_signed(signature);
     assert_eq!(authorization.recover_account().unwrap(), signer.address());
     let mut setup = access.setup(
@@ -403,7 +399,11 @@ fn native_handler_binds_grant_roles(case: GrantBindingCase) {
     );
     // All quorums are genuinely signed over this transaction, including the
     // changed grant. Failures below must be role binding, not bad cryptography.
-    for role in authorizations(setup.env.as_aa().unwrap())
+    for role in setup
+        .env
+        .as_aa()
+        .unwrap()
+        .native_authorizations()
         .into_iter()
         .flatten()
     {
@@ -478,7 +478,11 @@ fn native_delegate_access_is_intrinsic_once(case: GrantCase) {
         let params = gas_params(&setup.evm);
         let mut expected = account_access_gas(&params, matches!(warmth, Warmth::Cold));
         let mut registered = Vec::new();
-        for role in authorizations(setup.env.as_aa().unwrap())
+        for role in setup
+            .env
+            .as_aa()
+            .unwrap()
+            .native_authorizations()
             .into_iter()
             .flatten()
         {
@@ -574,7 +578,7 @@ fn native_delegate_creation_gas_covers_all_nonce_types() {
                 let proof_and_access = initial_account_proof_gas(access.delegate_config()).unwrap()
                     + 20_000
                     + u64::from(params.get(GasId::WarmStorageReadCost))
-                    + u64::from(params.get(GasId::ColdAccountAdditionalCost));
+                    + params.cold_account_additional_cost();
                 assert_eq!(
                     extra_gas,
                     proof_and_access
@@ -652,7 +656,7 @@ fn native_sender_and_delegate_creation_are_charged_separately() {
         extra_gas,
         proof_and_writes
             + u64::from(params.get(GasId::WarmStorageReadCost))
-            + u64::from(params.get(GasId::ColdAccountAdditionalCost))
+            + params.cold_account_additional_cost()
             + 2 * u64::from(params.get(GasId::NewAccountCost))
     );
     assert_eq!(extra_state_gas, 2 * params.new_account_state_gas());
