@@ -305,3 +305,44 @@ fn configurable_account_with_code_cannot_sign() {
         })
     );
 }
+
+/// A configurable-account signature adds its TIP-1114 verification cost `V - 3,000` to intrinsic
+/// gas, on top of the first-use account proof and the TIP-1108 registration write.
+#[test]
+fn configurable_account_signature_verification_is_intrinsic_gas() {
+    let mut evm = evm(InMemoryDB::default());
+    let calls = vec![call(DELEGATE, Bytes::new())];
+
+    let root = PrivateKeySigner::random();
+    let primitive = evm
+        .transact(&signed_by_root(aa_tx(0, calls.clone()), &root))
+        .unwrap()
+        .commit();
+    assert!(primitive.status, "{primitive:?}");
+
+    let owner = PrivateKeySigner::random();
+    let (config, account) = configurable_account(&owner);
+    let witness = [alloy_rlp::encode(account), alloy_rlp::encode(&config)].concat();
+    let envelope = signed_by_account(aa_tx(0, calls), &owner, config, account);
+    let native = evm
+        .transact(&recovered(envelope, account))
+        .unwrap()
+        .commit();
+    assert!(native.status, "{native:?}");
+    assert!(!commitment(&mut evm, account).is_zero());
+
+    // K(n) = 30 + 6 * ceil(n / 32); one owner, one secp256k1 approval.
+    let keccak = |len: u64| 30 + 6 * len.div_ceil(32);
+    let calldata: u64 = witness
+        .iter()
+        .map(|byte| if *byte == 0 { 4 } else { 16 })
+        .sum();
+    // V - 3,000: witness calldata, commitment K(75 + 21), digest K(96), approval 3,000 - 3,000.
+    let verification = calldata + keccak(75 + 21) + keccak(96);
+    // First use: derivation K(68 + 21) + K(85), plus the 20,000 registration write.
+    let first_use = keccak(68 + 21) + keccak(85) + 20_000;
+    assert_eq!(
+        native.tx_gas_used() - primitive.tx_gas_used(),
+        verification + first_use
+    );
+}
