@@ -29,8 +29,8 @@ use tempo_precompiles::{
     },
 };
 use tempo_primitives::transaction::{
-    ConfigurableAccountQuorumError, ConfigurableAccountSignature, ConfigurableAccountStateError,
-    KeychainSignature, SignatureType, TempoSignature,
+    ConfigurableAccountSignature, ConfigurableAccountStateError, KeychainSignature, SignatureType,
+    TempoSignature,
 };
 
 /// An independently signed role. Repeated accounts still require both role digests.
@@ -46,20 +46,7 @@ impl NativeAuthorization<'_> {
     fn verify(&self) -> Result<(), ConfigurableAccountError> {
         self.signature
             .verify_approvals(self.inner_digest)
-            .map_err(|error| match error {
-                ConfigurableAccountQuorumError::OwnerSignatureRecoveryFailed { approval_index } => {
-                    ConfigurableAccountError::OwnerSignatureRecoveryFailed { approval_index }
-                }
-                ConfigurableAccountQuorumError::ZeroThreshold
-                | ConfigurableAccountQuorumError::EmptySignatures
-                | ConfigurableAccountQuorumError::TooManySignatures
-                | ConfigurableAccountQuorumError::ExcessSignatures
-                | ConfigurableAccountQuorumError::SignerNotOwner
-                | ConfigurableAccountQuorumError::SignersNotAscending
-                | ConfigurableAccountQuorumError::WeightBelowThreshold => {
-                    ConfigurableAccountError::Quorum(error)
-                }
-            })
+            .map_err(ConfigurableAccountError::from)
     }
 }
 
@@ -173,7 +160,7 @@ pub(crate) fn validate_state(
 }
 
 /// Gas for loading one account: a warm read, plus the cold surcharge when it was not yet accessed.
-pub(crate) fn account_access_gas(gas: &GasParams, is_cold: bool) -> u64 {
+pub fn account_access_gas(gas: &GasParams, is_cold: bool) -> u64 {
     u64::from(gas.get(GasId::WarmStorageReadCost))
         + if is_cold {
             u64::from(gas.get(GasId::ColdAccountAdditionalCost))

@@ -15,9 +15,9 @@ use tempo_primitives::{
     transaction::{
         AccountSignature, CONFIGURABLE_ACCOUNT_CONFIG_DOMAIN, CONFIGURABLE_ACCOUNT_DOMAIN,
         CONFIGURABLE_ACCOUNT_SIGNATURE_DOMAIN, Call, ConfigurableAccountConfig,
-        ConfigurableAccountOwner, KeyAuthorization, MAX_CONFIGURABLE_ACCOUNT_OWNERS,
-        PrimitiveSignature, TEMPO_EXPIRING_NONCE_KEY, TempoTransaction,
-        configurable_account_digest,
+        ConfigurableAccountOwner, ConfigurableAccountQuorumError, KeyAuthorization,
+        MAX_CONFIGURABLE_ACCOUNT_OWNERS, PrimitiveSignature, TEMPO_EXPIRING_NONCE_KEY,
+        TempoTransaction, configurable_account_digest,
     },
 };
 

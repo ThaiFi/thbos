@@ -9,6 +9,7 @@ use alloy::{
     consensus::{SignableTransaction, TxEip7702},
     eips::eip7702::Authorization,
     primitives::{Address, B256, Bytes, KECCAK256_EMPTY, TxKind, U256},
+    rpc::types::TransactionRequest,
     signers::{SignerSync, local::PrivateKeySigner},
     sol_types::SolCall,
 };
@@ -18,11 +19,16 @@ use evm2::{
 };
 use reth_evm::{ConfigureEvm, EvmEnvFor};
 use reth_primitives_traits::Recovered;
+use reth_rpc_eth_api::TryIntoTxEnv;
 use serde_json::json;
+use tempo_alloy::rpc::{
+    ConfigurableAccountSimulationApproval, ConfigurableAccountSimulationSpec,
+    TempoTransactionRequest,
+};
 use tempo_chainspec::TempoChainSpec;
 use tempo_contracts::precompiles::{CONFIGURABLE_ACCOUNT_ADDRESS, IConfigurableAccount};
 use tempo_evm::{
-    TempoEvm, TempoEvmConfig, TempoInvalidTransaction, TempoTxEnv,
+    ExecutionContext, TempoEvm, TempoEvmConfig, TempoInvalidTransaction, TempoTxEnv,
     transaction_error::{ConfigurableAccountError, RootKeyRole},
 };
 use tempo_precompiles::{PATH_USD_ADDRESS, storage::StorageCtx, test_util::TIP20Setup};
@@ -30,7 +36,7 @@ use tempo_primitives::{
     TempoHeader, TempoTxEnvelope,
     transaction::{
         Call, ConfigurableAccountConfig, ConfigurableAccountOwner, ConfigurableAccountSignature,
-        ConfigurableAccountStateError, PrimitiveSignature, TempoSignature,
+        ConfigurableAccountStateError, PrimitiveSignature, SignatureType, TempoSignature,
         TempoSignedAuthorization, TempoTransaction, configurable_account_digest,
     },
 };
@@ -39,13 +45,16 @@ const CHAIN_ID: u64 = 1337;
 const FACTORY: Address = Address::repeat_byte(0x71);
 const DELEGATE: Address = Address::repeat_byte(0x44);
 
-fn evm(db: InMemoryDB) -> TempoEvm<'static> {
+fn evm_config() -> TempoEvmConfig {
     let mut genesis: serde_json::Value =
         serde_json::from_str(include_str!("../assets/test-genesis.json")).unwrap();
     genesis["config"]["configurableAccountRecoveryFactory"] = json!(FACTORY);
-    let config = TempoEvmConfig::new(Arc::new(TempoChainSpec::from_genesis(
+    TempoEvmConfig::new(Arc::new(TempoChainSpec::from_genesis(
         serde_json::from_value(genesis).unwrap(),
-    )));
+    )))
+}
+
+fn evm_env(config: &TempoEvmConfig) -> EvmEnvFor<TempoEvmConfig> {
     let header = TempoHeader {
         inner: alloy::consensus::Header {
             number: 1,
@@ -58,8 +67,14 @@ fn evm(db: InMemoryDB) -> TempoEvm<'static> {
         shared_gas_limit: 30_000_000,
         ..Default::default()
     };
-    let env: EvmEnvFor<TempoEvmConfig> = config.evm_env(&header).unwrap();
+    let env = config.evm_env(&header).unwrap();
     assert!(env.spec.is_t14());
+    env
+}
+
+fn evm(db: InMemoryDB) -> TempoEvm<'static> {
+    let config = evm_config();
+    let env = evm_env(&config);
     let mut evm = config.evm_with_env(db, env);
     StorageCtx::enter_evm_without_tip1060_accounting(&mut evm, || {
         TIP20Setup::path_usd(Address::repeat_byte(0x01)).apply()
@@ -274,6 +289,52 @@ fn configurable_account_signature_must_name_the_sender() {
     );
     assert_eq!(
         invalid(&mut evm, &recovered(envelope, other)),
+        TempoInvalidTransaction::ConfigurableAccount(ConfigurableAccountError::AccountMismatch {
+            expected: other,
+            actual: account,
+        })
+    );
+}
+
+/// A simulated call (`eth_call`/`eth_estimateGas`) whose outer configurable-account signature names
+/// an account other than `from` is rejected like a real transaction.
+#[test]
+fn simulated_configurable_account_signature_must_name_the_sender() {
+    let mut evm = evm(InMemoryDB::default());
+    let owner = PrivateKeySigner::random();
+    let (config, account) = configurable_account(&owner);
+    let other = Address::repeat_byte(0x55);
+    let spec = ConfigurableAccountSimulationSpec {
+        signer: None,
+        config,
+        approvals: vec![ConfigurableAccountSimulationApproval {
+            owner: owner.address(),
+            key_type: Some(SignatureType::Secp256k1),
+            key_data: None,
+        }],
+    };
+    // State-aware preprocessing binds the mock to `from`; install one for another account to
+    // reach the handler guard.
+    let request = TempoTransactionRequest {
+        inner: TransactionRequest {
+            from: Some(other),
+            to: Some(TxKind::Call(DELEGATE)),
+            gas: Some(5_000_000),
+            ..Default::default()
+        },
+        fee_token: Some(PATH_USD_ADDRESS),
+        key_type: Some(SignatureType::ConfigurableAccount),
+        configurable_account_simulation: Some(spec.clone()),
+        configurable_account_simulation_signature: Some(spec.mock_signature(account).unwrap()),
+        configurable_account_simulation_prepared: true,
+        ..Default::default()
+    };
+    let mut env = evm_env(&evm_config());
+    env.version.chain_id = CHAIN_ID;
+    let tx = request.try_into_tx_env(&env).unwrap();
+    assert_eq!(tx.execution_context(), ExecutionContext::Simulation);
+    assert_eq!(
+        invalid(&mut evm, &tx),
         TempoInvalidTransaction::ConfigurableAccount(ConfigurableAccountError::AccountMismatch {
             expected: other,
             actual: account,

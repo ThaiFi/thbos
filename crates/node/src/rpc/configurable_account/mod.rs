@@ -1,60 +1,62 @@
-use alloy_primitives::Address;
+use alloy_primitives::{Address, B256, KECCAK256_EMPTY};
 use reth_errors::RethError;
-use reth_evm::revm::Database;
+use reth_evm::Database;
 use reth_rpc_eth_types::EthApiError;
 use tempo_alloy::rpc::TempoTransactionRequest;
 use tempo_chainspec::hardfork::TempoHardfork;
-use tempo_precompiles::native_multisig::valid_account;
+use tempo_evm::{TempoBlockExt, transaction_error::ConfigurableAccountError};
+use tempo_precompiles::configurable_account::valid_account;
 use tempo_primitives::{
-    SignatureType, TempoBlockEnv, TempoSignature, TempoTxEnvelope,
+    SignatureType, TempoSignature, TempoTxEnvelope,
     account::decode_config_commitment,
-    transaction::{MultisigSignature, MultisigStateError, SignedKeyAuthorization},
+    transaction::{
+        ConfigurableAccountSignature, ConfigurableAccountStateError, SignedKeyAuthorization,
+    },
 };
-use tempo_revm::native_multisig::{NativeAuthorization, NativeMultisigError};
 
 /// Checks independent role witnesses against the exact database selected for this call.
-pub(super) fn prepare_native_multisig_simulation(
+pub(super) fn prepare_configurable_account_simulation(
     request: &mut TempoTransactionRequest,
     hardfork: TempoHardfork,
-    block: &TempoBlockEnv,
+    block: &TempoBlockExt,
     db: &mut impl Database<Error: Into<EthApiError>>,
 ) -> Result<(), EthApiError> {
-    request.multisig_simulation_prepared = false;
+    request.configurable_account_simulation_prepared = false;
     if !request.has_configurable_simulation() {
         return Ok(());
     }
     let invalid = |message: &str| EthApiError::InvalidParams(message.into());
     if !hardfork.is_t14() {
         return Err(invalid(
-            "native multisig simulation requires T14 at the requested state",
+            "configurable account simulation requires T14 at the requested state",
         ));
     }
     let factory = block
-        .configured_multisig_recovery_factory()
+        .configurable_account_recovery_factory()
         .ok_or_else(|| {
-            EthApiError::InvalidParams(NativeMultisigError::FactoryNotConfigured.to_string())
+            EthApiError::InvalidParams(ConfigurableAccountError::FactoryNotConfigured.to_string())
         })?;
     let parent = request
         .inner
         .from
-        .ok_or_else(|| invalid("native multisig simulation requires from"))?;
+        .ok_or_else(|| invalid("configurable account simulation requires from"))?;
     if request.key_id == Some(parent)
-        && (request.multisig_simulation.is_some()
-            || request.multisig_simulation_signature.is_some())
+        && (request.configurable_account_simulation.is_some()
+            || request.configurable_account_simulation_signature.is_some())
     {
         return Err(invalid("a configurable delegate cannot be its own parent"));
     }
-    if let Some(spec) = request.multisig_simulation.as_ref() {
+    if let Some(spec) = request.configurable_account_simulation.as_ref() {
         let account = request.key_id.unwrap_or(parent);
         let signature = spec
             .mock_signature(account)
             .map_err(|error| EthApiError::InvalidParams(error.to_string()))?;
         validate_witness(&signature, factory, hardfork, db)?;
-        request.multisig_simulation_signature = Some(signature);
+        request.configurable_account_simulation_signature = Some(signature);
         // Retain the source witness so every estimation pass rebuilds and checks its mock.
-    } else if request.multisig_simulation_signature.is_some() {
+    } else if request.configurable_account_simulation_signature.is_some() {
         return Err(invalid(
-            "multisig simulation signature requires its source witness",
+            "configurable account simulation signature requires its source witness",
         ));
     }
     if let Some(spec) = request.key_authorization_simulation.as_ref() {
@@ -76,7 +78,7 @@ pub(super) fn prepare_native_multisig_simulation(
         validate_witness(&signature, factory, hardfork, db)?;
         request.set_key_authorization(authorization.authorization.clone().into_signed(signature));
     } else if let Some(authorization) = &request.key_authorization
-        && let Some(signature) = authorization.signature.as_multisig()
+        && let Some(signature) = authorization.signature.as_configurable_account()
     {
         validate_grant_binding(
             authorization,
@@ -86,14 +88,13 @@ pub(super) fn prepare_native_multisig_simulation(
             "admin-signed grant requires its signer as keyId and the parent as account",
         )?;
         validate_witness(signature, factory, hardfork, db)?;
-        NativeAuthorization {
-            signature,
-            inner_digest: authorization.signature_hash(),
-        }
-        .verify()
-        .map_err(|error| EthApiError::InvalidParams(error.to_string()))?;
+        signature
+            .verify_approvals(authorization.signature_hash())
+            .map_err(|error| {
+                EthApiError::InvalidParams(ConfigurableAccountError::from(error).to_string())
+            })?;
     }
-    request.multisig_simulation_prepared = true;
+    request.configurable_account_simulation_prepared = true;
     Ok(())
 }
 
@@ -104,9 +105,9 @@ pub(super) fn prepare_fill_output(
     if request.key_authorization_simulation.is_some() {
         return Err(EthApiError::InvalidParams("fillTransaction requires a real signed grant; keyAuthorizationSimulation is supported only by call and estimateGas".into()));
     }
-    request.multisig_simulation = None;
-    request.multisig_simulation_signature = None;
-    request.multisig_simulation_prepared = false;
+    request.configurable_account_simulation = None;
+    request.configurable_account_simulation_signature = None;
+    request.configurable_account_simulation_prepared = false;
     // Keep AA selection while passing the ordinary unsigned converter.
     request.set_key_type(SignatureType::Secp256k1);
     request.key_data = None;
@@ -150,7 +151,7 @@ fn validate_grant_binding(
 }
 
 fn validate_witness(
-    signature: &MultisigSignature,
+    signature: &ConfigurableAccountSignature,
     factory: Address,
     hardfork: TempoHardfork,
     db: &mut impl Database<Error: Into<EthApiError>>,
@@ -158,26 +159,33 @@ fn validate_witness(
     let account = signature.account();
     if !valid_account(account, hardfork) {
         return Err(EthApiError::InvalidParams(
-            NativeMultisigError::InvalidAccount { account }.to_string(),
+            ConfigurableAccountError::InvalidAccount { account }.to_string(),
         ));
     }
-    let info = db.basic(account).map_err(Into::into)?.unwrap_or_default();
-    if !info.is_empty_code_hash() {
+    // A missing account is an unregistered one: no code and the zero commitment.
+    let info = db.get_account(&account).map_err(Into::into)?;
+    if info
+        .as_ref()
+        .is_some_and(|info| info.code_hash != KECCAK256_EMPTY)
+    {
         return Err(EthApiError::InvalidParams(format!(
             "configurable account {account} has code at the requested state"
         )));
     }
-    let stored = decode_config_commitment(&info.extension, hardfork.is_t14())
+    let stored = info
+        .map_or(Ok(B256::ZERO), |info| {
+            decode_config_commitment(&info.extension, hardfork)
+        })
         .map_err(|error| EthApiError::Internal(RethError::msg(error.to_string())))?;
     signature
         .validate_account_commitment(stored, Some(factory))
         .map_err(|error| {
             let message = match error {
-                MultisigStateError::CommitmentMismatch { .. } => {
+                ConfigurableAccountStateError::CommitmentMismatch { .. } => {
                     format!("{error} for {account} at the requested state")
                 }
-                MultisigStateError::InitialAccountMismatch { expected, actual } => {
-                    format!("initial multisig account mismatch at the requested state: expected {expected}, actual {actual}")
+                ConfigurableAccountStateError::InitialAccountMismatch { expected, actual } => {
+                    format!("initial configurable account mismatch at the requested state: expected {expected}, actual {actual}")
                 }
                 _ => error.to_string(),
             };

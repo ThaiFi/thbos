@@ -1,32 +1,32 @@
 use super::*;
 use alloy_primitives::B256;
 use serde_json::{from_value, json, to_value};
-use tempo_primitives::transaction::MultisigOwner;
+use tempo_primitives::transaction::ConfigurableAccountOwner;
 
-pub(crate) fn spec() -> MultisigSimulationSpec {
-    MultisigSimulationSpec {
+pub(crate) fn spec() -> ConfigurableAccountSimulationSpec {
+    ConfigurableAccountSimulationSpec {
         signer: None,
-        config: MultisigConfig {
+        config: ConfigurableAccountConfig {
             salt: B256::ZERO,
             version: 1,
             threshold: 2,
             owners: vec![
-                MultisigOwner {
+                ConfigurableAccountOwner {
                     owner: Address::repeat_byte(1),
                     weight: 1,
                 },
-                MultisigOwner {
+                ConfigurableAccountOwner {
                     owner: Address::repeat_byte(2),
                     weight: 1,
                 },
-                MultisigOwner {
+                ConfigurableAccountOwner {
                     owner: Address::repeat_byte(3),
                     weight: 1,
                 },
             ],
         },
         approvals: [1, 2]
-            .map(|owner| MultisigSimulationApproval {
+            .map(|owner| ConfigurableAccountSimulationApproval {
                 owner: Address::repeat_byte(owner),
                 key_type: Some(SignatureType::Secp256k1),
                 key_data: None,
@@ -44,21 +44,21 @@ fn simulation_spec_roundtrips_config_as_rlp_bytes(threshold: u8, valid: bool) {
     spec.config.threshold = threshold;
     let mut json = to_value(&spec).unwrap();
     assert!(json["config"].as_str().unwrap().starts_with("0x"));
-    let decoded = from_value::<MultisigSimulationSpec>(json.clone()).unwrap();
+    let decoded = from_value::<ConfigurableAccountSimulationSpec>(json.clone()).unwrap();
     assert_eq!(decoded, spec);
     let account = Address::repeat_byte(9);
     assert_eq!(decoded.validate_owners(account).is_ok(), valid);
     let mut encoded = alloy_rlp::encode(&spec.config);
     encoded.push(0x80);
     json["config"] = to_value(Bytes::from(encoded)).unwrap();
-    assert!(from_value::<MultisigSimulationSpec>(json).is_err());
+    assert!(from_value::<ConfigurableAccountSimulationSpec>(json).is_err());
 }
 
 #[test]
 fn simulation_spec_rejects_unknown_fields_and_malformed_hints() {
     let mut json = to_value(spec()).unwrap();
     json["aprovals"] = json!([]);
-    assert!(from_value::<MultisigSimulationSpec>(json).is_err());
+    assert!(from_value::<ConfigurableAccountSimulationSpec>(json).is_err());
     for len in [0, 1, 2, 3, 4, 5, 8192] {
         let mut spec = spec();
         spec.approvals[0].key_data = Some(Bytes::from(vec![0; len]));
@@ -81,7 +81,7 @@ fn rejects_invalid_claimed_quorums(owners: Vec<u8>) {
     let mut spec = spec();
     spec.approvals = owners
         .into_iter()
-        .map(|owner| MultisigSimulationApproval {
+        .map(|owner| ConfigurableAccountSimulationApproval {
             owner: Address::repeat_byte(owner),
             key_type: None,
             key_data: None,
@@ -93,18 +93,18 @@ fn rejects_invalid_claimed_quorums(owners: Vec<u8>) {
 #[test]
 fn rejects_nested_owner_and_oversized_json_list() {
     let mut nested = spec();
-    nested.approvals[0].key_type = Some(SignatureType::Multisig);
+    nested.approvals[0].key_type = Some(SignatureType::ConfigurableAccount);
     assert!(nested.validate_owners(Address::repeat_byte(9)).is_err());
     let mut json = to_value(spec()).unwrap();
-    json["approvals"] = json!([{"type":"multisig","spec":{}}]);
-    assert!(from_value::<MultisigSimulationSpec>(json).is_err());
+    json["approvals"] = json!([{"type":"configurableAccount","spec":{}}]);
+    assert!(from_value::<ConfigurableAccountSimulationSpec>(json).is_err());
     let mut value = spec();
     value.approvals = vec![value.approvals[0].clone(); 9];
-    let decoded: MultisigSimulationSpec = from_value(to_value(value).unwrap()).unwrap();
+    let decoded: ConfigurableAccountSimulationSpec = from_value(to_value(value).unwrap()).unwrap();
     assert!(matches!(
         decoded.validate_owners(Address::repeat_byte(9)),
-        Err(MultisigSimulationError::Quorum(
-            MultisigQuorumError::TooManySignatures
+        Err(ConfigurableAccountSimulationError::Quorum(
+            ConfigurableAccountQuorumError::TooManySignatures
         ))
     ));
 }

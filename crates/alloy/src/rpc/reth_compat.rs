@@ -1,4 +1,7 @@
-use crate::rpc::{TempoHeaderResponse, TempoTransactionRequest};
+use crate::rpc::{
+    ConfigurableAccountSimulationError, ConfigurableAccountSimulationSpec, TempoHeaderResponse,
+    TempoTransactionRequest,
+};
 use alloy_consensus::{EthereumTxEnvelope, TxEip4844, error::ValueError, transaction::Recovered};
 use alloy_network::{NetworkTransactionBuilder, TxSigner};
 use alloy_primitives::{Address, B256, Bytes, Signature, U256};
@@ -8,7 +11,13 @@ use reth_rpc_convert::{
 };
 use reth_rpc_eth_types::EthApiError;
 use tempo_evm::{RecoveredTxEnvelope, TempoEvmEnv, TempoTxEnv};
-use tempo_primitives::{SignatureType, TempoHeader, TempoSignature, TempoTxEnvelope, TempoTxType};
+use tempo_primitives::{
+    SignatureType, TempoHeader, TempoSignature, TempoTxEnvelope, TempoTxType,
+    transaction::{
+        ConfigurableAccountSignature, KeychainSignature, MAX_WEBAUTHN_SIGNATURE_LENGTH,
+        PrimitiveSignature, tt_signature::WebAuthnSignature,
+    },
+};
 
 /// Non-zero transaction identifier used only for RPC simulations.
 ///
@@ -16,6 +25,10 @@ use tempo_primitives::{SignatureType, TempoHeader, TempoSignature, TempoTxEnvelo
 /// can make a simulated signing payload differ from the eventual submitted transaction. Use a
 /// fixed sentinel instead of deriving a misleading future channel id from the simulated payload.
 const RPC_SIMULATION_UNIQUE_TX_IDENTIFIER: B256 = B256::new(*b"TEMPO_RPC_SIMULATION_MPP_CONTEXT");
+
+/// Largest `WebAuthn` data modeled for a configurable account owner approval (excludes r, s, and
+/// the public key).
+const MAX_OWNER_WEBAUTHN_DATA_LEN: usize = MAX_WEBAUTHN_SIGNATURE_LENGTH - 128;
 
 impl TryIntoSimTx<TempoTxEnvelope> for TempoTransactionRequest {
     fn try_into_sim_tx(self) -> Result<TempoTxEnvelope, ValueError<Self>> {
@@ -48,10 +61,10 @@ impl TryIntoSimTx<TempoTxEnvelope> for TempoTransactionRequest {
                     key_id,
                     tempo_authorization_list,
                     key_authorization,
-                    multisig_simulation,
+                    configurable_account_simulation,
                     key_authorization_simulation,
-                    multisig_simulation_signature,
-                    multisig_simulation_prepared,
+                    configurable_account_simulation_signature,
+                    configurable_account_simulation_prepared,
                     valid_before,
                     valid_after,
                     fee_payer_signature,
@@ -71,10 +84,10 @@ impl TryIntoSimTx<TempoTxEnvelope> for TempoTransactionRequest {
                             key_id,
                             tempo_authorization_list,
                             key_authorization,
-                            multisig_simulation,
+                            configurable_account_simulation,
                             key_authorization_simulation,
-                            multisig_simulation_signature,
-                            multisig_simulation_prepared,
+                            configurable_account_simulation_signature,
+                            configurable_account_simulation_prepared,
                             valid_before,
                             valid_after,
                             fee_payer_signature,
@@ -94,10 +107,10 @@ impl TryIntoSimTx<TempoTxEnvelope> for TempoTransactionRequest {
                             key_id,
                             tempo_authorization_list,
                             key_authorization,
-                            multisig_simulation,
+                            configurable_account_simulation,
                             key_authorization_simulation,
-                            multisig_simulation_signature,
-                            multisig_simulation_prepared,
+                            configurable_account_simulation_signature,
+                            configurable_account_simulation_prepared,
                             valid_before,
                             valid_after,
                             fee_payer_signature,
@@ -118,6 +131,21 @@ impl TryIntoTxEnv<Recovered<TempoTxEnv>, TempoEvmEnv> for TempoTransactionReques
     ) -> Result<Recovered<TempoTxEnv>, Self::Err> {
         let caller_addr = self.inner.from.unwrap_or_default();
         let is_aa = self.output_tx_type() == TempoTxType::AA;
+        if self.has_configurable_simulation()
+            && (!self.configurable_account_simulation_prepared
+                || (self.configurable_account_simulation.is_some()
+                    && self.configurable_account_simulation_signature.is_none())
+                || (self.key_authorization_simulation.is_some()
+                    && self
+                        .key_authorization
+                        .as_ref()
+                        .is_none_or(|grant| grant.signature.as_configurable_account().is_none())))
+        {
+            return Err(EthApiError::InvalidParams(
+                "configurable account simulation requires a configuration witness and state-aware preprocessing"
+                    .into(),
+            ));
+        }
         if !is_aa {
             let transaction = TryIntoTxEnv::<RecoveredTxEnvelope, TempoEvmEnv>::try_into_tx_env(
                 self.inner, evm_env,
@@ -140,18 +168,27 @@ impl TryIntoTxEnv<Recovered<TempoTxEnv>, TempoEvmEnv> for TempoTransactionReques
         let key_type = self.key_type.unwrap_or(SignatureType::Secp256k1);
         let key_data = self.key_data.clone();
         let key_id = self.key_id;
-        let signature = create_mock_tempo_sig(
-            &key_type,
-            key_data.as_ref(),
-            key_id,
-            caller_addr,
-            evm_env.spec.is_t1c(),
-        )
-        .ok_or_else(|| {
-            EthApiError::InvalidParams(
-                "configurable account simulation requires a configuration witness".into(),
-            )
-        })?;
+        let signature =
+            if let Some(signature) = self.configurable_account_simulation_signature.take() {
+                if key_id.is_some() {
+                    TempoSignature::Keychain(KeychainSignature::new(caller_addr, signature))
+                } else {
+                    TempoSignature::ConfigurableAccount(signature)
+                }
+            } else {
+                create_mock_tempo_sig(
+                    &key_type,
+                    key_data.as_ref(),
+                    key_id,
+                    caller_addr,
+                    evm_env.spec.is_t1c(),
+                )
+                .ok_or_else(|| {
+                    EthApiError::InvalidParams(
+                        "configurable account simulation requires a configuration witness".into(),
+                    )
+                })?
+            };
         let has_fee_payer_signature = self.fee_payer_signature.is_some();
         let tx = self
             .build_aa()
@@ -169,6 +206,40 @@ impl TryIntoTxEnv<Recovered<TempoTxEnv>, TempoEvmEnv> for TempoTransactionReques
     }
 }
 
+impl ConfigurableAccountSimulationSpec {
+    /// Constructs bounded dummy approvals only after checking the claimed owner quorum.
+    pub fn mock_signature(
+        &self,
+        account: Address,
+    ) -> Result<ConfigurableAccountSignature, ConfigurableAccountSimulationError> {
+        self.validate_owners(account)?;
+        let signatures = self
+            .approvals
+            .iter()
+            .map(|approval| {
+                let signature = match approval.key_type {
+                    None => PrimitiveSignature::WebAuthn(WebAuthnSignature {
+                        webauthn_data: Bytes::from(vec![0xff; MAX_OWNER_WEBAUTHN_DATA_LEN]),
+                        r: B256::ZERO,
+                        s: B256::ZERO,
+                        pub_key_x: B256::ZERO,
+                        pub_key_y: B256::ZERO,
+                    }),
+                    Some(key_type) => create_mock_primitive_signature_with_webauthn_limit(
+                        key_type,
+                        approval.key_data.as_ref(),
+                        MAX_OWNER_WEBAUTHN_DATA_LEN,
+                    )
+                    .ok_or(ConfigurableAccountSimulationError::NestedConfigurableAccountOwner)?,
+                };
+                Ok(signature)
+            })
+            .collect::<Result<Vec<_>, ConfigurableAccountSimulationError>>()?;
+        ConfigurableAccountSignature::try_new(account, self.config.clone(), signatures)
+            .map_err(ConfigurableAccountSimulationError::Signature)
+    }
+}
+
 /// Creates a mock AA signature for gas estimation based on key type hints.
 ///
 /// Returns `None` for a configurable-account key type: a primitive placeholder cannot stand in for
@@ -180,8 +251,6 @@ fn create_mock_tempo_sig(
     caller_addr: Address,
     is_t1c: bool,
 ) -> Option<TempoSignature> {
-    use tempo_primitives::transaction::tt_signature::{KeychainSignature, TempoSignature};
-
     let inner_sig = create_mock_primitive_signature(key_type, key_data.cloned())?;
 
     if key_id.is_some() {
@@ -200,10 +269,16 @@ fn create_mock_tempo_sig(
 fn create_mock_primitive_signature(
     sig_type: &SignatureType,
     key_data: Option<Bytes>,
-) -> Option<tempo_primitives::transaction::tt_signature::PrimitiveSignature> {
-    use tempo_primitives::transaction::tt_signature::{
-        P256SignatureWithPreHash, PrimitiveSignature, WebAuthnSignature,
-    };
+) -> Option<PrimitiveSignature> {
+    create_mock_primitive_signature_with_webauthn_limit(*sig_type, key_data.as_ref(), 8192)
+}
+
+fn create_mock_primitive_signature_with_webauthn_limit(
+    sig_type: SignatureType,
+    key_data: Option<&Bytes>,
+    max_webauthn_size: usize,
+) -> Option<PrimitiveSignature> {
+    use tempo_primitives::transaction::tt_signature::P256SignatureWithPreHash;
 
     Some(match sig_type {
         SignatureType::ConfigurableAccount => return None,
@@ -223,7 +298,6 @@ fn create_mock_primitive_signature(
             const AUTH_DATA_SIZE: usize = 37;
             const MIN_WEBAUTHN_SIZE: usize = AUTH_DATA_SIZE + BASE_CLIENT_JSON.len();
             const DEFAULT_WEBAUTHN_SIZE: usize = 800;
-            const MAX_WEBAUTHN_SIZE: usize = 8192;
 
             let size = if let Some(data) = key_data.as_ref() {
                 match data.len() {
@@ -235,9 +309,10 @@ fn create_mock_primitive_signature(
             } else {
                 DEFAULT_WEBAUTHN_SIZE
             }
-            .clamp(MIN_WEBAUTHN_SIZE, MAX_WEBAUTHN_SIZE);
+            .clamp(MIN_WEBAUTHN_SIZE, max_webauthn_size);
 
-            let mut webauthn_data = vec![0u8; AUTH_DATA_SIZE];
+            // Price every authenticator byte as nonzero; real RP-ID hashes and counters vary.
+            let mut webauthn_data = vec![0xff; AUTH_DATA_SIZE];
             webauthn_data[32] = 0x01;
 
             let additional_bytes = size - MIN_WEBAUTHN_SIZE;
@@ -265,11 +340,11 @@ impl SignableTxRequest<TempoTxEnvelope> for TempoTransactionRequest {
         self,
         signer: impl TxSigner<Signature> + Send,
     ) -> Result<TempoTxEnvelope, SignTxRequestError> {
-        if self.multisig_simulation.is_some()
+        if self.configurable_account_simulation.is_some()
             || self.key_authorization_simulation.is_some()
-            || self.multisig_simulation_signature.is_some()
-            || self.multisig_simulation_prepared
-            || self.key_type == Some(SignatureType::Multisig)
+            || self.configurable_account_simulation_signature.is_some()
+            || self.configurable_account_simulation_prepared
+            || self.key_type == Some(SignatureType::ConfigurableAccount)
         {
             return Err(SignTxRequestError::InvalidTransactionRequest);
         }
@@ -297,18 +372,24 @@ impl FromConsensusHeader<TempoHeader> for TempoHeaderResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::rpc::configurable_account::tests::spec;
     use alloy_consensus::Transaction;
-    use alloy_primitives::{Address, TxKind, address};
+    use alloy_eips::eip2718::WithEncoded;
+    use alloy_primitives::{TxKind, address};
     use alloy_rpc_types_eth::TransactionRequest;
     use alloy_signer::SignerSync;
     use alloy_signer_local::PrivateKeySigner;
     use reth_evm::FromTxWithEncoded;
     use reth_rpc_convert::TryIntoTxEnv;
+    use serde_json::{from_value, to_value};
+    use tempo_evm::ExecutionContext;
     use tempo_primitives::{
         TempoTransaction,
-        transaction::{Call, FEE_PAYER_SIGNATURE_MARKER, tt_signature::PrimitiveSignature},
+        transaction::{
+            Call, ConfigurableAccountConfig, ConfigurableAccountOwner, FEE_PAYER_SIGNATURE_MARKER,
+            KeyAuthorization, configurable_account_digest,
+        },
     };
-    use tempo_revm::ExecutionContext;
 
     fn call_request(target: Address) -> TransactionRequest {
         TransactionRequest {
@@ -848,13 +929,14 @@ mod tests {
     #[test_case::test_case(2; "inline grant")]
     fn native_roles_keep_transaction_context_with_empty_encoding(role: u8) {
         let account = Address::repeat_byte(9);
-        let multisig = spec().mock_signature(account).unwrap();
+        let account_signature = spec().mock_signature(account).unwrap();
         let mut tx = TempoTransaction::default();
         let signature = match role {
-            0 => TempoSignature::Multisig(multisig),
-            1 => {
-                TempoSignature::Keychain(KeychainSignature::new(Address::repeat_byte(8), multisig))
-            }
+            0 => TempoSignature::ConfigurableAccount(account_signature),
+            1 => TempoSignature::Keychain(KeychainSignature::new(
+                Address::repeat_byte(8),
+                account_signature,
+            )),
             _ => {
                 tx.key_authorization = Some(
                     KeyAuthorization::unrestricted(
@@ -862,13 +944,16 @@ mod tests {
                         SignatureType::Secp256k1,
                         Address::repeat_byte(8),
                     )
-                    .into_signed(multisig),
+                    .into_signed(account_signature),
                 );
                 TempoSignature::default()
             }
         };
         let tx = tx.into_signed(signature);
-        let env = TempoTxEnv::from_encoded_tx(&tx, account, Bytes::new());
+        let env = TempoTxEnv::from_tx_with_encoded(WithEncoded::new(
+            Bytes::new(),
+            Recovered::new_unchecked(TempoTxEnvelope::AA(tx), account),
+        ));
         assert!(matches!(
             env.execution_context(),
             ExecutionContext::Transaction { .. }
@@ -879,7 +964,7 @@ mod tests {
     #[test_case::test_case(true; "delegate")]
     fn block_simulation_rejects_configurable_roles(delegate: bool) {
         let request = TempoTransactionRequest {
-            multisig_simulation: Some(spec()),
+            configurable_account_simulation: Some(spec()),
             key_id: delegate.then_some(Address::repeat_byte(9)),
             ..Default::default()
         };
@@ -896,17 +981,17 @@ mod tests {
         let parent = signer.address();
         let authorization =
             KeyAuthorization::unrestricted(4217, SignatureType::Secp256k1, Address::repeat_byte(8));
-        let config = MultisigConfig {
+        let config = ConfigurableAccountConfig {
             salt: B256::ZERO,
             version: 1,
             threshold: 1,
-            owners: vec![MultisigOwner {
+            owners: vec![ConfigurableAccountOwner {
                 owner: parent,
                 weight: 1,
             }],
         };
-        let digest = multisig_digest(authorization.signature_hash(), parent, 1);
-        let signature = MultisigSignature::try_new(
+        let digest = configurable_account_digest(authorization.signature_hash(), parent, 1);
+        let signature = ConfigurableAccountSignature::try_new(
             parent,
             config,
             vec![PrimitiveSignature::Secp256k1(
@@ -933,5 +1018,60 @@ mod tests {
             panic!("AA expected");
         };
         assert_eq!(tx.tx().key_authorization, Some(authorization));
+    }
+
+    #[test]
+    fn configurable_account_key_type_cannot_fabricate_a_primitive_simulation_signature() {
+        assert!(
+            create_mock_primitive_signature(&SignatureType::ConfigurableAccount, None).is_none()
+        );
+        let request = TempoTransactionRequest {
+            inner: TransactionRequest::default().to(Address::repeat_byte(1)),
+            key_type: Some(SignatureType::ConfigurableAccount),
+            ..Default::default()
+        };
+        let error = request
+            .try_into_tx_env(&TempoEvmEnv::default())
+            .unwrap_err();
+        assert!(error.to_string().contains("configuration witness"));
+    }
+
+    #[test]
+    fn mock_approvals_are_bounded_and_conservative() {
+        let mut spec = spec();
+        spec.approvals[0].key_type = None;
+        let signature = spec.mock_signature(Address::repeat_byte(9)).unwrap();
+        assert_eq!(signature.signatures()[0].encoded_length(), 2049);
+        assert_eq!(signature.signatures()[1].encoded_length(), 65);
+
+        for (threshold, valid) in [(2, true), (0, false), (4, false), (9, false)] {
+            spec.config.threshold = threshold;
+            assert_eq!(spec.mock_signature(Address::repeat_byte(9)).is_ok(), valid);
+        }
+        spec.config.threshold = 2;
+        spec.approvals = vec![spec.approvals[0].clone(); 9];
+        let decoded: ConfigurableAccountSimulationSpec =
+            from_value(to_value(spec).unwrap()).unwrap();
+        assert!(decoded.mock_signature(Address::repeat_byte(9)).is_err());
+    }
+
+    #[test_case::test_case(128; "small")]
+    #[test_case::test_case(800; "default size")]
+    #[test_case::test_case(1920; "maximum")]
+    fn explicit_webauthn_approvals_use_worst_case_data(size: u16) {
+        let mut spec = spec();
+        for approval in &mut spec.approvals {
+            approval.key_type = Some(SignatureType::WebAuthn);
+            approval.key_data = Some(Bytes::from(size.to_be_bytes()));
+        }
+        let signature = spec.mock_signature(Address::repeat_byte(9)).unwrap();
+        for approval in signature.signatures() {
+            let PrimitiveSignature::WebAuthn(approval) = approval else {
+                panic!("wrong mock type")
+            };
+            assert_eq!(approval.webauthn_data.len(), usize::from(size));
+            assert!(approval.webauthn_data.iter().all(|byte| *byte != 0));
+            assert_eq!(approval.webauthn_data[32], 0x01);
+        }
     }
 }

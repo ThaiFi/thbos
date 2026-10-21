@@ -1,9 +1,9 @@
 pub mod admin;
+mod configurable_account;
 pub mod consensus;
 pub mod error;
 pub mod eth_ext;
 pub mod fork_schedule;
-mod native_multisig;
 pub mod operator;
 pub mod simulate;
 pub mod token;
@@ -64,7 +64,9 @@ use reth_rpc_eth_types::{
     receipt::EthReceiptConverter,
 };
 use tempo_alloy::{TempoNetwork, rpc::TempoTransactionReceipt};
-use tempo_evm::{FeeTokenResolver, TempoEvmEnv, TempoEvmTypes, TempoStateAccess};
+use tempo_evm::{
+    FeeTokenResolver, TempoEvmEnv, TempoEvmTypes, TempoStateAccess, account_access_gas,
+};
 use tempo_primitives::{
     TEMPO_GAS_PRICE_SCALING_FACTOR, TempoHeader, TempoPrimitives, TempoReceipt, TempoTxEnvelope,
 };
@@ -360,10 +362,10 @@ where
             return EstimateCall::estimate_gas_at(self, request, at, overrides).await;
         }
         let (evm_env, _) = self.evm_env_at(at).await?;
-        if !evm_env.cfg_env.spec.is_t14() {
+        if !evm_env.spec.is_t14() {
             return EstimateCall::estimate_gas_at(self, request, at, overrides).await;
         }
-        let fee_payer_access = account_access_gas(&evm_env.cfg_env.gas_params, true);
+        let fee_payer_access = account_access_gas(&evm_env.version.gas_params, true);
         request.fee_payer_signature = None;
         request.inner.gas = request
             .inner
@@ -448,10 +450,10 @@ where
         mut request: TempoTransactionRequest,
         mut db: impl Database<Error: Into<EthApiError>>,
     ) -> Result<TxEnvFor<Self::Evm>, Self::Error> {
-        native_multisig::prepare_native_multisig_simulation(
+        configurable_account::prepare_configurable_account_simulation(
             &mut request,
-            evm_env.cfg_env.spec,
-            evm_env.block_env(),
+            evm_env.spec,
+            &evm_env.block.ext,
             &mut db,
         )
         .map_err(Self::Error::from_eth_err)?;
@@ -534,12 +536,12 @@ where
                     .await
                     .map_err(Self::Error::from_eth_err);
             }
-            let authorization = native_multisig::prepare_fill_output(&mut request)
+            let authorization = configurable_account::prepare_fill_output(&mut request)
                 .map_err(Self::Error::from_eth_err)?;
             let filled = EthTransactions::fill_transaction(&this.inner, request)
                 .await
                 .map_err(Self::Error::from_eth_err)?;
-            let tx = native_multisig::restore_fill_authorization(filled.tx, authorization)
+            let tx = configurable_account::restore_fill_authorization(filled.tx, authorization)
                 .map_err(Self::Error::from_eth_err)?;
             Ok(FillTransaction {
                 raw: tx.encoded_2718().into(),

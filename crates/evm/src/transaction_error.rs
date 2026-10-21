@@ -357,6 +357,23 @@ pub enum ConfigurableAccountError {
     Quorum(ConfigurableAccountQuorumError),
 }
 
+impl From<ConfigurableAccountQuorumError> for ConfigurableAccountError {
+    fn from(error: ConfigurableAccountQuorumError) -> Self {
+        match error {
+            ConfigurableAccountQuorumError::OwnerSignatureRecoveryFailed { approval_index } => {
+                Self::OwnerSignatureRecoveryFailed { approval_index }
+            }
+            ConfigurableAccountQuorumError::ZeroThreshold
+            | ConfigurableAccountQuorumError::EmptySignatures
+            | ConfigurableAccountQuorumError::TooManySignatures
+            | ConfigurableAccountQuorumError::ExcessSignatures
+            | ConfigurableAccountQuorumError::SignerNotOwner
+            | ConfigurableAccountQuorumError::SignersNotAscending
+            | ConfigurableAccountQuorumError::WeightBelowThreshold => Self::Quorum(error),
+        }
+    }
+}
+
 /// Authority role a primitive key can fill in a transaction (TIP-1112).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum RootKeyRole {

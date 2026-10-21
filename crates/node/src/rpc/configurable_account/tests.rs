@@ -2,16 +2,18 @@ use super::*;
 use alloy::signers::{SignerSync, local::PrivateKeySigner};
 use alloy_primitives::{B256, Signature, U256, map::AddressMap};
 use alloy_rpc_types_eth::TransactionRequest;
+use evm2::{bytecode::Bytecode, evm::AccountInfo};
 use reth_errors::ProviderError;
-use reth_evm::revm::{bytecode::Bytecode, state::AccountInfo};
-use tempo_alloy::rpc::{MultisigSimulationApproval, MultisigSimulationSpec};
+use reth_rpc_eth_api::TryIntoTxEnv;
+use tempo_alloy::rpc::{ConfigurableAccountSimulationApproval, ConfigurableAccountSimulationSpec};
+use tempo_evm::{ExecutionContext, TempoEvmEnv};
 use tempo_primitives::{
     account::encode_config_commitment,
     transaction::{
-        KeyAuthorization, MultisigConfig, MultisigOwner, PrimitiveSignature, multisig_digest,
+        ConfigurableAccountConfig, ConfigurableAccountOwner, KeyAuthorization, PrimitiveSignature,
+        configurable_account_digest,
     },
 };
-use tempo_revm::{ExecutionContext, TempoTxEnv, native_multisig::authorizations};
 
 const FACTORY: Address = Address::repeat_byte(0x99);
 #[derive(Default)]
@@ -23,16 +25,16 @@ impl AccountDb {
 }
 impl Database for AccountDb {
     type Error = ProviderError;
-    fn basic(&mut self, address: Address) -> Result<Option<AccountInfo>, Self::Error> {
-        Ok(self.0.get(&address).cloned())
+    fn get_account(&mut self, address: &Address) -> Result<Option<AccountInfo>, Self::Error> {
+        Ok(self.0.get(address).cloned())
     }
-    fn code_by_hash(&mut self, _: B256) -> Result<Bytecode, Self::Error> {
+    fn get_code_by_hash(&mut self, _: &B256) -> Result<Bytecode, Self::Error> {
         panic!("metadata suffices")
     }
-    fn storage(&mut self, _: Address, _: U256) -> Result<U256, Self::Error> {
+    fn get_storage(&mut self, _: &Address, _: &U256) -> Result<U256, Self::Error> {
         panic!("no storage fallback")
     }
-    fn block_hash(&mut self, _: u64) -> Result<B256, Self::Error> {
+    fn get_block_hash(&mut self, _: &U256) -> Result<B256, Self::Error> {
         Ok(B256::ZERO)
     }
 }
@@ -51,21 +53,21 @@ struct Case {
     expected: Option<String>,
 }
 
-fn spec(salt: u8, version: u64) -> (Address, MultisigSimulationSpec) {
+fn spec(salt: u8, version: u64) -> (Address, ConfigurableAccountSimulationSpec) {
     let owner = Address::repeat_byte(1);
-    let config = MultisigConfig {
+    let config = ConfigurableAccountConfig {
         salt: B256::repeat_byte(salt),
         version,
         threshold: 1,
-        owners: vec![MultisigOwner { owner, weight: 1 }],
+        owners: vec![ConfigurableAccountOwner { owner, weight: 1 }],
     };
     let account = config.derive_account(FACTORY).unwrap();
     (
         account,
-        MultisigSimulationSpec {
+        ConfigurableAccountSimulationSpec {
             signer: None,
             config,
-            approvals: vec![MultisigSimulationApproval {
+            approvals: vec![ConfigurableAccountSimulationApproval {
                 owner,
                 key_type: Some(SignatureType::Secp256k1),
                 key_data: None,
@@ -73,10 +75,10 @@ fn spec(salt: u8, version: u64) -> (Address, MultisigSimulationSpec) {
         },
     )
 }
-fn block() -> TempoBlockEnv {
-    TempoBlockEnv {
-        multisig_recovery_factory: Some(FACTORY),
-        ..Default::default()
+fn block() -> TempoBlockExt {
+    TempoBlockExt {
+        configurable_account_recovery_factory: Some(FACTORY),
+        ..TempoBlockExt::default()
     }
 }
 
@@ -96,7 +98,7 @@ fn real_grant_checks_state_before_cryptography(admin: bool) {
     if admin {
         authorization.account = Some(parent);
     }
-    let digest = multisig_digest(
+    let digest = configurable_account_digest(
         authorization.signature_hash(),
         signing_account,
         spec.config.version,
@@ -107,13 +109,13 @@ fn real_grant_checks_state_before_cryptography(admin: bool) {
     let stale = B256::repeat_byte(7);
     let state_error = format!(
         "{} for {signing_account} at the requested state",
-        NativeMultisigError::ConfigurationCommitmentMismatch {
+        ConfigurableAccountStateError::CommitmentMismatch {
             expected: stale,
             actual: commitment,
         }
     );
     let crypto_error =
-        NativeMultisigError::OwnerSignatureRecoveryFailed { approval_index: 0 }.to_string();
+        ConfigurableAccountError::OwnerSignatureRecoveryFailed { approval_index: 0 }.to_string();
     for Case {
         stored,
         approval,
@@ -142,7 +144,7 @@ fn real_grant_checks_state_before_cryptography(admin: bool) {
     ] {
         let mut db = AccountDb::default();
         db.insert_commitment(signing_account, stored);
-        let signature = MultisigSignature::try_new(
+        let signature = ConfigurableAccountSignature::try_new(
             signing_account,
             spec.config.clone(),
             vec![PrimitiveSignature::Secp256k1(approval)],
@@ -154,8 +156,12 @@ fn real_grant_checks_state_before_cryptography(admin: bool) {
             key_authorization: Some(authorization.clone().into_signed(signature)),
             ..Default::default()
         };
-        let result =
-            prepare_native_multisig_simulation(&mut request, TempoHardfork::T14, &block(), &mut db);
+        let result = prepare_configurable_account_simulation(
+            &mut request,
+            TempoHardfork::T14,
+            &block(),
+            &mut db,
+        );
         if let Some(expected) = expected {
             let Err(EthApiError::InvalidParams(message)) = result else {
                 panic!("expected {expected}")
@@ -170,7 +176,7 @@ fn real_grant_checks_state_before_cryptography(admin: bool) {
                 .authorization
                 .chain_id += 1;
             assert!(
-                prepare_native_multisig_simulation(
+                prepare_configurable_account_simulation(
                     &mut request,
                     TempoHardfork::T14,
                     &block(),
@@ -196,12 +202,12 @@ fn prepares_independent_delegate_and_parent_roles(version: u64, admin: bool) {
     }
     let recipient = if admin { spec(3, version).0 } else { delegate };
     let mut authorization =
-        KeyAuthorization::unrestricted(4217, SignatureType::Multisig, recipient);
+        KeyAuthorization::unrestricted(4217, SignatureType::ConfigurableAccount, recipient);
     if admin {
         authorization.account = Some(parent);
     }
     let grant_spec = if admin {
-        MultisigSimulationSpec {
+        ConfigurableAccountSimulationSpec {
             signer: Some(delegate),
             ..delegate_spec.clone()
         }
@@ -215,8 +221,8 @@ fn prepares_independent_delegate_and_parent_roles(version: u64, admin: bool) {
             ..Default::default()
         },
         key_id: Some(delegate),
-        key_type: Some(SignatureType::Multisig),
-        multisig_simulation: Some(delegate_spec),
+        key_type: Some(SignatureType::ConfigurableAccount),
+        configurable_account_simulation: Some(delegate_spec),
         key_authorization_simulation: Some(grant_spec),
         key_authorization: Some(authorization.into_signed(PrimitiveSignature::default())),
         ..Default::default()
@@ -229,7 +235,7 @@ fn prepares_independent_delegate_and_parent_roles(version: u64, admin: bool) {
         .unwrap()
         .authorization
         .account = Some(wrong);
-    let Err(EthApiError::InvalidParams(message)) = prepare_native_multisig_simulation(
+    let Err(EthApiError::InvalidParams(message)) = prepare_configurable_account_simulation(
         &mut wrong_metadata,
         TempoHardfork::T14,
         &block(),
@@ -241,7 +247,7 @@ fn prepares_independent_delegate_and_parent_roles(version: u64, admin: bool) {
         message,
         format!("key authorization account mismatch: expected {parent}, actual {wrong}")
     );
-    prepare_native_multisig_simulation(&mut request, TempoHardfork::T14, &block(), &mut db)
+    prepare_configurable_account_simulation(&mut request, TempoHardfork::T14, &block(), &mut db)
         .unwrap();
 
     let mut wrong_metadata = request.clone();
@@ -254,14 +260,14 @@ fn prepares_independent_delegate_and_parent_roles(version: u64, admin: bool) {
     let mut wrong_signer = request.clone();
     wrong_signer.key_authorization_simulation = None;
     wrong_signer.key_authorization.as_mut().unwrap().signature = request
-        .multisig_simulation_signature
+        .configurable_account_simulation_signature
         .clone()
         .unwrap()
         .into();
     let mut wrong_delegate = request.clone();
     wrong_delegate.set_key_id(parent);
     let mut missing_witness = request.clone();
-    missing_witness.multisig_simulation = None;
+    missing_witness.configurable_account_simulation = None;
     let mut unbound_admin_grant = request.clone();
     unbound_admin_grant
         .key_authorization
@@ -280,7 +286,7 @@ fn prepares_independent_delegate_and_parent_roles(version: u64, admin: bool) {
         ),
         (
             missing_witness,
-            "multisig simulation signature requires its source witness".into(),
+            "configurable account simulation signature requires its source witness".into(),
         ),
     ];
     if admin {
@@ -296,28 +302,36 @@ fn prepares_independent_delegate_and_parent_roles(version: u64, admin: bool) {
         ));
     }
     for (mut invalid, expected) in invalid_cases {
-        let Err(EthApiError::InvalidParams(message)) =
-            prepare_native_multisig_simulation(&mut invalid, TempoHardfork::T14, &block(), &mut db)
-        else {
+        let Err(EthApiError::InvalidParams(message)) = prepare_configurable_account_simulation(
+            &mut invalid,
+            TempoHardfork::T14,
+            &block(),
+            &mut db,
+        ) else {
             panic!("expected {expected}")
         };
         assert_eq!(message, expected);
-        assert!(!invalid.multisig_simulation_prepared);
+        assert!(!invalid.configurable_account_simulation_prepared);
     }
     // Repeated preparation must retain both valid roles after the rejected alternatives.
-    prepare_native_multisig_simulation(&mut request, TempoHardfork::T14, &block(), &mut db)
+    prepare_configurable_account_simulation(&mut request, TempoHardfork::T14, &block(), &mut db)
         .unwrap();
-    let tx = request
-        .try_into_tempo_tx_env(TempoTxEnv::default(), true)
-        .unwrap();
-    let roles = authorizations(&tx)
-        .into_iter()
-        .flatten()
-        .collect::<Vec<_>>();
-    assert_eq!(roles.len(), 2);
-    assert_eq!(roles[0].signature.account(), delegate);
+    let tx = request.try_into_tx_env(&TempoEvmEnv::default()).unwrap();
+    let signed = tx.as_aa().unwrap().inner();
+    let TempoSignature::Keychain(keychain) = signed.signature() else {
+        panic!("delegate role expected")
+    };
     assert_eq!(
-        roles[1].signature.account(),
+        keychain
+            .signature
+            .as_configurable_account()
+            .unwrap()
+            .account(),
+        delegate
+    );
+    let grant = signed.tx().key_authorization.as_ref().unwrap();
+    assert_eq!(
+        grant.signature.as_configurable_account().unwrap().account(),
         if admin { delegate } else { parent }
     );
     assert_eq!(tx.execution_context(), ExecutionContext::Simulation);
@@ -333,20 +347,25 @@ fn rejects_invalid_witness_state(case: WitnessRejection) {
     let (account, spec) = spec(1, version);
     let mut request = TempoTransactionRequest {
         inner: TransactionRequest::default().from(account),
-        multisig_simulation: Some(spec.clone()),
+        configurable_account_simulation: Some(spec.clone()),
         ..Default::default()
     };
     let mut db = AccountDb::default();
     if version != 0 {
         db.insert_commitment(account, spec.config.commitment().unwrap());
     }
-    prepare_native_multisig_simulation(&mut request.clone(), TempoHardfork::T14, &block(), &mut db)
-        .unwrap();
+    prepare_configurable_account_simulation(
+        &mut request.clone(),
+        TempoHardfork::T14,
+        &block(),
+        &mut db,
+    )
+    .unwrap();
     let mut fork = TempoHardfork::T14;
     let expected = match case {
         WitnessRejection::BeforeT14(pre_activation) => {
             fork = pre_activation;
-            "native multisig simulation requires T14 at the requested state".to_owned()
+            "configurable account simulation requires T14 at the requested state".to_owned()
         }
         WitnessRejection::Code => {
             db.0.entry(account).or_default().code_hash =
@@ -361,12 +380,12 @@ fn rejects_invalid_witness_state(case: WitnessRejection) {
             let wrong = Address::repeat_byte(9);
             request.inner.from = Some(wrong);
             format!(
-                "initial multisig account mismatch at the requested state: expected {account}, actual {wrong}"
+                "initial configurable account mismatch at the requested state: expected {account}, actual {wrong}"
             )
         }
     };
     let Err(EthApiError::InvalidParams(message)) =
-        prepare_native_multisig_simulation(&mut request, fork, &block(), &mut db)
+        prepare_configurable_account_simulation(&mut request, fork, &block(), &mut db)
     else {
         panic!("expected {expected}")
     };
@@ -379,13 +398,13 @@ fn distinguishes_state_mismatch_from_corrupt_leaf() {
     let commitment = spec.config.commitment().unwrap();
     let mut request = TempoTransactionRequest {
         inner: TransactionRequest::default().from(account),
-        multisig_simulation: Some(spec),
+        configurable_account_simulation: Some(spec),
         ..Default::default()
     };
     let mut db = AccountDb::default();
     let stale = B256::repeat_byte(7);
     db.insert_commitment(account, stale);
-    let Err(EthApiError::InvalidParams(message)) = prepare_native_multisig_simulation(
+    let Err(EthApiError::InvalidParams(message)) = prepare_configurable_account_simulation(
         &mut request.clone(),
         TempoHardfork::T14,
         &block(),
@@ -397,7 +416,7 @@ fn distinguishes_state_mismatch_from_corrupt_leaf() {
         message,
         format!(
             "{} for {account} at the requested state",
-            NativeMultisigError::ConfigurationCommitmentMismatch {
+            ConfigurableAccountStateError::CommitmentMismatch {
                 expected: stale,
                 actual: commitment,
             }
@@ -405,7 +424,12 @@ fn distinguishes_state_mismatch_from_corrupt_leaf() {
     );
     db.0.get_mut(&account).unwrap().extension = vec![1].into();
     assert!(matches!(
-        prepare_native_multisig_simulation(&mut request, TempoHardfork::T14, &block(), &mut db),
+        prepare_configurable_account_simulation(
+            &mut request,
+            TempoHardfork::T14,
+            &block(),
+            &mut db
+        ),
         Err(EthApiError::Internal(_))
     ));
 }
@@ -417,19 +441,19 @@ fn factory_is_required_and_registered_version_zero_is_valid() {
     db.insert_commitment(account, spec.config.commitment().unwrap());
     let mut request = TempoTransactionRequest {
         inner: TransactionRequest::default().from(account),
-        multisig_simulation: Some(spec),
+        configurable_account_simulation: Some(spec),
         ..Default::default()
     };
     assert!(
-        prepare_native_multisig_simulation(
+        prepare_configurable_account_simulation(
             &mut request.clone(),
             TempoHardfork::T14,
-            &TempoBlockEnv::default(),
+            &TempoBlockExt::default(),
             &mut db
         )
         .is_err()
     );
-    prepare_native_multisig_simulation(&mut request, TempoHardfork::T14, &block(), &mut db)
+    prepare_configurable_account_simulation(&mut request, TempoHardfork::T14, &block(), &mut db)
         .unwrap();
 }
 
@@ -450,7 +474,7 @@ fn fill_output_preserves_real_grant_and_removes_simulation_hints() {
             max_priority_fee_per_gas: Some(1),
             ..Default::default()
         },
-        multisig_simulation: Some(spec.clone()),
+        configurable_account_simulation: Some(spec.clone()),
         key_authorization: Some(real_grant.clone()),
         ..Default::default()
     };
