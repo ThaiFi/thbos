@@ -237,6 +237,11 @@ on:
         type: boolean
         required: true
         default: false
+      tcp-highres:
+        description: Collect high-resolution TCP telemetry.
+        type: boolean
+        required: false
+        default: false
       valscope:
         description: Register live ValScope targets for each benchmark phase.
         type: boolean
@@ -404,7 +409,7 @@ jobs:
               owner: 'tempoxyz',
               repo: 'tempo',
               path,
-              ref: context.repo.owner === 'tempoxyz' && context.repo.repo === 'tempo' ? context.sha : 'main',
+              ref: '0073dd137018f62ec6b33d257edffe6ea41bba27',
             });
 
             if (Array.isArray(data) || data.type !== 'file' || !data.content) {
@@ -467,6 +472,20 @@ jobs:
           }
           """
           path.write_text(source[:start] + replacement + source[end:])
+          PYTHON
+
+      - name: Pin workload assets to the reference nightly
+        run: |
+          python3 - <<'PYTHON'
+          import os
+          from pathlib import Path
+
+          path = Path(os.environ["BENCH_REPO_DIR"]) / "scripts/run_comparison.sh"
+          source = path.read_text()
+          needle = 'assets_commit="$GITHUB_SHA"'
+          assert source.count(needle) == 1, "Workload asset resolution changed."
+          source = source.replace(needle, 'assets_commit="0073dd137018f62ec6b33d257edffe6ea41bba27"')
+          path.write_text(source)
           PYTHON
 
       - name: Resolve baseline and feature refs
