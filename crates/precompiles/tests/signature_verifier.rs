@@ -1,11 +1,14 @@
 //! Keychain signature verification against retired roots and stored key types.
 
-use alloy::primitives::{Address, B256};
+use alloy::primitives::{Address, B256, Bytes};
 use alloy_signer::SignerSync;
 use alloy_signer_local::PrivateKeySigner;
 use p256::{ecdsa::SigningKey, elliptic_curve::rand_core::OsRng};
-use tempo_chainspec::hardfork::TempoHardfork;
-use tempo_contracts::precompiles::IAccountKeychain::{KeyRestrictions, SignatureType};
+use tempo_chainspec::hardfork::TempoHardfork::{self, T13, T14};
+use tempo_contracts::precompiles::IAccountKeychain::{
+    KeyRestrictions,
+    SignatureType::{self, P256, Secp256k1},
+};
 use tempo_precompiles::{
     account_keychain::AccountKeychain,
     signature_verifier::SignatureVerifier,
@@ -15,6 +18,8 @@ use tempo_primitives::transaction::tt_signature::{
     KeychainSignature, P256SignatureWithPreHash, PrimitiveSignature, TempoSignature,
     derive_p256_address, normalize_p256_s,
 };
+
+use Committed::{Account, Nobody, Signer};
 
 const HASH: B256 = B256::repeat_byte(0x42);
 const COMMITMENT: B256 = B256::repeat_byte(0x11);
@@ -74,24 +79,32 @@ impl Key {
 }
 
 /// An access-key grant from the account to the signing key.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 struct Grant {
     stored_type: SignatureType,
     admin: bool,
 }
 
-/// Results of verifying one keychain signature both ways.
-#[derive(Debug, PartialEq, Eq)]
-struct Verdict {
-    keychain: bool,
-    keychain_admin: bool,
+/// Which address has a configuration commitment.
+#[derive(Clone, Copy, Debug)]
+enum Committed {
+    Nobody,
+    Signer,
+    Account,
 }
 
-const fn verdict(keychain: bool, keychain_admin: bool) -> Verdict {
-    Verdict {
-        keychain,
-        keychain_admin,
-    }
+const fn key(stored_type: SignatureType) -> Option<Grant> {
+    Some(Grant {
+        stored_type,
+        admin: false,
+    })
+}
+
+const fn admin_key(stored_type: SignatureType) -> Option<Grant> {
+    Some(Grant {
+        stored_type,
+        admin: true,
+    })
 }
 
 /// Storage at T14 with `grant` registered and a commitment on each of `committed`, switched to
@@ -103,7 +116,7 @@ fn storage_at(
     grant: Option<Grant>,
     committed: &[Address],
 ) -> HashMapStorageProvider {
-    let mut storage = HashMapStorageProvider::new_with_spec(1, TempoHardfork::T14);
+    let mut storage = HashMapStorageProvider::new_with_spec(1, T14);
     StorageCtx::enter(&mut storage, || {
         let mut keychain = AccountKeychain::new();
         keychain.initialize().unwrap();
@@ -145,117 +158,82 @@ fn storage_at(
     storage
 }
 
-/// Verifies a keychain signature over [`HASH`] that `signer` made for `account`.
-fn verify(
-    spec: TempoHardfork,
-    account: Address,
-    signer: &Key,
-    grant: Option<Grant>,
-    committed: &[Address],
-) -> Verdict {
-    let mut storage = storage_at(spec, account, signer.address(), grant, committed);
-    let signature = TempoSignature::Keychain(KeychainSignature::new(
+/// A keychain signature over [`HASH`] by `key` for `account`.
+fn keychain_signature(key: &Key, account: Address) -> Bytes {
+    TempoSignature::Keychain(KeychainSignature::new(
         account,
-        signer.sign(KeychainSignature::signing_hash(HASH, account)),
+        key.sign(KeychainSignature::signing_hash(HASH, account)),
     ))
-    .to_bytes();
-    StorageCtx::enter(&mut storage, || {
-        let verifier = SignatureVerifier::new();
-        verdict(
-            verifier
-                .verify_keychain(account, HASH, signature.clone())
-                .unwrap(),
-            verifier
-                .verify_keychain_admin(account, HASH, signature)
-                .unwrap(),
-        )
-    })
+    .to_bytes()
 }
 
-fn root() -> Key {
-    Key::random(SignatureType::Secp256k1)
-}
-
+/// Each case is a spec, the signer's key type, the grant to the signer (none: the signer is the
+/// account's root key), who has a commitment, and whether `verify_keychain` and
+/// `verify_keychain_admin` accept the signature.
 #[test]
-fn root_admin_signature_is_rejected_once_the_root_is_retired() {
-    let root = root();
-    let account = root.address();
-    // The root is implicitly admin, but is not an access key.
-    for (spec, committed, admin) in [
-        (TempoHardfork::T14, vec![], true),
-        (TempoHardfork::T14, vec![account], false),
-        (TempoHardfork::T13, vec![account], true),
-    ] {
-        assert_eq!(
-            verify(spec, account, &root, None, &committed),
-            verdict(false, admin),
-            "{spec:?}, committed: {committed:?}"
-        );
-    }
-}
-
-#[test]
-fn access_key_signature_is_rejected_when_the_key_is_a_retired_root() {
-    for admin in [false, true] {
-        let key = root();
-        let account = Address::repeat_byte(0x01);
-        let grant = Grant {
-            stored_type: SignatureType::Secp256k1,
-            admin,
+fn keychain_verification_by_retired_roots_and_stored_key_types() {
+    let cases = [
+        // The root is implicitly admin, but is not an access key.
+        (T14, Secp256k1, None, Nobody, (false, true)),
+        (T14, Secp256k1, None, Account, (false, false)),
+        (T13, Secp256k1, None, Account, (false, true)),
+        // An access key that is a retired root.
+        (T14, Secp256k1, key(Secp256k1), Nobody, (true, false)),
+        (T14, Secp256k1, admin_key(Secp256k1), Nobody, (true, true)),
+        (T14, Secp256k1, key(Secp256k1), Signer, (false, false)),
+        (T14, Secp256k1, admin_key(Secp256k1), Signer, (false, false)),
+        (T13, Secp256k1, key(Secp256k1), Signer, (true, false)),
+        (T13, Secp256k1, admin_key(Secp256k1), Signer, (true, true)),
+        // A commitment on the granting account does not retire the grantee.
+        (T14, Secp256k1, key(Secp256k1), Account, (true, false)),
+        (T14, Secp256k1, admin_key(Secp256k1), Account, (true, true)),
+        // The stored type is compared with the signature type from T14.
+        (T14, P256, key(P256), Nobody, (true, false)),
+        (T14, P256, key(Secp256k1), Nobody, (false, false)),
+        (T13, P256, key(P256), Nobody, (true, false)),
+        (T13, P256, key(Secp256k1), Nobody, (true, false)),
+    ];
+    for (spec, signer_type, grant, committed, expected) in cases {
+        let signer = Key::random(signer_type);
+        let account = match grant {
+            Some(_) => Address::repeat_byte(0x01),
+            None => signer.address(),
         };
-        for (spec, committed, accepted) in [
-            (TempoHardfork::T14, vec![], true),
-            (TempoHardfork::T14, vec![key.address()], false),
-            // A commitment on the granting account does not retire the grantee.
-            (TempoHardfork::T14, vec![account], true),
-            (TempoHardfork::T13, vec![key.address()], true),
-        ] {
-            assert_eq!(
-                verify(spec, account, &key, Some(grant), &committed),
-                verdict(accepted, accepted && admin),
-                "admin grant: {admin}, {spec:?}, committed: {committed:?}"
-            );
-        }
-    }
-}
-
-#[test]
-fn signature_type_must_match_the_stored_key_type_from_t14() {
-    let key = Key::random(SignatureType::P256);
-    let account = Address::repeat_byte(0x01);
-    for (spec, stored_type, accepted) in [
-        (TempoHardfork::T14, SignatureType::P256, true),
-        (TempoHardfork::T14, SignatureType::Secp256k1, false),
-        // Before T14 the stored type was not compared.
-        (TempoHardfork::T13, SignatureType::P256, true),
-        (TempoHardfork::T13, SignatureType::Secp256k1, true),
-    ] {
-        let grant = Grant {
-            stored_type,
-            admin: false,
+        let committed_addresses = match committed {
+            Nobody => vec![],
+            Signer => vec![signer.address()],
+            Account => vec![account],
         };
+        let mut storage = storage_at(spec, account, signer.address(), grant, &committed_addresses);
+        let signature = keychain_signature(&signer, account);
+        let actual = StorageCtx::enter(&mut storage, || {
+            let verifier = SignatureVerifier::new();
+            (
+                verifier
+                    .verify_keychain(account, HASH, signature.clone())
+                    .unwrap(),
+                verifier
+                    .verify_keychain_admin(account, HASH, signature)
+                    .unwrap(),
+            )
+        });
         assert_eq!(
-            verify(spec, account, &key, Some(grant), &[]),
-            verdict(accepted, false),
-            "{spec:?}, stored: {stored_type:?}"
+            actual, expected,
+            "{spec:?}, {signer_type:?} signer, grant: {grant:?}, committed: {committed:?}"
         );
     }
 }
 
 #[test]
 fn keychain_signature_must_embed_the_verified_account() {
-    let key = root();
+    let key = Key::random(Secp256k1);
     let account = Address::repeat_byte(0x01);
     let grant = Grant {
-        stored_type: SignatureType::Secp256k1,
+        stored_type: Secp256k1,
         admin: true,
     };
-    let mut storage = storage_at(TempoHardfork::T14, account, key.address(), Some(grant), &[]);
-    let signature = TempoSignature::Keychain(KeychainSignature::new(
-        account,
-        key.sign(KeychainSignature::signing_hash(HASH, account)),
-    ))
-    .to_bytes();
+    let mut storage = storage_at(T14, account, key.address(), Some(grant), &[]);
+    let signature = keychain_signature(&key, account);
     StorageCtx::enter(&mut storage, || {
         let verifier = SignatureVerifier::new();
         let other = Address::repeat_byte(0x02);
@@ -276,9 +254,9 @@ fn keychain_signature_must_embed_the_verified_account() {
 fn implicit_root_admin_status_ends_with_the_commitment_from_t14() {
     let account = Address::repeat_byte(0x01);
     for (spec, committed, admin) in [
-        (TempoHardfork::T14, vec![], true),
-        (TempoHardfork::T14, vec![account], false),
-        (TempoHardfork::T13, vec![account], true),
+        (T14, vec![], true),
+        (T14, vec![account], false),
+        (T13, vec![account], true),
     ] {
         let mut storage = storage_at(spec, account, Address::repeat_byte(0x03), None, &committed);
         StorageCtx::enter(&mut storage, || {

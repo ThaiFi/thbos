@@ -6,7 +6,7 @@ use alloy::{
 };
 use alloy_signer::SignerSync;
 use alloy_signer_local::PrivateKeySigner;
-use tempo_chainspec::hardfork::TempoHardfork;
+use tempo_chainspec::hardfork::TempoHardfork::{self, T13, T14};
 use tempo_contracts::precompiles::{
     ITIP20, ITIP20ChannelReserve, TIP20ChannelReserveError, TIP20Error,
 };
@@ -20,11 +20,13 @@ use tempo_precompiles::{
     tip20_channel_reserve::TIP20ChannelReserve,
 };
 
+use Party::{Delegate, Payer};
+
 const COMMITMENT: B256 = B256::repeat_byte(0x11);
 
 /// Storage at T14, with a commitment on each of `committed`, running at `spec`.
 fn storage_at(spec: TempoHardfork, committed: &[Address]) -> HashMapStorageProvider {
-    let mut storage = HashMapStorageProvider::new_with_spec(1, TempoHardfork::T14);
+    let mut storage = HashMapStorageProvider::new_with_spec(1, T14);
     StorageCtx::enter(&mut storage, || {
         for account in committed {
             StorageCtx
@@ -77,56 +79,54 @@ fn permit(
 }
 
 #[test]
-fn permit_by_retired_root_is_rejected_at_t14() {
-    let (owner, result, nonce) = permit(TempoHardfork::T14, true);
-    assert_eq!(
-        result.unwrap_err(),
-        TIP20Error::root_key_retired(owner).into()
-    );
-    // The rejected permit consumes no nonce.
-    assert_eq!(nonce, U256::ZERO);
+fn permit_by_a_root_with_a_commitment_is_rejected_from_t14() {
+    for (name, spec, committed, rejected) in [
+        ("committed root", T14, true, true),
+        ("uncommitted root", T14, false, false),
+        ("committed root before T14", T13, true, false),
+    ] {
+        let (owner, result, nonce) = permit(spec, committed);
+        if rejected {
+            assert_eq!(
+                result.unwrap_err(),
+                TIP20Error::root_key_retired(owner).into(),
+                "{name}"
+            );
+            // The rejected permit consumes no nonce.
+            assert_eq!(nonce, U256::ZERO, "{name}");
+        } else {
+            result.expect(name);
+            assert_eq!(nonce, U256::ONE, "{name}");
+        }
+    }
 }
 
-#[test]
-fn permit_without_commitment_is_accepted_at_t14() {
-    let (_, result, nonce) = permit(TempoHardfork::T14, false);
-    result.unwrap();
-    assert_eq!(nonce, U256::ONE);
-}
-
-#[test]
-fn permit_ignores_commitment_before_t14() {
-    let (_, result, nonce) = permit(TempoHardfork::T13, true);
-    result.unwrap();
-    assert_eq!(nonce, U256::ONE);
-}
-
-/// Which account of a channel has a configuration commitment.
+/// The payer of a channel, or the separate signer it authorizes to sign vouchers.
 #[derive(Clone, Copy)]
-enum Committed {
+enum Party {
     Payer,
-    AuthorizedSigner,
+    Delegate,
 }
 
-/// Opens a channel from a fresh payer, with a separate authorized signer when `delegated`, and
-/// settles a voucher signed by the channel's expected signer. Returns that signer and the settle
-/// result.
+/// Opens a channel from a fresh payer, authorizing a separate signer when `signer` is the
+/// delegate, and settles a voucher signed by `signer`, with a commitment on `committed`.
+/// Returns the signer's address and the settle result.
 fn settle(
     spec: TempoHardfork,
-    delegated: bool,
-    committed: Committed,
+    signer: Party,
+    committed: Party,
 ) -> (Address, Result<(), TempoPrecompileError>) {
     let payer_signer = PrivateKeySigner::random();
     let payer = payer_signer.address();
     let delegate = PrivateKeySigner::random();
-    let (authorized_signer, voucher_signer) = if delegated {
-        (delegate.address(), delegate)
-    } else {
-        (Address::ZERO, payer_signer)
-    };
+    let delegate_address = delegate.address();
     let committed = match committed {
-        Committed::Payer => payer,
-        Committed::AuthorizedSigner => authorized_signer,
+        Payer => payer,
+        Delegate => delegate_address,
+    };
+    let (authorized_signer, voucher_signer) = match signer {
+        Payer => (Address::ZERO, payer_signer),
+        Delegate => (delegate_address, delegate),
     };
     let payee = Address::repeat_byte(0x44);
     let mut storage = storage_at(spec, &[committed]);
@@ -185,32 +185,23 @@ fn settle(
 }
 
 #[test]
-fn voucher_by_retired_payer_is_rejected_at_t14() {
-    let (signer, result) = settle(TempoHardfork::T14, false, Committed::Payer);
-    assert_eq!(
-        result.unwrap_err(),
-        TIP20ChannelReserveError::root_key_retired(signer).into()
-    );
-}
-
-#[test]
-fn voucher_by_retired_authorized_signer_is_rejected_at_t14() {
-    let (signer, result) = settle(TempoHardfork::T14, true, Committed::AuthorizedSigner);
-    assert_eq!(
-        result.unwrap_err(),
-        TIP20ChannelReserveError::root_key_retired(signer).into()
-    );
-}
-
-#[test]
-fn voucher_checks_only_the_expected_signer_at_t14() {
-    // The payer is committed, but the voucher is signed by its uncommitted authorized signer.
-    let (_, result) = settle(TempoHardfork::T14, true, Committed::Payer);
-    result.unwrap();
-}
-
-#[test]
-fn voucher_ignores_commitment_before_t14() {
-    let (_, result) = settle(TempoHardfork::T13, false, Committed::Payer);
-    result.unwrap();
+fn voucher_by_a_signer_with_a_commitment_is_rejected_from_t14() {
+    for (name, spec, signer, committed, rejected) in [
+        ("committed payer", T14, Payer, Payer, true),
+        ("committed delegate", T14, Delegate, Delegate, true),
+        // Only the channel's expected signer is checked.
+        ("committed payer, delegated", T14, Delegate, Payer, false),
+        ("committed payer before T14", T13, Payer, Payer, false),
+    ] {
+        let (signer, result) = settle(spec, signer, committed);
+        if rejected {
+            assert_eq!(
+                result.unwrap_err(),
+                TIP20ChannelReserveError::root_key_retired(signer).into(),
+                "{name}"
+            );
+        } else {
+            result.expect(name);
+        }
+    }
 }
