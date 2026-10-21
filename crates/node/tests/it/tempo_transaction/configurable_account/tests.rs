@@ -12,9 +12,11 @@ use alloy::{
 use alloy_eips::{BlockId, BlockNumberOrTag, Decodable2718, eip7702::Authorization};
 use eyre::OptionExt;
 use futures::{FutureExt, StreamExt};
+use jsonrpsee::types::ErrorObject;
 use reth_e2e_test_utils::{node::Finality, wait::WAIT_TIMEOUT};
 use reth_ethereum::pool::{TransactionEvent, TransactionPool};
 use reth_node_builder::BuiltPayload;
+use reth_rpc_eth_types::{EthApiError, RpcInvalidTransactionError};
 use serde_json::{from_value, json};
 use tempo_chainspec::spec::TEMPO_T1_BASE_FEE;
 use tempo_contracts::precompiles::{
@@ -25,8 +27,8 @@ use tempo_evm::transaction_error::ConfigurableAccountError;
 use tempo_primitives::{
     account::encode_config_commitment,
     transaction::{
-        ConfigurableAccountQuorumError, KeyAuthorization, SignedKeyAuthorization,
-        TempoSignedAuthorization, TokenLimit,
+        ConfigurableAccountQuorumError, ConfigurableAccountStateError, KeyAuthorization,
+        SignedKeyAuthorization, TempoSignedAuthorization, TokenLimit, calc_gas_balance_spending,
     },
 };
 use tokio::time::timeout;
@@ -244,11 +246,18 @@ async fn configurable_account_rpc_registration_revert_retry_and_rotation() -> ey
     // it (TIP-1112).
     env.setup.node.wait_for_pool_removal([stale]).await?;
     let tx = account.transaction(&env, vec![noop()]);
-    assert!(
-        reject(&env, tx.clone(), account.sign(&tx)?)
-            .await?
-            .contains("commitment mismatch")
-    );
+    reject_with(
+        &env,
+        tx.clone(),
+        account.sign(&tx)?,
+        TempoInvalidTransaction::ConfigurableAccount(
+            ConfigurableAccountError::ConfigurationCommitmentMismatch {
+                expected: next.commitment().unwrap(),
+                actual: account.config.commitment().unwrap(),
+            },
+        ),
+    )
+    .await?;
     account.config = next;
     account.owners = replacement.owners;
     let signature = account.sign(&tx)?;
@@ -284,11 +293,17 @@ async fn configurable_account_rpc_historical_state_and_account_overrides() -> ey
         .call(old_request.clone())
         .latest()
         .await
-        .unwrap_err()
-        .to_string();
-    assert!(stale.contains("commitment mismatch"), "{stale}");
-    assert!(stale.contains(&initial.to_string()), "{stale}");
-    assert!(stale.contains(&current.to_string()), "{stale}");
+        .unwrap_err();
+    let mismatch = ConfigurableAccountStateError::CommitmentMismatch {
+        expected: current,
+        actual: initial,
+    };
+    let invalid = EthApiError::InvalidParams(format!(
+        "{mismatch} for {} at the requested state",
+        account.address
+    ));
+    let invalid = ErrorObject::from(invalid);
+    assert_rpc_error(&stale, invalid.code(), invalid.message())?;
     let historical_gas = provider
         .estimate_gas(old_request)
         .block(historical_block)
@@ -510,15 +525,18 @@ async fn configurable_account_rpc_delegate_rotation_preserves_grant_and_spending
             U256::from(100),
         )],
     );
-    assert!(
-        reject(
-            &env,
-            tx.clone(),
-            delegate.as_delegate(&tx, parent.address, false)?
-        )
-        .await?
-        .contains("commitment mismatch")
-    );
+    reject_with(
+        &env,
+        tx.clone(),
+        delegate.as_delegate(&tx, parent.address, false)?,
+        TempoInvalidTransaction::ConfigurableAccount(
+            ConfigurableAccountError::ConfigurationCommitmentMismatch {
+                expected: next.commitment().unwrap(),
+                actual: delegate.config.commitment().unwrap(),
+            },
+        ),
+    )
+    .await?;
     delegate.config = next;
     delegate.owners = replacement.owners;
     let signature = delegate.as_delegate(&tx, parent.address, false)?;
@@ -568,23 +586,18 @@ async fn configurable_account_rpc_maximum_mixed_quorums_and_validation_cost_orde
         error.contains("intrinsic") || error.contains("gas limit"),
         "{error}"
     );
-    let error = reject(
+    let error = rejection(
         &env,
         tx.clone(),
         delegate.as_delegate(&tx, parent.address, false)?,
     )
-    .await?;
-    assert!(
-        error.contains("fund") || error.contains("balance"),
-        "{error}"
-    );
+    .await;
+    let unfunded = RpcInvalidTransactionError::InsufficientFunds {
+        cost: calc_gas_balance_spending(tx.gas_limit, tx.max_fee_per_gas),
+        balance: U256::ZERO,
+    };
+    assert_rpc_error(&error, unfunded.error_code(), &unfunded.to_string())?;
     env.fund_account(parent.address).await?;
-    let error = reject(
-        &env,
-        tx.clone(),
-        delegate.as_delegate(&tx, parent.address, false)?,
-    )
-    .await?;
     let expected = match parent.owners.last().unwrap() {
         OwnerKey::Secp(_) => {
             ConfigurableAccountError::Quorum(ConfigurableAccountQuorumError::SignerNotOwner)
@@ -592,12 +605,14 @@ async fn configurable_account_rpc_maximum_mixed_quorums_and_validation_cost_orde
         OwnerKey::P256 { .. } => {
             ConfigurableAccountError::OwnerSignatureRecoveryFailed { approval_index: 7 }
         }
-    }
-    .to_string();
-    assert!(
-        error.contains(&expected),
-        "expected signature16 failure {expected}, got {error}"
-    );
+    };
+    reject_with(
+        &env,
+        tx.clone(),
+        delegate.as_delegate(&tx, parent.address, false)?,
+        TempoInvalidTransaction::ConfigurableAccount(expected),
+    )
+    .await?;
     assert_eq!(commitment(&env, parent.address).await?, B256::ZERO);
     assert_eq!(commitment(&env, delegate.address).await?, B256::ZERO);
 
@@ -778,7 +793,16 @@ async fn retired_root_rpc_rejects_send_and_allows_calls() -> eyre::Result<()> {
         // The root key cannot send any more, whatever the transaction does.
         let tx = account.transaction(&env, vec![noop()]);
         let signature = TempoSignature::Primitive(root.sign(tx.signature_hash())?);
-        reject_retired_root(&env, tx, signature, account.address).await?;
+        reject_with(
+            &env,
+            tx,
+            signature,
+            TempoInvalidTransaction::RootKeyRetired {
+                account: account.address,
+                role: RootKeyRole::Sender,
+            },
+        )
+        .await?;
 
         // The witness still can, and the rejected transaction used no nonce.
         let tx = account.transaction(&env, vec![noop()]);
@@ -878,7 +902,16 @@ async fn root_transaction_queued_behind_migration_is_not_included() -> eyre::Res
     resent.max_priority_fee_per_gas *= 2;
     resent.max_fee_per_gas *= 2;
     let signature = TempoSignature::Primitive(root.sign(resent.signature_hash())?);
-    reject_retired_root(&env, resent, signature, account.address).await?;
+    reject_with(
+        &env,
+        resent,
+        signature,
+        TempoInvalidTransaction::RootKeyRetired {
+            account: account.address,
+            role: RootKeyRole::Sender,
+        },
+    )
+    .await?;
     Ok(())
 }
 
@@ -1585,13 +1618,20 @@ async fn parallel_builder_runs_voucher_redemption_after_same_block_migration(
         "{redeem:?} of a migrated payer's voucher succeeded: {rejected:?}"
     );
     // The receipt carries no revert data, so replay the transaction for it: it must have reverted
-    // because the payer's root key is retired, not for any other reason.
+    // because the payer's root key is retired, not for any other reason. The reverting frame is
+    // the call into the channel reserve itself, with no frame below it.
     let trace: Value = provider
         .raw_request(
             "debug_traceTransaction".into(),
             (hashes[1], json!({ "tracer": "callTracer" })),
         )
         .await?;
+    assert_eq!(
+        from_value::<Address>(trace["to"].clone())?,
+        TIP20_CHANNEL_RESERVE_ADDRESS,
+        "{redeem:?}: {trace}"
+    );
+    assert!(trace.get("calls").is_none(), "{redeem:?}: {trace}");
     let reverted = from_value::<Bytes>(trace["output"].clone())?;
     let retired = ITIP20ChannelReserve::RootKeyRetired {
         account: migrating.address(),
