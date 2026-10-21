@@ -37,7 +37,7 @@ impl Sender {
             nonce_key,
             gas_limit,
             calls,
-            valid_before: expiring.then(|| NZU64!(10)),
+            valid_before: expiring.then_some(NZU64!(10)),
             ..base_tx()
         };
         // An expiring-nonce transaction is sponsored: the fee payer is a role account.
