@@ -231,7 +231,7 @@ impl TempoChainSpec {
             {
                 let account = genesis.alloc.entry(factory).or_default();
                 account.code = Some(bytes!("ef"));
-                account.nonce = Some(account.nonce.unwrap_or_default().max(1));
+                account.nonce = Some(account.nonce.map_or(1, |nonce| nonce.max(1)));
             }
         }
 
