@@ -27,7 +27,13 @@ impl Precompile for AccountKeychain {
             ]
             .iter()
             .any(|selector| calldata.starts_with(selector))
-            && calldata.get(36..68) == Some(B256::with_last_byte(3).as_slice())
+            && calldata.get(36..68)
+                == Some(
+                    B256::with_last_byte(
+                        IAccountKeychain::SignatureType::ConfigurableAccount as u8,
+                    )
+                    .as_slice(),
+                )
         {
             return Ok(self.storage.revert_output(Bytes::new()));
         }

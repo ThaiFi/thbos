@@ -114,7 +114,7 @@ crate::sol! {
 
         /// Authorize a new key for the caller's account with T3 extensions.
         /// @param keyId The key identifier (address derived from public key)
-        /// @param signatureType 0: secp256k1, 1: P256, 2: WebAuthn
+        /// @param signatureType 0: secp256k1, 1: P256, 2: WebAuthn, 3: ConfigurableAccount (from T14)
         /// @param config Access-key expiry and optional limits / call restrictions
         function authorizeKey(
             address keyId,

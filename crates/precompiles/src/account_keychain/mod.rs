@@ -242,6 +242,7 @@ impl AccountKeychain {
     /// - `ExpiryInPast` — expiry must be in the future (enforced since T0)
     /// - `KeyAlreadyExists` — a key with this ID is already registered
     /// - `KeyAlreadyRevoked` — revoked keys cannot be re-authorized
+    /// - `InvalidKeyId` — from T14, a ConfigurableAccount `keyId` that is the caller or has code
     /// - `InvalidSignatureType` — unsupported type, including ConfigurableAccount before T14
     pub fn authorize_key(
         &mut self,
