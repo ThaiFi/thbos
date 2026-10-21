@@ -47,7 +47,7 @@ fn t14_genesis_reserves_the_marker_and_an_unallocated_recovery_factory() {
     genesis.alloc.remove(&CONFIGURABLE_ACCOUNT_ADDRESS);
     genesis.alloc.remove(&factory);
 
-    let spec = TempoChainSpec::try_from_genesis(genesis).unwrap();
+    let spec = TempoChainSpec::from_genesis(genesis);
 
     let alloc = &spec.genesis().alloc;
     let marker = &alloc[&CONFIGURABLE_ACCOUNT_ADDRESS];
