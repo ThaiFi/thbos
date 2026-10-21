@@ -52,7 +52,8 @@ impl SignatureVerifier {
     /// Returns whether `signature` is an active access-key signature for `account`.
     ///
     /// From T14, `false` when the recovered key ID has a nonzero account commitment (TIP-1112):
-    /// its bare root authority is retired, whichever grant it is used under.
+    /// its bare root authority is retired, whichever grant it is used under. Also `false` from T14
+    /// when the inner signature type differs from the stored key type.
     pub fn verify_keychain(&self, account: Address, hash: B256, signature: Bytes) -> Result<bool> {
         let key = self.recover_keychain_key(hash, signature)?;
         if key.account != account || self.is_retired_root(key.key_id)? {
@@ -68,7 +69,8 @@ impl SignatureVerifier {
     /// root key's.
     ///
     /// From T14, `false` when the recovered key ID has a nonzero account commitment (TIP-1112),
-    /// including the implicit root of `account` itself.
+    /// including the implicit root of `account` itself. Also `false` from T14 when the inner
+    /// signature type of an access-key signature differs from the stored key type.
     pub fn verify_keychain_admin(
         &self,
         account: Address,
@@ -147,6 +149,7 @@ impl SignatureVerifier {
 struct RecoveredKeychainKey {
     /// Account embedded in the keychain signature.
     account: Address,
+    /// Key ID recovered from the inner primitive signature.
     key_id: Address,
     /// Signature type byte of the inner primitive signature.
     signature_type: u8,
