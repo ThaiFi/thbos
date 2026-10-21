@@ -762,6 +762,8 @@ mod tests {
         tt_signature::tests::current_config,
     };
     use alloy_rlp::{Decodable, Encodable};
+    #[cfg(feature = "serde")]
+    use serde_json::{from_value, to_value};
 
     fn nonzero(value: u64) -> NonZeroU64 {
         NonZeroU64::new(value).expect("test expiry must be non-zero")
@@ -814,12 +816,9 @@ mod tests {
         assert_ne!(auth.signature_hash(), primitive_auth.signature_hash());
         #[cfg(feature = "serde")]
         {
-            let json = serde_json::to_value(&auth).unwrap();
+            let json = to_value(&auth).unwrap();
             assert_eq!(json["keyType"], "configurableAccount");
-            assert_eq!(
-                serde_json::from_value::<KeyAuthorization>(json).unwrap(),
-                auth
-            );
+            assert_eq!(from_value::<KeyAuthorization>(json).unwrap(), auth);
         }
     }
 
@@ -992,10 +991,7 @@ mod tests {
         };
         assert_eq!(alloy_rlp::encode(&signed), alloy_rlp::encode(&legacy));
         #[cfg(feature = "serde")]
-        assert_eq!(
-            serde_json::to_value(&signed).unwrap(),
-            serde_json::to_value(&legacy).unwrap()
-        );
+        assert_eq!(to_value(&signed).unwrap(), to_value(&legacy).unwrap());
         let account = Address::repeat_byte(0x11);
         let config = ConfigurableAccountConfig {
             version: 0,
@@ -1018,16 +1014,10 @@ mod tests {
             signed
         );
         #[cfg(feature = "serde")]
-        assert_eq!(
-            serde_json::to_value(&signed).unwrap(),
-            serde_json::to_value(&previous).unwrap()
-        );
+        assert_eq!(to_value(&signed).unwrap(), to_value(&previous).unwrap());
         #[cfg(feature = "serde")]
         assert_eq!(
-            serde_json::from_value::<SignedKeyAuthorization>(
-                serde_json::to_value(&signed).unwrap()
-            )
-            .unwrap(),
+            from_value::<SignedKeyAuthorization>(to_value(&signed).unwrap()).unwrap(),
             signed
         );
 
@@ -1045,12 +1035,7 @@ mod tests {
             let encoded = alloy_rlp::encode(&invalid);
             assert!(SignedKeyAuthorization::decode(&mut encoded.as_slice()).is_err());
             #[cfg(feature = "serde")]
-            assert!(
-                serde_json::from_value::<SignedKeyAuthorization>(
-                    serde_json::to_value(invalid).unwrap()
-                )
-                .is_err()
-            );
+            assert!(from_value::<SignedKeyAuthorization>(to_value(invalid).unwrap()).is_err());
         }
     }
 
