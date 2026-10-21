@@ -1618,13 +1618,20 @@ async fn parallel_builder_runs_voucher_redemption_after_same_block_migration(
         "{redeem:?} of a migrated payer's voucher succeeded: {rejected:?}"
     );
     // The receipt carries no revert data, so replay the transaction for it: it must have reverted
-    // because the payer's root key is retired, not for any other reason.
+    // because the payer's root key is retired, not for any other reason. The reverting frame is
+    // the call into the channel reserve itself, with no frame below it.
     let trace: Value = provider
         .raw_request(
             "debug_traceTransaction".into(),
             (hashes[1], json!({ "tracer": "callTracer" })),
         )
         .await?;
+    assert_eq!(
+        from_value::<Address>(trace["to"].clone())?,
+        TIP20_CHANNEL_RESERVE_ADDRESS,
+        "{redeem:?}: {trace}"
+    );
+    assert!(trace.get("calls").is_none(), "{redeem:?}: {trace}");
     let reverted = from_value::<Bytes>(trace["output"].clone())?;
     let retired = ITIP20ChannelReserve::RootKeyRetired {
         account: migrating.address(),
