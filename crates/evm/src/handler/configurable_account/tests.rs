@@ -1,10 +1,16 @@
 use super::*;
-use crate::{TempoBlockEnv, TempoEvm, TempoEvmExt, build_tempo_evm};
+use crate::{
+    TempoBlockEnv, TempoEvm, TempoEvmExt, build_tempo_evm, signature_gas::calldata_tokens,
+};
 use alloy_consensus::transaction::Recovered;
-use alloy_primitives::Bytes;
+use alloy_primitives::{Bytes, Signature};
 use alloy_signer::SignerSync;
 use alloy_signer_local::PrivateKeySigner;
-use evm2::evm::{InMemoryDB, precompile::NoPrecompiles};
+use evm2::{
+    evm::{InMemoryDB, precompile::NoPrecompiles},
+    interpreter::gas::STANDARD_TOKEN_COST,
+};
+use reth_primitives_traits::SignedTransaction as _;
 use std::iter::repeat_with;
 use tempo_precompiles::{
     signature_verifier::configurable_account_verification_gas, storage::keccak_cost,
@@ -101,17 +107,13 @@ fn base_tx() -> TempoTransaction {
 }
 
 fn env(caller: Address, tx: TempoTransaction, signature: TempoSignature) -> TempoTxEnv {
-    Recovered::new_unchecked(
-        TempoTxEnvelope::AA(AASigned::new_unhashed(tx, signature)),
-        caller,
-    )
-    .into()
+    TempoTxEnvelope::AA(tx.into_signed(signature))
+        .with_signer(caller)
+        .into()
 }
 
 fn primitive_signature() -> TempoSignature {
-    TempoSignature::Primitive(PrimitiveSignature::Secp256k1(
-        alloy_primitives::Signature::test_signature(),
-    ))
+    TempoSignature::from(Signature::test_signature())
 }
 
 /// A fresh EVM at `spec` with `factory` configured in the block and `accounts` in the database.
@@ -154,13 +156,14 @@ fn evm(spec: TempoHardfork) -> TempoEvm<'static> {
 }
 
 fn committed(commitment: B256) -> AccountInfo {
-    let mut info = AccountInfo::default();
-    info.extension = encode_config_commitment(commitment).into();
-    info
+    AccountInfo {
+        extension: encode_config_commitment(commitment).into(),
+        ..Default::default()
+    }
 }
 
 fn gas_params(evm: &TempoEvm<'_>) -> GasParams {
-    evm.version().gas_params.clone()
+    evm.version().gas_params
 }
 
 fn native_error(error: &HandlerError) -> Option<&ConfigurableAccountError> {
@@ -219,11 +222,7 @@ fn native_hash_gas_layout_matches_all_owner_counts() {
         .unwrap();
         let mut witness = alloy_rlp::encode(signature.account());
         witness.extend(alloy_rlp::encode(&config));
-        let calldata = witness
-            .iter()
-            .map(|byte| if *byte == 0 { 1 } else { 4 })
-            .sum::<u64>()
-            * u64::from(evm2::interpreter::gas::STANDARD_TOKEN_COST);
+        let calldata = calldata_tokens(&witness) * u64::from(STANDARD_TOKEN_COST);
         assert_eq!(
             CONFIGURABLE_ACCOUNT_SIGNATURE_DOMAIN.len() + 32 + 20 + 8,
             96
@@ -241,7 +240,10 @@ fn native_authorization_roles_preserve_order_and_duplicate_accounts() {
     // Primitive outer signature and no grant: no native role.
     let primitive = env(Address::repeat_byte(0x11), base_tx(), primitive_signature());
     assert!(
-        authorizations(primitive.as_aa().unwrap())
+        primitive
+            .as_aa()
+            .unwrap()
+            .native_authorizations()
             .iter()
             .all(Option::is_none)
     );
@@ -250,7 +252,7 @@ fn native_authorization_roles_preserve_order_and_duplicate_accounts() {
     let native = Native::random();
     let caller = native.account();
     let outer_only = native.env(base_tx());
-    let roles = authorizations(outer_only.as_aa().unwrap());
+    let roles = outer_only.as_aa().unwrap().native_authorizations();
     assert!(roles[0].is_some());
     assert!(roles[1].is_none());
 
@@ -265,7 +267,7 @@ fn native_authorization_roles_preserve_order_and_duplicate_accounts() {
     )));
     let outer_digest = tx.signature_hash();
     let both = native.env(tx.clone());
-    let roles = authorizations(both.as_aa().unwrap());
+    let roles = both.as_aa().unwrap().native_authorizations();
     let outer = roles[0].as_ref().unwrap();
     let grant = roles[1].as_ref().unwrap();
     assert_eq!(outer.signature.account(), grant.signature.account());
@@ -289,11 +291,11 @@ fn native_authorization_roles_preserve_order_and_duplicate_accounts() {
         tx.clone(),
         TempoSignature::Keychain(KeychainSignature::new(
             caller,
-            AccountSignature::ConfigurableAccount(grant_signature.clone()),
+            AccountSignature::ConfigurableAccount(grant_signature),
         )),
     );
     assert_eq!(
-        authorizations(keychain.as_aa().unwrap())[0]
+        keychain.as_aa().unwrap().native_authorizations()[0]
             .as_ref()
             .unwrap()
             .inner_digest,
@@ -302,14 +304,16 @@ fn native_authorization_roles_preserve_order_and_duplicate_accounts() {
 
     // Primitive outer signature with a native grant leaves only the grant role.
     let grant_only = env(caller, tx.clone(), primitive_signature());
-    let roles = authorizations(grant_only.as_aa().unwrap());
+    let roles = grant_only.as_aa().unwrap().native_authorizations();
     assert!(roles[0].is_none());
     assert!(roles[1].is_some());
 
     tx.key_authorization = None;
     let none = env(caller, tx, primitive_signature());
     assert!(
-        authorizations(none.as_aa().unwrap())
+        none.as_aa()
+            .unwrap()
+            .native_authorizations()
             .iter()
             .all(Option::is_none)
     );
@@ -332,7 +336,7 @@ fn native_state_registration_gas_and_registered_v0() {
     );
     verify(env.execution_context(), aa).unwrap();
 
-    let hash = authorizations(aa)[0]
+    let hash = aa.native_authorizations()[0]
         .as_ref()
         .unwrap()
         .signature
