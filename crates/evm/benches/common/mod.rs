@@ -13,9 +13,7 @@ use reth_evm_ethereum::EthBlockExecutionCtx;
 use reth_execution_cache::{
     CachedStateMetrics, CachedStateMetricsSource, CachedStateProvider, ExecutionCache,
 };
-use reth_primitives_traits::{
-    Account as RethAccount, AccountExtension as RethAccountExtension, Bytecode as RethBytecode,
-};
+use reth_primitives_traits::{Account as RethAccount, Bytecode as RethBytecode};
 use reth_storage_api::{
     AccountReader, BlockHashReader, BytecodeReader, EvmStateProviderAdapter,
     HashedPostStateProvider, StateProofProvider, StateProvider, StateRootProvider,
@@ -401,7 +399,7 @@ fn insert_account(
         nonce: info.nonce,
         balance: info.balance,
         bytecode_hash: Some(bytecode_hash),
-        extension: RethAccountExtension::from_shared(info.extension.clone().into_shared()),
+        ..Default::default()
     };
     cache.insert_account(address, Some(account.clone()));
     accounts.insert(address, account);
