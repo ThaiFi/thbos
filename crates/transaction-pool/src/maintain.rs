@@ -758,7 +758,7 @@ pub(crate) async fn maintain_tempo_pool_with_events<Client, EvmConfig>(
     }
 }
 
-/// Accounts whose native configuration commitment changed in this block.
+/// Accounts whose configurable account commitment changed in this block.
 fn changed_commitments(state: &AddressMap<BundleAccount>) -> AddressSet {
     fn extension(info: Option<&AccountInfo>) -> &[u8] {
         info.map_or(&[], |info| info.extension.as_ref())

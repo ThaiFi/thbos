@@ -33,7 +33,7 @@ use tokio::{
 const FACTORY: Address = Address::repeat_byte(0x71);
 
 #[tokio::test]
-async fn reorg_and_rotation_revalidate_native_transaction() {
+async fn reorg_and_rotation_revalidate_configurable_account_transaction() {
     let owner = PrivateKeySigner::random();
     let config = ConfigurableAccountConfig {
         salt: B256::ZERO,
@@ -156,7 +156,7 @@ async fn reorg_and_rotation_revalidate_native_transaction() {
         }
     })
     .await
-    .expect("native transaction should be revalidated and restored");
+    .expect("configurable account transaction should be revalidated and restored");
 
     let mut rotated_config = config.clone();
     rotated_config.version += 1;
