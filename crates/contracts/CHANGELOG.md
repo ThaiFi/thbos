@@ -1,5 +1,11 @@
 # Changelog
 
+## `tempo-contracts@2.0.0`
+
+### Minor Changes
+
+- Added the configurable account precompile interface (`IConfigurableAccount`) and its `CONFIGURABLE_ACCOUNT_ADDRESS`. Nothing registers or calls it yet. (by @MatthiasSeitz, [#8523](https://github.com/tempoxyz/tempo/pull/8523))
+
 ## `tempo-contracts@1.16.0`
 
 ### Minor Changes
