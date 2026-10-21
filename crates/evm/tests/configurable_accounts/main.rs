@@ -1,45 +1,47 @@
 //! Signed transaction integration fixtures for the T14 account-leaf protocol.
+use alloy_consensus::transaction::Recovered;
 use alloy_eips::eip2930::AccessList;
-use alloy_evm::{Evm, EvmEnv, FromRecoveredTx};
 use alloy_primitives::{Address, B256, TxKind, U256, keccak256};
 use alloy_signer::SignerSync;
 use alloy_signer_local::PrivateKeySigner;
 use alloy_sol_types::SolCall;
-use revm::{
-    Database, DatabaseCommit,
-    context::{
-        CfgEnv, JournalTr,
-        result::{ExecutionResult, HaltReason},
-    },
-    database::{EmptyDB, State, states::bundle_state::BundleRetention},
-    state::{Account, AccountInfo, Bytecode, TransactionId},
+use evm2::{
+    ExecutionConfig, TxResult, Version,
+    bytecode::Bytecode,
+    evm::{AccountChangeRef, AccountInfo, InMemoryDB, StateChangeSink, StorageChange},
 };
-use tempo_chainspec::TempoHardfork;
-use tempo_contracts::precompiles::{NATIVE_MULTISIG_ADDRESS, native_multisig::INativeMultisig};
-use tempo_evm::evm::TempoEvm;
+use reth_evm::{BlockExecutorFactory, BundleState};
+use reth_execution_types::{BlockState, TransactionChanges};
+use tempo_chainspec::hardfork::TempoHardfork;
+use tempo_contracts::precompiles::{CONFIGURABLE_ACCOUNT_ADDRESS, IConfigurableAccount};
+use tempo_evm::{
+    TempoBlockEnv, TempoBlockExt, TempoEvm, TempoEvmConfig, TempoEvmEnv, TempoEvmTypes, TempoTxEnv,
+    tempo_execution_config, tempo_tx_registry,
+};
 use tempo_precompiles::{
-    account_keychain::AccountKeychain,
-    storage::{StorageActions, StorageCtx},
-    test_util::TIP20Setup,
-    tip403_registry::TIP403Registry,
+    TempoPrecompiles, account_keychain::AccountKeychain, storage::StorageCtx,
+    test_util::TIP20Setup, tip403_registry::TIP403Registry,
 };
 use tempo_primitives::{
-    AASigned, TempoBlockEnv, TempoSignature, TempoTransaction,
+    AASigned, TempoSignature, TempoTransaction, TempoTxEnvelope,
     account::decode_config_commitment,
     transaction::{
-        Call, MULTISIG_UPGRADE_DOMAIN, MultisigConfig, MultisigOwner, MultisigSignature,
-        PrimitiveSignature, multisig_digest,
+        CONFIGURABLE_ACCOUNT_UPGRADE_DOMAIN, Call, ConfigurableAccountConfig,
+        ConfigurableAccountOwner, ConfigurableAccountSignature, PrimitiveSignature,
+        configurable_account_digest,
     },
 };
-use tempo_revm::{TempoTxEnv, gas_params::tempo_gas_params};
 
 /// The gas limit of the transactions built by `aa_tx`.
 const AA_GAS_LIMIT: u64 = 1_000_000;
 
+/// The chain ID of the fixture's EVM and of the transactions it signs.
+const CHAIN_ID: u64 = 1;
+
 struct Fixture {
-    evm: TempoEvm<State<EmptyDB>>,
+    evm: TempoEvm<'static>,
     owner: PrivateKeySigner,
-    config: MultisigConfig,
+    config: ConfigurableAccountConfig,
     account: Address,
 }
 
@@ -56,20 +58,20 @@ impl Fixture {
         Self::with_cfg(configurable, spec, |_| {})
     }
 
-    /// A fixture at `spec` whose configuration `configure` adjusts before the EVM is built, so
+    /// A fixture at `spec` whose EVM version `configure` adjusts before the EVM is built, so
     /// that the precompiles, which read it when the EVM is built, see the change too.
     fn with_cfg(
         configurable: bool,
         spec: TempoHardfork,
-        configure: impl FnOnce(&mut CfgEnv<TempoHardfork>),
+        configure: impl FnOnce(&mut Version),
     ) -> Self {
         let owner = signer(1);
         let factory = Address::repeat_byte(0x71);
-        let config = MultisigConfig {
+        let config = ConfigurableAccountConfig {
             salt: B256::ZERO,
             version: 0,
             threshold: 1,
-            owners: vec![MultisigOwner {
+            owners: vec![ConfigurableAccountOwner {
                 owner: owner.address(),
                 weight: 1,
             }],
@@ -79,32 +81,34 @@ impl Fixture {
         } else {
             owner.address()
         };
-        let mut db = State::builder().with_bundle_update().build();
-        let mut seed = Account::new_not_existing(TransactionId::ZERO);
-        seed.info.set_nonce(3).set_balance(U256::from(42));
-        seed.mark_touch();
-        db.commit(std::iter::once((account, seed)).collect());
-        let mut cfg = CfgEnv::new_with_spec_and_gas_params(spec, tempo_gas_params(spec));
-        configure(&mut cfg);
-        let mut evm = TempoEvm::new(
-            db,
-            EvmEnv::new(
-                cfg,
-                TempoBlockEnv {
-                    multisig_recovery_factory: Some(factory),
-                    ..Default::default()
-                },
-            ),
+        let mut version = *tempo_execution_config(spec, CHAIN_ID).version();
+        version.tx_gas_limit_cap = spec.tx_gas_limit_cap().unwrap_or(u64::MAX);
+        configure(&mut version);
+        let block = TempoBlockEnv {
+            ext: TempoBlockExt {
+                configurable_account_recovery_factory: Some(factory),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let mut evm = BlockExecutorFactory::evm_with_env(
+            &TempoEvmConfig::moderato(),
+            InMemoryDB::default(),
+            TempoEvmEnv::new_with_version(spec, block, version),
         );
-        StorageCtx::enter_ctx(evm.ctx_mut(), StorageActions::disabled(), || {
+        // The accepted overlay holds the whole state, so `chain_db` and `genesis_bundle` see it.
+        evm.overlay_db_mut().insert_account_info(
+            &account,
+            AccountInfo::default()
+                .with_nonce(3)
+                .with_balance(U256::from(42)),
+        );
+        in_storage_ctx(&mut evm, || {
             TIP403Registry::new().initialize()?;
             AccountKeychain::new().initialize()?;
             TIP20Setup::path_usd(owner.address()).apply()
         })
         .unwrap();
-        let state = evm.ctx_mut().journaled_state.finalize();
-        evm.db_mut().commit(state);
-        evm.db_mut().merge_transitions(BundleRetention::Reverts);
         Self {
             evm,
             owner,
@@ -119,9 +123,9 @@ impl Fixture {
 
     fn getter(&self) -> Call {
         Call {
-            to: TxKind::Call(NATIVE_MULTISIG_ADDRESS),
+            to: TxKind::Call(CONFIGURABLE_ACCOUNT_ADDRESS),
             value: U256::ZERO,
-            input: INativeMultisig::getConfigCommitmentCall {
+            input: IConfigurableAccount::getConfigCommitmentCall {
                 account: self.account,
             }
             .abi_encode()
@@ -129,12 +133,12 @@ impl Fixture {
         }
     }
 
-    fn rotation(current: &MultisigConfig, next: &MultisigConfig) -> Call {
+    fn rotation(current: &ConfigurableAccountConfig, next: &ConfigurableAccountConfig) -> Call {
         Call {
-            to: TxKind::Call(NATIVE_MULTISIG_ADDRESS),
+            to: TxKind::Call(CONFIGURABLE_ACCOUNT_ADDRESS),
             value: U256::ZERO,
-            input: INativeMultisig::updateConfigCall {
-                current: INativeMultisig::MultisigConfig {
+            input: IConfigurableAccount::updateConfigCall {
+                current: IConfigurableAccount::ConfigurableAccountConfig {
                     salt: current.salt,
                     version: current.version,
                     threshold: current.threshold,
@@ -149,9 +153,15 @@ impl Fixture {
     }
 
     /// The configuration `upgradeAccount` commits for this account: the upgrade salt at version 1.
-    fn upgraded(&self, threshold: u8, owners: Vec<MultisigOwner>) -> MultisigConfig {
-        MultisigConfig {
-            salt: keccak256([MULTISIG_UPGRADE_DOMAIN, self.account.as_slice()].concat()),
+    fn upgraded(
+        &self,
+        threshold: u8,
+        owners: Vec<ConfigurableAccountOwner>,
+    ) -> ConfigurableAccountConfig {
+        ConfigurableAccountConfig {
+            salt: keccak256(
+                [CONFIGURABLE_ACCOUNT_UPGRADE_DOMAIN, self.account.as_slice()].concat(),
+            ),
             version: 1,
             threshold,
             owners,
@@ -159,11 +169,11 @@ impl Fixture {
     }
 
     /// An `upgradeAccount` call that migrates the sender to `config`.
-    fn upgrade(config: &MultisigConfig) -> Call {
+    fn upgrade(config: &ConfigurableAccountConfig) -> Call {
         Call {
-            to: TxKind::Call(NATIVE_MULTISIG_ADDRESS),
+            to: TxKind::Call(CONFIGURABLE_ACCOUNT_ADDRESS),
             value: U256::ZERO,
-            input: INativeMultisig::upgradeAccountCall {
+            input: IConfigurableAccount::upgradeAccountCall {
                 threshold: config.threshold,
                 owners: abi_owners(config),
             }
@@ -183,43 +193,115 @@ impl Fixture {
     }
 
     /// Executes `tx` for the account and commits its state, whether or not it reverts.
-    fn run<T>(&mut self, tx: &T) -> ExecutionResult<HaltReason>
+    fn run<T>(&mut self, tx: &T) -> TxResult<TempoEvmTypes>
     where
-        TempoTxEnv: FromRecoveredTx<T>,
+        T: Clone + Into<TempoTxEnvelope>,
     {
         self.run_as(self.account, tx)
     }
 
     /// Executes `tx` sent by `sender` and commits its state, whether or not it reverts.
-    fn run_as<T>(&mut self, sender: Address, tx: &T) -> ExecutionResult<HaltReason>
+    fn run_as<T>(&mut self, sender: Address, tx: &T) -> TxResult<TempoEvmTypes>
     where
-        TempoTxEnv: FromRecoveredTx<T>,
+        T: Clone + Into<TempoTxEnvelope>,
     {
-        let output = self
-            .evm
-            .transact(TempoTxEnv::from_recovered_tx(tx, sender))
-            .unwrap();
-        self.evm.db_mut().commit(output.state);
-        output.result
+        self.evm.transact(&tx_env(tx, sender)).unwrap().commit()
+    }
+
+    /// The account's info as the EVM reads it now, `None` when the account does not exist.
+    fn info(&mut self, address: Address) -> Option<AccountInfo> {
+        self.evm.read_account_info(&address).unwrap()
+    }
+
+    /// Replaces `address`'s info in the EVM's database with `update` applied to it.
+    fn update_account(&mut self, address: Address, update: impl FnOnce(&mut AccountInfo)) {
+        let mut info = self.info(address).unwrap_or_default();
+        update(&mut info);
+        self.evm
+            .overlay_db_mut()
+            .insert_account_info(&address, info);
     }
 
     fn commitment(&mut self) -> B256 {
-        decode_config_commitment(
-            &self
-                .evm
-                .db_mut()
-                .basic(self.account)
-                .unwrap()
-                .unwrap()
-                .extension,
-            true,
-        )
-        .unwrap()
+        let account = self.account;
+        decode_config_commitment(&self.info(account).unwrap().extension, TempoHardfork::T14)
+            .unwrap()
+    }
+
+    /// Replaces the block environment with `update` applied.
+    fn update_block(&mut self, update: impl FnOnce(&mut TempoBlockEnv)) {
+        let mut block = self.evm.block().clone();
+        update(&mut block);
+        self.evm.set_block(block);
+    }
+
+    /// Replaces the EVM version with `configure` applied, keeping the state. The precompiles are
+    /// rebuilt too, since they share the version and the storage-action recorder.
+    fn reconfigure(&mut self, configure: impl FnOnce(&mut Version)) {
+        let spec = self.evm.config_spec_id();
+        let mut version = *self.evm.version();
+        configure(&mut version);
+        let precompiles = TempoPrecompiles::<TempoEvmTypes>::new(
+            spec,
+            self.evm.ext().actions.clone(),
+            self.evm.ext().non_creditable_slots.clone(),
+        );
+        self.evm.set_execution_config(
+            ExecutionConfig::for_spec_and_version(spec, version),
+            spec,
+            tempo_tx_registry(spec.into()),
+            precompiles,
+        );
+    }
+
+    /// Records the storage actions of later transactions.
+    fn enable_actions(&mut self) {
+        self.evm.ext_mut().actions.enable();
+        self.reconfigure(|_| {});
+    }
+
+    /// A database holding the accepted state, for a block executor.
+    fn chain_db(&self) -> InMemoryDB {
+        let mut db = InMemoryDB::default();
+        db.cache = self.evm.overlay_db().cache.clone();
+        db
+    }
+
+    /// The accepted state as a bundle that creates every account, to persist as a genesis.
+    fn genesis_bundle(&self) -> BundleState {
+        let cache = &self.evm.overlay_db().cache;
+        let mut changes = TransactionChanges::default();
+        for (hash, code) in &cache.contracts {
+            let Ok(()) = changes.bytecode(*hash, code);
+        }
+        for (address, info) in &cache.accounts {
+            let Some(info) = info else { continue };
+            let Ok(()) = changes.account(AccountChangeRef {
+                address: *address,
+                original: None,
+                current: Some(info),
+                created: true,
+                selfdestructed: false,
+            });
+        }
+        for (address, storage) in &cache.storage {
+            for (key, value) in &storage.slots {
+                let Ok(()) = changes.storage(StorageChange {
+                    address: *address,
+                    key: *key,
+                    original: U256::ZERO,
+                    current: *value,
+                });
+            }
+        }
+        let mut block = BlockState::new();
+        block.commit(&changes);
+        block.into_bundle()
     }
 
     fn install_contract(&mut self, address: Address, code: Vec<u8>) -> Call {
-        self.evm.db_mut().insert_account(
-            address,
+        self.evm.overlay_db_mut().insert_account_info(
+            &address,
             AccountInfo::default().with_code(Bytecode::new_legacy(code.into())),
         );
         Call {
@@ -230,11 +312,30 @@ impl Fixture {
     }
 }
 
+/// Runs `f` in a storage context of `evm` and accepts its writes.
+fn in_storage_ctx<R>(evm: &mut TempoEvm<'static>, f: impl FnOnce() -> R) -> R {
+    let result = StorageCtx::enter_evm(evm, f);
+    evm.state_mut().commit_transaction();
+    evm.state_mut().clear_transaction_state();
+    result
+}
+
+/// The EVM transaction of `tx` sent by `sender`.
+fn tx_env<T>(tx: &T, sender: Address) -> Recovered<TempoTxEnv>
+where
+    T: Clone + Into<TempoTxEnvelope>,
+{
+    Recovered::new_unchecked(
+        TempoTxEnv::from(Recovered::new_unchecked(tx.clone().into(), sender)),
+        sender,
+    )
+}
+
 /// An unsigned AA transaction on the protocol nonce lane, with no fee, sponsor, validity window
 /// or authorizations.
 fn aa_tx(nonce: u64, calls: Vec<Call>) -> TempoTransaction {
     TempoTransaction {
-        chain_id: 1,
+        chain_id: CHAIN_ID,
         fee_token: None,
         max_priority_fee_per_gas: 0,
         max_fee_per_gas: 0,
@@ -256,39 +357,41 @@ fn signer(seed: u8) -> PrivateKeySigner {
     PrivateKeySigner::from_bytes(&B256::repeat_byte(seed)).unwrap()
 }
 
-/// Signs `tx` as the account's native multisig, with the fixture's current configuration.
+/// Signs `tx` as the account's configurable account, with the fixture's current configuration.
 fn multisig_signed(f: &Fixture, tx: TempoTransaction) -> AASigned {
     multisig_signed_by(f.account, &f.config, &f.owner, tx)
 }
 
-/// Signs `tx` as the multisig `account` with `config`, approved by `owner`.
+/// Signs `tx` as the configurable `account` with `config`, approved by `owner`.
 fn multisig_signed_by(
     account: Address,
-    config: &MultisigConfig,
+    config: &ConfigurableAccountConfig,
     owner: &PrivateKeySigner,
     tx: TempoTransaction,
 ) -> AASigned {
     let signature = multisig_approval(account, config, owner, tx.signature_hash());
-    tx.into_signed(TempoSignature::Multisig(signature))
+    tx.into_signed(TempoSignature::ConfigurableAccount(signature))
 }
 
-/// `owner`'s approval of `inner_digest` as the multisig `account` with `config`.
+/// `owner`'s approval of `inner_digest` as the configurable `account` with `config`.
 fn multisig_approval(
     account: Address,
-    config: &MultisigConfig,
+    config: &ConfigurableAccountConfig,
     owner: &PrivateKeySigner,
     inner_digest: B256,
-) -> MultisigSignature {
-    let digest = multisig_digest(inner_digest, account, config.version);
+) -> ConfigurableAccountSignature {
+    let digest = configurable_account_digest(inner_digest, account, config.version);
     let approval = PrimitiveSignature::Secp256k1(owner.sign_hash_sync(&digest).unwrap());
-    MultisigSignature::try_new(account, config.clone(), vec![approval]).unwrap()
+    ConfigurableAccountSignature::try_new(account, config.clone(), vec![approval]).unwrap()
 }
 
-fn abi_owners(config: &MultisigConfig) -> Vec<INativeMultisig::MultisigOwner> {
+fn abi_owners(
+    config: &ConfigurableAccountConfig,
+) -> Vec<IConfigurableAccount::ConfigurableAccountOwner> {
     config
         .owners
         .iter()
-        .map(|owner| INativeMultisig::MultisigOwner {
+        .map(|owner| IConfigurableAccount::ConfigurableAccountOwner {
             owner: owner.owner,
             weight: owner.weight,
         })
