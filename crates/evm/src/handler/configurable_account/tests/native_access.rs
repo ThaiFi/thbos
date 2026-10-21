@@ -264,11 +264,17 @@ impl Access {
                 encode_config_commitment(self.parent.config.commitment().unwrap()).into();
         }
         let mut evm = evm_with_block(spec, block, &[(parent, parent_info)]);
+        let admin_grant = admin_delegate && spec.is_t14();
+        if admin_grant {
+            // The admin grant stands for the parent's own earlier transaction, whose caller the
+            // handler warms before any keychain call.
+            evm.state_mut().prewarm(&parent);
+        }
         StorageCtx::enter_evm_without_tip1060_accounting(&mut evm, || {
             TIP20Setup::path_usd(self.parent.key.address())
                 .apply()
                 .unwrap();
-            if admin_delegate && spec.is_t14() {
+            if admin_grant {
                 let mut keychain = AccountKeychain::new();
                 keychain.initialize().unwrap();
                 keychain.set_tx_origin(parent).unwrap();
