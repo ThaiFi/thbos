@@ -374,12 +374,12 @@ mod tests {
     use super::*;
     use crate::rpc::configurable_account::tests::spec;
     use alloy_consensus::Transaction;
-    use alloy_eips::eip2718::WithEncoded;
     use alloy_primitives::{TxKind, address};
     use alloy_rpc_types_eth::TransactionRequest;
     use alloy_signer::SignerSync;
     use alloy_signer_local::PrivateKeySigner;
     use reth_evm::FromTxWithEncoded;
+    use reth_primitives_traits::SignedTransaction;
     use reth_rpc_convert::TryIntoTxEnv;
     use serde_json::{from_value, to_value};
     use tempo_evm::ExecutionContext;
@@ -949,11 +949,11 @@ mod tests {
                 TempoSignature::default()
             }
         };
-        let tx = tx.into_signed(signature);
-        let env = TempoTxEnv::from_tx_with_encoded(WithEncoded::new(
-            Bytes::new(),
-            Recovered::new_unchecked(TempoTxEnvelope::AA(tx), account),
-        ));
+        let env = TempoTxEnv::from_tx_with_encoded(
+            TempoTxEnvelope::AA(tx.into_signed(signature))
+                .with_signer(account)
+                .into_encoded_with(Bytes::new()),
+        );
         assert!(matches!(
             env.execution_context(),
             ExecutionContext::Transaction { .. }
@@ -1033,7 +1033,7 @@ mod tests {
         let error = request
             .try_into_tx_env(&TempoEvmEnv::default())
             .unwrap_err();
-        assert!(error.to_string().contains("configuration witness"));
+        assert!(matches!(error, EthApiError::InvalidParams(_)));
     }
 
     #[test]
