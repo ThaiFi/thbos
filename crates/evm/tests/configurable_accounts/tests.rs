@@ -48,8 +48,8 @@ use tempo_contracts::precompiles::{
     ZONE_PORTAL_PREFIX, account_keychain::IAccountKeychain, nonce::INonce, tip20::ITIP20,
 };
 use tempo_evm::{
-    StorageActionReplay, StorageActionReplayError, TempoEvmConfig, TempoInvalidTransaction,
-    supports_storage_action_replay,
+    EXPIRING_NONCE_GAS, StorageActionReplay, StorageActionReplayError, TempoEvmConfig,
+    TempoInvalidTransaction, supports_storage_action_replay,
     transaction_error::{ConfigurableAccountError, FeePaymentError, RootKeyRole},
 };
 use tempo_precompiles::{
@@ -93,11 +93,6 @@ const SPLIT_NEW_ACCOUNT_COST: [(GasId, u32); 2] = [
     (GasId::NewAccountCost, 25_000),
     (GasId::NewAccountState, 225_000),
 ];
-
-/// The handler's gas charge for an expiring-nonce transaction, as `tempo_evm`'s private
-/// `EXPIRING_NONCE_GAS` defines it: two cold loads (2,100 each), a warm read (100) and three
-/// warm store resets (2,900 each).
-const EXPIRING_NONCE_GAS: u64 = 2 * 2_100 + 100 + 3 * 2_900;
 
 /// The hash that the configurable account verification tests approve.
 const CONFIGURABLE_ACCOUNT_HASH: B256 = B256::repeat_byte(0x42);
