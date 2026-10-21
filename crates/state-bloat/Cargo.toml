@@ -23,6 +23,8 @@ reth-cli.workspace = true
 reth-cli-commands.workspace = true
 reth-db-api.workspace = true
 reth-etl.workspace = true
+# Only for its `account-ext` feature: reth-provider turns on evm2's account extension but not reth-evm's.
+reth-evm.workspace = true
 reth-primitives-traits.workspace = true
 reth-provider.workspace = true
 reth-tasks.workspace = true
