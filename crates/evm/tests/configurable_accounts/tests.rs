@@ -419,7 +419,7 @@ fn native_commitment_only_account_evm_semantics() {
                 f.update_account(contract, |info| info.balance = U256::from(value));
                 let tx = f.signed(3, vec![call]);
                 let output = f.evm.transact(&tx_env(&tx, f.account)).unwrap().commit();
-                assert!(output.status, "{:?}", output);
+                assert!(output.status, "{output:?}");
                 if operation == 0x3f {
                     let expected = if nonce != 0 || !extension.is_zero() {
                         KECCAK256_EMPTY
@@ -492,7 +492,7 @@ fn native_rotation_rejects_access_keys_and_callbacks() {
             f.signed(3, vec![call])
         };
         let output = f.evm.transact(&tx_env(&tx, f.account)).unwrap().commit();
-        assert!(output.stop.is_revert(), "{:?}", output);
+        assert!(output.stop.is_revert(), "{output:?}");
         assert_eq!(
             output.output.as_ref(),
             IConfigurableAccount::UnauthorizedConfigurableAccountCaller {}.abi_encode()
@@ -1443,8 +1443,7 @@ fn native_signed_parent_delegate_case(outcome: GrantOutcome, gas_price: u128) {
             assert_eq!(
                 output.status,
                 outcome == GrantOutcome::Success,
-                "{outcome:?}, parent={parent_native} delegate={delegate_native}: {:?}",
-                output
+                "{outcome:?}, parent={parent_native} delegate={delegate_native}: {output:?}"
             );
             let charged_fee = |gas_used| {
                 let fee = calc_gas_balance_spending(gas_used, gas_price).to::<u64>();
@@ -1551,7 +1550,7 @@ fn native_signed_parent_delegate_case(outcome: GrantOutcome, gas_price: u128) {
                     .transact(&tx_env(&sign(&tx), parent))
                     .unwrap()
                     .commit();
-                assert!(output.status, "{:?}", output);
+                assert!(output.status, "{output:?}");
                 total_fees += charged_fee(output.tx_gas_used());
                 assert_grant(&mut f, total_fees, transferred, nonce + 1);
                 assert_eq!(
@@ -1602,7 +1601,7 @@ fn native_first_registration_preserves_existing_storage() {
         .insert_account_storage(&f.account, &slot, &value);
     let tx = f.signed(3, vec![f.getter()]);
     let output = f.evm.transact(&tx_env(&tx, f.account)).unwrap().commit();
-    assert!(output.status, "{:?}", output);
+    assert!(output.status, "{output:?}");
     assert_eq!(output.logs, []);
     assert_eq!(f.commitment(), f.config.commitment().unwrap());
     assert_eq!(
@@ -1634,7 +1633,7 @@ fn native_registration_survives_caught_reverting_subcall() {
     let call = f.install_contract(catcher, code);
     let tx = f.signed(3, vec![call]);
     let output = f.evm.transact(&tx_env(&tx, f.account)).unwrap().commit();
-    assert!(output.status, "{:?}", output);
+    assert!(output.status, "{output:?}");
     assert_eq!(output.logs, []);
     assert_eq!(f.commitment(), f.config.commitment().unwrap());
     assert_eq!(
@@ -1662,7 +1661,7 @@ fn native_first_transaction_can_rotate_configuration() {
     };
     let tx = f.signed(3, vec![Fixture::rotation(&f.config, &next), f.getter()]);
     let output = f.evm.transact(&tx_env(&tx, f.account)).unwrap().commit();
-    assert!(output.status, "{:?}", output);
+    assert!(output.status, "{output:?}");
     assert_eq!(output.logs.len(), 1);
     assert_eq!(
         IConfigurableAccount::getConfigCommitmentCall::abi_decode_returns(&output.output).unwrap(),
@@ -1674,7 +1673,7 @@ fn native_first_transaction_can_rotate_configuration() {
 #[test]
 fn native_rotation_authorizes_next_transaction_in_same_block() {
     let mut f = Fixture::new();
-    let block = f.evm.block().clone();
+    let block = *f.evm.block();
     let next_owner = signer(2);
     let next = ConfigurableAccountConfig {
         version: 1,
@@ -1690,7 +1689,7 @@ fn native_rotation_authorizes_next_transaction_in_same_block() {
         .transact(&tx_env(&rotate, f.account))
         .unwrap()
         .commit();
-    assert!(output.status, "{:?}", output);
+    assert!(output.status, "{output:?}");
     let stale = f.signed(4, vec![f.getter()]);
     let error = f.evm.transact(&tx_env(&stale, f.account)).unwrap_err();
     assert!(
@@ -1706,7 +1705,7 @@ fn native_rotation_authorizes_next_transaction_in_same_block() {
     f.owner = next_owner;
     let tx = f.signed(4, vec![f.getter()]);
     let output = f.evm.transact(&tx_env(&tx, f.account)).unwrap().commit();
-    assert!(output.status, "{:?}", output);
+    assert!(output.status, "{output:?}");
     assert_eq!(f.commitment(), f.config.commitment().unwrap());
     assert_eq!(f.evm.block().number, block.number);
     assert_eq!(f.evm.block().timestamp, block.timestamp);
@@ -1787,7 +1786,7 @@ fn native_batch_rotation_failure(registered: bool, halt: bool) {
     // previous call's journaled commitment, not the transaction-start leaf.
     let retry = f.signed(nonce, rotations);
     let output = f.evm.transact(&tx_env(&retry, f.account)).unwrap().commit();
-    assert!(output.status, "{:?}", output);
+    assert!(output.status, "{output:?}");
     assert_eq!(output.logs.len(), 2);
     assert_eq!(f.commitment(), v2.commitment().unwrap());
 }

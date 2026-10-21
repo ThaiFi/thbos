@@ -230,7 +230,7 @@ impl Fixture {
 
     /// Replaces the block environment with `update` applied.
     fn update_block(&mut self, update: impl FnOnce(&mut TempoBlockEnv)) {
-        let mut block = self.evm.block().clone();
+        let mut block = *self.evm.block();
         update(&mut block);
         self.evm.set_block(block);
     }
@@ -262,9 +262,10 @@ impl Fixture {
 
     /// A database holding the accepted state, for a block executor.
     fn chain_db(&self) -> InMemoryDB {
-        let mut db = InMemoryDB::default();
-        db.cache = self.evm.overlay_db().cache.clone();
-        db
+        InMemoryDB {
+            cache: self.evm.overlay_db().cache.clone(),
+            ..Default::default()
+        }
     }
 
     /// The accepted state as a bundle that creates every account, to persist as a genesis.
