@@ -5,7 +5,7 @@ use alloy_sol_types::SolCall;
 use core::marker::PhantomData;
 use evm2::{
     DatabaseError, Evm,
-    evm::{AccountInfo, Database, DynDatabase, StateCheckpoint},
+    evm::{AccountExtension, AccountInfo, Database, DynDatabase, StateCheckpoint},
     registry::{HandlerError, HandlerResult},
 };
 use tempo_chainspec::hardfork::TempoHardfork;
@@ -273,6 +273,7 @@ impl<T: reth_storage_api::StateProvider> TempoStateAccess<((), (), ())> for T {
                 nonce: account.nonce,
                 code_hash: account.get_bytecode_hash(),
                 code: None,
+                extension: AccountExtension::from_shared(account.extension.into_shared()),
                 _non_exhaustive: (),
             })
             .map_err(|error| DatabaseError::new(error, true))

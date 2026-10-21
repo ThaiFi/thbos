@@ -21,7 +21,7 @@ use commonware_math::algebra::Random as _;
 use commonware_runtime::{Runner as _, Supervisor as _};
 use commonware_storage::metadata::{Config as MetadataConfig, Metadata};
 use commonware_utils::{NZU32, ordered};
-use evm2::evm::{AccountInfo, StateCheckpoint};
+use evm2::evm::{AccountExtension, AccountInfo, StateCheckpoint};
 use eyre::{Context as _, OptionExt as _, ensure, eyre};
 use rand::SeedableRng as _;
 use reth_db::{mdbx::DatabaseArguments, open_db};
@@ -420,6 +420,7 @@ where
                     .bytecode_hash
                     .unwrap_or(alloy_primitives::KECCAK256_EMPTY),
                 code: None,
+                extension: AccountExtension::from_shared(account.extension.into_shared()),
                 _non_exhaustive: (),
             })
             .unwrap_or_default())
