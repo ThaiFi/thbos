@@ -237,11 +237,6 @@ on:
         type: boolean
         required: true
         default: false
-      tcp-highres:
-        description: Collect high-resolution TCP telemetry.
-        type: boolean
-        required: false
-        default: false
       valscope:
         description: Register live ValScope targets for each benchmark phase.
         type: boolean
@@ -335,7 +330,7 @@ jobs:
       BENCH_INPUT_PROFILING: ${{ inputs.profiling || 'off' }}
       BENCH_INPUT_OTLP: ${{ format('{0}', github.event_name != 'workflow_dispatch' || inputs.otlp) }}
       BENCH_INPUT_METRICS: ${{ (inputs.metrics == true || inputs.metrics == 'true') && 'true' || 'false' }}
-      BENCH_INPUT_TCP_HIGHRES: ${{ (inputs['tcp-highres'] == true || inputs['tcp-highres'] == 'true') && 'true' || 'false' }}
+      BENCH_INPUT_TCP_HIGHRES: 'true'
       BENCH_INPUT_VALSCOPE: ${{ (inputs.valscope == true || inputs.valscope == 'true') && 'true' || 'false' }}
       BENCH_INPUT_BASELINE_ARGS: ${{ inputs['baseline-args'] || '' }}
       BENCH_INPUT_FEATURE_ARGS: ${{ inputs['feature-args'] || '' }}
