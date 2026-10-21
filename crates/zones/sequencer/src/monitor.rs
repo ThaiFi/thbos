@@ -792,9 +792,6 @@ impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
             {
                 Ok(BatchSubmission {
                     event,
-                    transaction_hash,
-                    block_number,
-                    gas_used,
                     withdrawals_processed,
                 }) => {
                     let portal_index = if event.withdrawalQueueIndex == NO_QUEUE_INDEX {
@@ -821,10 +818,6 @@ impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
                         withdrawal_batch_index = event.withdrawalBatchIndex,
                         withdrawal_queue_index = %event.withdrawalQueueIndex,
                         withdrawal_queue_hash = %batch_data.withdrawal_queue_hash,
-                        %transaction_hash,
-                        l1_block = ?block_number,
-                        gas_used,
-                        withdrawals_processed,
                         "Batch successfully submitted to L1"
                     );
                     self.metrics.batch_submit_success_total.increment(1);
