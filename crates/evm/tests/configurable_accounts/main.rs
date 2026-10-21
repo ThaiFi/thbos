@@ -12,6 +12,7 @@ use evm2::{
 };
 use reth_evm::{BlockExecutorFactory, BundleState};
 use reth_execution_types::{BlockState, TransactionChanges};
+use reth_primitives_traits::SignedTransaction;
 use tempo_chainspec::hardfork::TempoHardfork;
 use tempo_contracts::precompiles::{CONFIGURABLE_ACCOUNT_ADDRESS, IConfigurableAccount};
 use tempo_evm::{
@@ -326,10 +327,8 @@ fn tx_env<T>(tx: &T, sender: Address) -> Recovered<TempoTxEnv>
 where
     T: Clone + Into<TempoTxEnvelope>,
 {
-    Recovered::new_unchecked(
-        TempoTxEnv::from(Recovered::new_unchecked(tx.clone().into(), sender)),
-        sender,
-    )
+    let envelope: TempoTxEnvelope = tx.clone().into();
+    Recovered::new_unchecked(TempoTxEnv::from(envelope.with_signer(sender)), sender)
 }
 
 /// An unsigned AA transaction on the protocol nonce lane, with no fee, sponsor, validity window

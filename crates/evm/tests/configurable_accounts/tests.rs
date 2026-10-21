@@ -19,7 +19,7 @@ use evm2::{
 use p256::ecdsa::{SigningKey, signature::hazmat::PrehashSigner};
 use reth_chainspec::EthChainSpec;
 use reth_ethereum_primitives::Block as EthereumBlock;
-use reth_evm::{BlockExecutor, ConfigureEvm};
+use reth_evm::{BlockExecutor, ConfigureEvm, Evm as _};
 use reth_execution_types::{BundleSource, ExecutionOutcome};
 use reth_primitives_traits::{Block as _, SignedTransaction};
 use reth_provider::{
@@ -72,11 +72,6 @@ use tempo_primitives::{
         tt_signature::{P256SignatureWithPreHash, WebAuthnSignature, normalize_p256_s},
     },
 };
-
-/// The gas parameters of `spec`'s EVM version.
-fn tempo_gas_params(spec: TempoHardfork) -> GasParams {
-    tempo_execution_config(spec, CHAIN_ID).version().gas_params
-}
 
 /// A call target that touches `account`'s code size: its gas shows whether the account is warm.
 const PROBE: Address = Address::repeat_byte(0x99);
@@ -386,6 +381,11 @@ enum Access {
     Warm,
 }
 
+/// The gas parameters of `spec`'s EVM version.
+fn tempo_gas_params(spec: TempoHardfork) -> GasParams {
+    tempo_execution_config(spec, CHAIN_ID).version().gas_params
+}
+
 #[test]
 fn native_commitment_only_account_evm_semantics() {
     let target = Address::repeat_byte(0x44);
@@ -481,20 +481,14 @@ fn native_rotation_rejects_access_keys_and_callbacks() {
             keychain_signed(tx, &delegate, f.account)
         } else {
             // Forward calldata to the precompile and bubble its revert data.
-            let code = [
-                bytes!("365f5f375f5f365f5f73").as_ref(),
-                CONFIGURABLE_ACCOUNT_ADDRESS.as_slice(),
-                bytes!("5af1503d5f5f3e3d5ffd").as_ref(),
-            ]
-            .concat();
-            let mut call = f.install_contract(Address::repeat_byte(0x55), code);
+            let mut call = forwarder(&mut f);
             call.input = rotation.input;
             f.signed(3, vec![call])
         };
         let output = f.evm.transact(&tx_env(&tx, f.account)).unwrap().commit();
         assert!(output.stop.is_revert(), "{output:?}");
         assert_eq!(
-            output.output.as_ref(),
+            output.output,
             IConfigurableAccount::UnauthorizedConfigurableAccountCaller {}.abi_encode()
         );
         assert!(
@@ -831,7 +825,7 @@ fn native_first_call_registration_and_retry() {
         .unwrap(),
         f.config.commitment().unwrap()
     );
-    f.evm.overlay_db_mut().commit_pending(&output.pending_state);
+    f.evm.commit_state(&output.pending_state);
     let tx = f.signed(4, vec![f.getter()]);
     let output = f.evm.transact(&tx_env(&tx, f.account)).unwrap().detach();
     assert!(output.result.status, "{:?}", output.result);
@@ -1245,13 +1239,15 @@ fn replay_rejects_a_root_key_retired_since_the_parent_state() {
         .unwrap();
     let sponsored_tx = sponsored_tx.into_signed(signature.into());
     let cases = [
-        ("sender", sent, account),
-        ("fee payer", sponsored_tx, sender.address()),
+        ("sender", TempoTxEnvelope::AA(sent).with_signer(account)),
+        (
+            "fee payer",
+            TempoTxEnvelope::AA(sponsored_tx).with_signer(sender.address()),
+        ),
     ];
-    let replay_error = |f: &Fixture, tx: &AASigned, from: Address| {
+    let replay_error = |f: &Fixture, recovered: &Recovered<TempoTxEnvelope>| {
         let mut executor = config.executor_for_block(f.chain_db(), &block).unwrap();
         assert_eq!(executor.evm().config_spec_id(), TempoHardfork::T14);
-        let recovered = TempoTxEnvelope::AA(tx.clone()).with_signer(from);
         executor
             .execute_transaction_with_actions(
                 recovered.as_recovered_ref(),
@@ -1266,9 +1262,9 @@ fn replay_rejects_a_root_key_retired_since_the_parent_state() {
             .err()
             .and_then(|error| StorageActionReplayError::from_block_execution_error(&error))
     };
-    for (role, tx, from) in &cases {
+    for (role, recovered) in &cases {
         assert_ne!(
-            replay_error(&f, tx, *from),
+            replay_error(&f, recovered),
             Some(StorageActionReplayError::RootKeyRetired),
             "{role} before the retirement"
         );
@@ -1276,9 +1272,9 @@ fn replay_rejects_a_root_key_retired_since_the_parent_state() {
     // The recorded actions came from the parent state, so only the executor sees a root key
     // retired since: replay must reject it in both roles rather than commit the actions.
     retire(&mut f, account);
-    for (role, tx, from) in &cases {
+    for (role, recovered) in &cases {
         assert_eq!(
-            replay_error(&f, tx, *from),
+            replay_error(&f, recovered),
             Some(StorageActionReplayError::RootKeyRetired),
             "{role}"
         );
@@ -1464,7 +1460,7 @@ fn native_signed_parent_delegate_case(outcome: GrantOutcome, gas_price: u128) {
                 } else {
                     vec![]
                 };
-                assert_eq!(output.output.as_ref(), expected.as_slice());
+                assert_eq!(output.output, expected);
             }
             for (account, expected) in [
                 (
@@ -1881,9 +1877,9 @@ fn authorization(signer: &PrivateKeySigner, target: Address, nonce: u64) -> Sign
     authorization.into_signed(signature)
 }
 
-/// A root-signed EIP-7702 transaction carrying `authorizations`.
+/// An EIP-7702 transaction signed by `sender` carrying `authorizations`.
 fn type4(
-    f: &Fixture,
+    sender: &PrivateKeySigner,
     nonce: u64,
     to: Address,
     input: Bytes,
@@ -1901,7 +1897,7 @@ fn type4(
         authorization_list: authorizations,
         input,
     };
-    let signature = f.owner.sign_hash_sync(&tx.signature_hash()).unwrap();
+    let signature = sender.sign_hash_sync(&tx.signature_hash()).unwrap();
     TempoTxEnvelope::Eip7702(tx.into_signed(signature))
 }
 
@@ -1909,7 +1905,7 @@ fn type4(
 /// type-4 transaction at `nonce`; the authorization consumes the next nonce.
 fn set_delegation(f: &mut Fixture, nonce: u64, target: Address) {
     let tx = type4(
-        f,
+        &f.owner,
         nonce,
         Address::repeat_byte(0x73),
         Bytes::new(),
@@ -2111,7 +2107,7 @@ fn eoa_migration_error_order() {
         |f| {
             let authorizations = vec![authorization(&signer(5), Address::ZERO, 0)];
             type4(
-                f,
+                &f.owner,
                 3,
                 CONFIGURABLE_ACCOUNT_ADDRESS,
                 upgrade.input.clone(),
@@ -2345,7 +2341,7 @@ fn eoa_migration_after_delegation_cleared() {
     set_delegation(&mut f, 3, Address::repeat_byte(0x74));
     let result = f.run(&tx);
     assert_eq!(
-        result.output.as_ref(),
+        result.output,
         IConfigurableAccount::AccountHasCode {}.abi_encode()
     );
     assert_eq!(f.commitment(), B256::ZERO);
@@ -2396,7 +2392,7 @@ fn eoa_migration_failure_keeps_fee_and_nonce() {
         });
         let result = f.run(&tx);
         assert!(result.stop.is_revert(), "{label}: {result:?}");
-        assert_eq!(result.output.as_ref(), error, "{label}");
+        assert_eq!(result.output, error, "{label}");
         assert!(configurable_account_logs(&result).is_empty(), "{label}");
         let fee = calc_gas_balance_spending(result.tx_gas_used(), 1);
         assert!(fee > U256::ZERO, "{label}");
@@ -2783,7 +2779,7 @@ fn simulation_env<T>(tx: &T, sender: Address, key_id: Option<Address>) -> Recove
 where
     T: Clone + Into<TempoTxEnvelope>,
 {
-    let env = TempoTxEnv::from(Recovered::new_unchecked(tx.clone().into(), sender));
+    let env = tx_env(tx, sender).into_inner();
     let unique_tx_identifier = env.unique_tx_identifier();
     Recovered::new_unchecked(
         env.with_simulation_overrides(unique_tx_identifier, None, key_id),
@@ -2900,7 +2896,7 @@ fn retired_root_rejects_sender_signatures() {
     let expected = retired(account, RootKeyRole::Sender);
     // EIP-7702, a 2D nonce lane, and the other primitive signature types.
     let tx = type4(
-        &f,
+        &f.owner,
         4,
         other,
         Bytes::new(),
@@ -3473,20 +3469,13 @@ fn listed_tx(
         let signature = sender.sign_hash_sync(&tx.signature_hash()).unwrap();
         TempoTxEnvelope::AA(tx.into_signed(signature.into()))
     } else {
-        let tx = TxEip7702 {
-            chain_id: 1,
-            nonce: 0,
-            gas_limit: 1_000_000,
-            max_fee_per_gas: 0,
-            max_priority_fee_per_gas: 0,
+        type4(
+            sender,
+            0,
             to,
-            value: U256::ZERO,
-            access_list: AccessList(Vec::new()),
-            authorization_list: entries.iter().map(Entry::legacy).collect(),
-            input: Bytes::new(),
-        };
-        let signature = sender.sign_hash_sync(&tx.signature_hash()).unwrap();
-        TempoTxEnvelope::Eip7702(tx.into_signed(signature))
+            Bytes::new(),
+            entries.iter().map(Entry::legacy).collect(),
+        )
     }
 }
 
@@ -3946,8 +3935,18 @@ fn permit_signed(
     })
     .unwrap();
     let (value, deadline) = (U256::from(100), U256::from(deadline));
-    let struct_hash =
-        keccak256((PERMIT_TYPEHASH, owner, spender, value, nonce, deadline).abi_encode());
+    // The ABI encoding of the permit's six static fields: one 32-byte word each.
+    let struct_hash = keccak256(
+        [
+            PERMIT_TYPEHASH,
+            owner.into_word(),
+            spender.into_word(),
+            value.into(),
+            nonce.into(),
+            deadline.into(),
+        ]
+        .concat(),
+    );
     let digest = keccak256(
         [
             &[0x19, 0x01][..],
