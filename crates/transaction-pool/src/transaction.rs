@@ -278,12 +278,13 @@ impl TempoPooledTransaction {
 
     /// Whether a changed account commitment can stale this transaction's authority.
     ///
-    /// A native multisig signer matches when its account is in `changed_commitments`, or on any
-    /// `reorg`. A primitive authority matches only when its address is in `changed_commitments`
-    /// (a commitment change retires the bare key, TIP-1112). Primitive authorities are the sender
-    /// of a non-AA or primitive-signed transaction, a primitive key authorization signer, a
-    /// separate fee payer and the key ID of a primitive access key. The account that an access key
-    /// signs for is not one: a nonzero commitment does not revoke its grants.
+    /// A configurable account signer matches when its account is in `changed_commitments`, or on
+    /// any `reorg`. A primitive authority matches only when its address is in
+    /// `changed_commitments` (a commitment change retires the bare key, TIP-1112). Primitive
+    /// authorities are the sender of a non-AA or primitive-signed transaction, a primitive key
+    /// authorization signer, a separate fee payer and the key ID of a primitive access key. The
+    /// account that an access key signs for is not one: a nonzero commitment does not revoke its
+    /// grants.
     pub(crate) fn needs_configurable_revalidation(
         &self,
         changed_commitments: &AddressSet,
@@ -293,15 +294,14 @@ impl TempoPooledTransaction {
             return changed_commitments.contains(self.sender_ref());
         };
         let keychain = tx.signature().as_keychain();
-        let transaction_signer = tx
-            .signature()
-            .as_multisig()
-            .or_else(|| keychain.and_then(|signature| signature.signature.as_multisig()));
+        let transaction_signer = tx.signature().as_configurable_account().or_else(|| {
+            keychain.and_then(|signature| signature.signature.as_configurable_account())
+        });
         let grant_signer = tx
             .tx()
             .key_authorization
             .as_ref()
-            .and_then(|authorization| authorization.signature.as_multisig());
+            .and_then(|authorization| authorization.signature.as_configurable_account());
         if [transaction_signer, grant_signer]
             .into_iter()
             .flatten()
