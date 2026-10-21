@@ -2,7 +2,8 @@
 
 use alloy::{
     primitives::{Address, B256, Bytes, U256, aliases::U96, keccak256},
-    sol_types::SolValue,
+    sol,
+    sol_types::SolStruct,
 };
 use alloy_signer::SignerSync;
 use alloy_signer_local::PrivateKeySigner;
@@ -24,11 +25,29 @@ use Party::{Delegate, Payer};
 
 const COMMITMENT: B256 = B256::repeat_byte(0x11);
 
+sol! {
+    struct Permit {
+        address owner;
+        address spender;
+        uint256 value;
+        uint256 nonce;
+        uint256 deadline;
+    }
+}
+
 /// The payer of a channel, or the separate signer it authorizes to sign vouchers.
 #[derive(Clone, Copy)]
 enum Party {
     Payer,
     Delegate,
+}
+
+/// What submitting a permit did.
+struct PermitOutcome {
+    owner: Address,
+    result: Result<(), TempoPrecompileError>,
+    /// The owner's permit nonce afterwards.
+    nonce: U256,
 }
 
 /// Storage at T14, with a commitment on each of `committed`, running at `spec`.
@@ -46,11 +65,7 @@ fn storage_at(spec: TempoHardfork, committed: &[Address]) -> HashMapStorageProvi
 }
 
 /// Submits a permit signed by a fresh owner, with a commitment on the owner when `committed`.
-/// Returns the owner, the permit result and the owner's nonce afterwards.
-fn permit(
-    spec: TempoHardfork,
-    committed: bool,
-) -> (Address, Result<(), TempoPrecompileError>, U256) {
+fn permit(spec: TempoHardfork, committed: bool) -> PermitOutcome {
     let signer = PrivateKeySigner::random();
     let owner = signer.address();
     let spender = Address::repeat_byte(0x22);
@@ -60,8 +75,15 @@ fn permit(
         let admin = Address::repeat_byte(0x33);
         let mut token = TIP20Setup::create("Test", "TST", admin).apply().unwrap();
         let (value, nonce, deadline) = (U256::from(1_000), U256::ZERO, U256::MAX);
-        let struct_hash =
-            keccak256((PERMIT_TYPEHASH, owner, spender, value, nonce, deadline).abi_encode());
+        let permit = Permit {
+            owner,
+            spender,
+            value,
+            nonce,
+            deadline,
+        };
+        assert_eq!(permit.eip712_type_hash(), PERMIT_TYPEHASH);
+        let struct_hash = permit.eip712_hash_struct();
         let digest = keccak256(
             [
                 &[0x19, 0x01],
@@ -81,18 +103,52 @@ fn permit(
             s: signature.s().into(),
         });
         let nonce = token.nonces(ITIP20::noncesCall { owner }).unwrap();
-        (owner, result, nonce)
+        PermitOutcome {
+            owner,
+            result,
+            nonce,
+        }
     })
 }
 
 #[test]
 fn permit_by_a_root_with_a_commitment_is_rejected_from_t14() {
-    for (name, spec, committed, rejected) in [
-        ("committed root", T14, true, true),
-        ("uncommitted root", T14, false, false),
-        ("committed root before T14", T13, true, false),
+    struct Case {
+        name: &'static str,
+        spec: TempoHardfork,
+        committed: bool,
+        rejected: bool,
+    }
+    for Case {
+        name,
+        spec,
+        committed,
+        rejected,
+    } in [
+        Case {
+            name: "committed root",
+            spec: T14,
+            committed: true,
+            rejected: true,
+        },
+        Case {
+            name: "uncommitted root",
+            spec: T14,
+            committed: false,
+            rejected: false,
+        },
+        Case {
+            name: "committed root before T14",
+            spec: T13,
+            committed: true,
+            rejected: false,
+        },
     ] {
-        let (owner, result, nonce) = permit(spec, committed);
+        let PermitOutcome {
+            owner,
+            result,
+            nonce,
+        } = permit(spec, committed);
         if rejected {
             assert_eq!(
                 result.expect_err(name),
@@ -186,12 +242,49 @@ fn settle(
 
 #[test]
 fn voucher_by_a_signer_with_a_commitment_is_rejected_from_t14() {
-    for (name, spec, signer, committed, rejected) in [
-        ("committed payer", T14, Payer, Payer, true),
-        ("committed delegate", T14, Delegate, Delegate, true),
+    struct Case {
+        name: &'static str,
+        spec: TempoHardfork,
+        signer: Party,
+        committed: Party,
+        rejected: bool,
+    }
+    for Case {
+        name,
+        spec,
+        signer,
+        committed,
+        rejected,
+    } in [
+        Case {
+            name: "committed payer",
+            spec: T14,
+            signer: Payer,
+            committed: Payer,
+            rejected: true,
+        },
+        Case {
+            name: "committed delegate",
+            spec: T14,
+            signer: Delegate,
+            committed: Delegate,
+            rejected: true,
+        },
         // Only the channel's expected signer is checked.
-        ("committed payer, delegated", T14, Delegate, Payer, false),
-        ("committed payer before T14", T13, Payer, Payer, false),
+        Case {
+            name: "committed payer, delegated",
+            spec: T14,
+            signer: Delegate,
+            committed: Payer,
+            rejected: false,
+        },
+        Case {
+            name: "committed payer before T14",
+            spec: T13,
+            signer: Payer,
+            committed: Payer,
+            rejected: false,
+        },
     ] {
         let (signer, result) = settle(spec, signer, committed);
         if rejected {

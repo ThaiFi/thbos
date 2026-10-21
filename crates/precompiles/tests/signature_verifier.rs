@@ -93,6 +93,17 @@ enum Committed {
     Account,
 }
 
+/// A keychain signature by a signer of `signer_type` at `spec`, and whether `verify_keychain` and
+/// `verify_keychain_admin` accept it.
+struct Case {
+    spec: TempoHardfork,
+    signer_type: SignatureType,
+    /// The grant to the signer; none when the signer is the account's root key.
+    grant: Option<Grant>,
+    committed: Committed,
+    expected: (bool, bool),
+}
+
 const fn key(stored_type: SignatureType) -> Option<Grant> {
     Some(Grant {
         stored_type,
@@ -167,33 +178,53 @@ fn keychain_signature(key: &Key, account: Address) -> Bytes {
     .to_bytes()
 }
 
-/// Each case is a spec, the signer's key type, the grant to the signer (none: the signer is the
-/// account's root key), who has a commitment, and whether `verify_keychain` and
-/// `verify_keychain_admin` accept the signature.
+const fn case(
+    spec: TempoHardfork,
+    signer_type: SignatureType,
+    grant: Option<Grant>,
+    committed: Committed,
+    expected: (bool, bool),
+) -> Case {
+    Case {
+        spec,
+        signer_type,
+        grant,
+        committed,
+        expected,
+    }
+}
+
 #[test]
 fn keychain_verification_by_retired_roots_and_stored_key_types() {
     let cases = [
         // The root is implicitly admin, but is not an access key.
-        (T14, Secp256k1, None, Nobody, (false, true)),
-        (T14, Secp256k1, None, Account, (false, false)),
-        (T13, Secp256k1, None, Account, (false, true)),
+        case(T14, Secp256k1, None, Nobody, (false, true)),
+        case(T14, Secp256k1, None, Account, (false, false)),
+        case(T13, Secp256k1, None, Account, (false, true)),
         // An access key that is a retired root.
-        (T14, Secp256k1, key(Secp256k1), Nobody, (true, false)),
-        (T14, Secp256k1, admin_key(Secp256k1), Nobody, (true, true)),
-        (T14, Secp256k1, key(Secp256k1), Signer, (false, false)),
-        (T14, Secp256k1, admin_key(Secp256k1), Signer, (false, false)),
-        (T13, Secp256k1, key(Secp256k1), Signer, (true, false)),
-        (T13, Secp256k1, admin_key(Secp256k1), Signer, (true, true)),
+        case(T14, Secp256k1, key(Secp256k1), Nobody, (true, false)),
+        case(T14, Secp256k1, admin_key(Secp256k1), Nobody, (true, true)),
+        case(T14, Secp256k1, key(Secp256k1), Signer, (false, false)),
+        case(T14, Secp256k1, admin_key(Secp256k1), Signer, (false, false)),
+        case(T13, Secp256k1, key(Secp256k1), Signer, (true, false)),
+        case(T13, Secp256k1, admin_key(Secp256k1), Signer, (true, true)),
         // A commitment on the granting account does not retire the grantee.
-        (T14, Secp256k1, key(Secp256k1), Account, (true, false)),
-        (T14, Secp256k1, admin_key(Secp256k1), Account, (true, true)),
+        case(T14, Secp256k1, key(Secp256k1), Account, (true, false)),
+        case(T14, Secp256k1, admin_key(Secp256k1), Account, (true, true)),
         // The stored type is compared with the signature type from T14.
-        (T14, P256, key(P256), Nobody, (true, false)),
-        (T14, P256, key(Secp256k1), Nobody, (false, false)),
-        (T13, P256, key(P256), Nobody, (true, false)),
-        (T13, P256, key(Secp256k1), Nobody, (true, false)),
+        case(T14, P256, key(P256), Nobody, (true, false)),
+        case(T14, P256, key(Secp256k1), Nobody, (false, false)),
+        case(T13, P256, key(P256), Nobody, (true, false)),
+        case(T13, P256, key(Secp256k1), Nobody, (true, false)),
     ];
-    for (spec, signer_type, grant, committed, expected) in cases {
+    for Case {
+        spec,
+        signer_type,
+        grant,
+        committed,
+        expected,
+    } in cases
+    {
         let signer = Key::random(signer_type);
         let account = match grant {
             Some(_) => Address::repeat_byte(0x01),
@@ -248,10 +279,31 @@ fn keychain_signature_must_embed_the_verified_account() {
 #[test]
 fn implicit_root_admin_status_ends_with_the_commitment_from_t14() {
     let account = Address::repeat_byte(0x01);
-    for (spec, committed, admin) in [
-        (T14, vec![], true),
-        (T14, vec![account], false),
-        (T13, vec![account], true),
+    struct Case {
+        spec: TempoHardfork,
+        committed: Vec<Address>,
+        admin: bool,
+    }
+    for Case {
+        spec,
+        committed,
+        admin,
+    } in [
+        Case {
+            spec: T14,
+            committed: vec![],
+            admin: true,
+        },
+        Case {
+            spec: T14,
+            committed: vec![account],
+            admin: false,
+        },
+        Case {
+            spec: T13,
+            committed: vec![account],
+            admin: true,
+        },
     ] {
         let mut storage = storage_at(spec, account, Address::repeat_byte(0x03), None, &committed);
         StorageCtx::enter(&mut storage, || {
