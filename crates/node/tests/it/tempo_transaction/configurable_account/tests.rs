@@ -776,14 +776,9 @@ async fn retired_root_rpc_rejects_send_and_allows_calls() -> eyre::Result<()> {
         );
 
         // The root key cannot send any more, whatever the transaction does.
-        let retired = format!(
-            "root key of {} is retired and cannot act as the transaction sender",
-            account.address
-        );
         let tx = account.transaction(&env, vec![noop()]);
         let signature = TempoSignature::Primitive(root.sign(tx.signature_hash())?);
-        let error = reject(&env, tx, signature).await?;
-        assert!(error.contains(&retired), "{error}");
+        reject_retired_root(&env, tx, signature, account.address).await?;
 
         // The witness still can, and the rejected transaction used no nonce.
         let tx = account.transaction(&env, vec![noop()]);
@@ -883,12 +878,7 @@ async fn root_transaction_queued_behind_migration_is_not_included() -> eyre::Res
     resent.max_priority_fee_per_gas *= 2;
     resent.max_fee_per_gas *= 2;
     let signature = TempoSignature::Primitive(root.sign(resent.signature_hash())?);
-    let error = reject(&env, resent, signature).await?;
-    let retired = format!(
-        "root key of {} is retired and cannot act as the transaction sender",
-        account.address
-    );
-    assert!(error.contains(&retired), "{error}");
+    reject_retired_root(&env, resent, signature, account.address).await?;
     Ok(())
 }
 

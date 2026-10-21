@@ -9,9 +9,10 @@ use alloy::{
     network::ReceiptResponse,
     primitives::{Address, B256, Bytes, U256, keccak256},
     providers::{Provider, RootProvider},
-    rpc::types::TransactionRequest,
+    rpc::types::{TransactionRequest, error::EthRpcErrorCode},
     signers::{SignerSync, local::PrivateKeySigner},
     sol_types::SolCall,
+    transports::TransportError,
 };
 use alloy_eips::Encodable2718;
 use eyre::eyre;
@@ -30,6 +31,7 @@ use tempo_chainspec::hardfork::TempoHardfork;
 use tempo_contracts::precompiles::{
     CONFIGURABLE_ACCOUNT_ADDRESS, DEFAULT_FEE_TOKEN, IConfigurableAccount,
 };
+use tempo_evm::{TempoInvalidTransaction, transaction_error::RootKeyRole};
 use tempo_primitives::{
     SignatureType, TempoTransaction, TempoTxEnvelope,
     transaction::{
@@ -335,18 +337,49 @@ async fn submit(
     Ok(receipt)
 }
 
+async fn rejection(
+    env: &Localnet,
+    tx: TempoTransaction,
+    signature: TempoSignature,
+) -> TransportError {
+    let envelope: TempoTxEnvelope = tx.into_signed(signature).into();
+    tempo_provider(env)
+        .send_raw_transaction(&envelope.encoded_2718())
+        .await
+        .expect_err("invalid authorization accepted by RPC")
+}
+
 async fn reject(
     env: &Localnet,
     tx: TempoTransaction,
     signature: TempoSignature,
 ) -> eyre::Result<String> {
-    let envelope: TempoTxEnvelope = tx.into_signed(signature).into();
-    let result = tempo_provider(env)
-        .send_raw_transaction(&envelope.encoded_2718())
-        .await;
-    Ok(result
-        .expect_err("invalid authorization accepted by RPC")
-        .to_string())
+    Ok(rejection(env, tx, signature).await.to_string())
+}
+
+/// Requires the RPC to reject `tx` with exactly the error the node reports for the retired root
+/// key of `account` signing as the transaction sender.
+async fn reject_retired_root(
+    env: &Localnet,
+    tx: TempoTransaction,
+    signature: TempoSignature,
+    account: Address,
+) -> eyre::Result<()> {
+    let error = rejection(env, tx, signature).await;
+    let retired = TempoInvalidTransaction::RootKeyRetired {
+        account,
+        role: RootKeyRole::Sender,
+    };
+    let payload = error
+        .as_error_resp()
+        .ok_or_else(|| eyre!("not a JSON-RPC error response: {error:?}"))?;
+    assert_eq!(
+        payload.code,
+        i64::from(EthRpcErrorCode::InvalidInput.code()),
+        "{error:?}"
+    );
+    assert_eq!(payload.message, retired.to_string(), "{error:?}");
+    Ok(())
 }
 
 async fn environment() -> eyre::Result<Localnet> {
