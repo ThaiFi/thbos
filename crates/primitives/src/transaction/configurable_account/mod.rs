@@ -28,10 +28,6 @@ pub const CONFIGURABLE_ACCOUNT_UPGRADE_DOMAIN: &[u8] = b"tempo:configurable-acco
 /// Safe Singleton Factory used to deploy the recovery factory, beacon and implementations.
 pub const RECOVERY_SINGLETON_FACTORY: Address = SAFE_DEPLOYER_ADDRESS;
 
-/// Expected runtime-code hash of [`RECOVERY_SINGLETON_FACTORY`].
-pub const RECOVERY_SINGLETON_FACTORY_RUNTIME_HASH: B256 =
-    b256!("2fa86add0aed31f33a762c9d88e807c475bd51d0f52bd0955754b2608f7e4989");
-
 /// Keccak-256 of the account proxy creation code. The creation code is identical for every
 /// account, takes no constructor arguments and embeds the beacon address as a constant.
 ///
