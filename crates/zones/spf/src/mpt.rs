@@ -314,8 +314,8 @@ mod tests {
             ..Default::default()
         };
         let encoded = alloy_rlp::encode(&account);
-        assert_eq!(decode_account(&encoded, address).unwrap(), account);
-        assert_eq!(decode_hashed_account(&encoded).unwrap(), account);
+        assert_eq!(decode_account(&encoded, address), Ok(account.clone()));
+        assert_eq!(decode_hashed_account(&encoded), Ok(account.clone()));
 
         let mut invalid = (0..encoded.len())
             .map(|len| encoded[..len].to_vec())
