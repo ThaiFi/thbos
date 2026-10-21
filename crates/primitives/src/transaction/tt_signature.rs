@@ -587,21 +587,24 @@ pub enum AccountSignature {
 
 impl AccountSignature {
     /// Decodes a direct approval, rejecting recursive keychain envelopes.
-    pub(crate) fn from_bytes(data: &[u8]) -> Result<Self, &'static str> {
+    fn from_bytes(data: &[u8]) -> Result<Self, AccountSignatureError> {
         if data.len() != SECP256K1_SIGNATURE_LENGTH {
             match data.first() {
                 Some(&SIGNATURE_TYPE_KEYCHAIN | &SIGNATURE_TYPE_KEYCHAIN_V2) => {
-                    return Err("keychain signatures are not account signatures");
+                    return Err(AccountSignatureError::Keychain);
                 }
                 Some(&SIGNATURE_TYPE_CONFIGURABLE_ACCOUNT) if data.len() > 1 => {
                     return decode_exact::<ConfigurableAccountSignature>(&data[1..])
                         .map(Self::ConfigurableAccount)
-                        .map_err(|_| "Invalid configurable account signature RLP");
+                        .map_err(AccountSignatureError::InvalidConfigurableAccount);
                 }
                 _ => {}
             }
         }
-        PrimitiveSignature::from_bytes(data).map(Self::Primitive)
+        match PrimitiveSignature::from_bytes(data) {
+            Ok(signature) => Ok(Self::Primitive(signature)),
+            Err(message) => Err(AccountSignatureError::Primitive(message)),
+        }
     }
 
     /// Writes the direct approval without allocating an intermediate buffer.
@@ -682,7 +685,7 @@ impl From<ConfigurableAccountSignature> for AccountSignature {
 }
 
 impl TryFrom<TempoSignature> for AccountSignature {
-    type Error = &'static str;
+    type Error = AccountSignatureError;
 
     fn try_from(signature: TempoSignature) -> Result<Self, Self::Error> {
         match signature {
@@ -690,7 +693,7 @@ impl TryFrom<TempoSignature> for AccountSignature {
             TempoSignature::ConfigurableAccount(signature) => {
                 Ok(Self::ConfigurableAccount(signature))
             }
-            TempoSignature::Keychain(_) => Err("keychain signatures are not account signatures"),
+            TempoSignature::Keychain(_) => Err(AccountSignatureError::Keychain),
         }
     }
 }
@@ -717,7 +720,41 @@ impl Encodable for AccountSignature {
 impl Decodable for AccountSignature {
     fn decode(buf: &mut &[u8]) -> alloy_rlp::Result<Self> {
         let bytes = Header::decode_bytes(buf, false)?;
-        Self::from_bytes(bytes).map_err(RlpError::Custom)
+        Self::from_bytes(bytes).map_err(|error| RlpError::Custom(error.as_str()))
+    }
+}
+
+/// Why bytes or a [`TempoSignature`] are not a direct account approval.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AccountSignatureError {
+    /// A keychain envelope where a direct approval is required.
+    Keychain,
+    /// A configurable account witness that does not decode.
+    InvalidConfigurableAccount(RlpError),
+    /// A primitive signature that does not decode, with its message.
+    Primitive(&'static str),
+}
+
+impl AccountSignatureError {
+    /// Returns the stable validation message for this error.
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Keychain => "keychain signatures are not account signatures",
+            Self::InvalidConfigurableAccount(_) => "Invalid configurable account signature RLP",
+            Self::Primitive(message) => message,
+        }
+    }
+}
+
+impl core::fmt::Display for AccountSignatureError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl From<AccountSignatureError> for &'static str {
+    fn from(error: AccountSignatureError) -> Self {
+        error.as_str()
     }
 }
 
@@ -753,11 +790,10 @@ impl TempoSignature {
             return Err("Signature data is empty");
         }
 
-        if data.len() == SECP256K1_SIGNATURE_LENGTH {
-            return PrimitiveSignature::from_bytes(data).map(Self::Primitive);
-        }
-
-        if data.len() > 1 && data[0] == SIGNATURE_TYPE_CONFIGURABLE_ACCOUNT {
+        if data.len() > 1
+            && data.len() != SECP256K1_SIGNATURE_LENGTH
+            && data[0] == SIGNATURE_TYPE_CONFIGURABLE_ACCOUNT
+        {
             return match AccountSignature::from_bytes(data)? {
                 AccountSignature::Primitive(signature) => Ok(Self::Primitive(signature)),
                 AccountSignature::ConfigurableAccount(signature) => {
@@ -770,6 +806,7 @@ impl TempoSignature {
         // PrimitiveSignature. The exact 65-byte secp256k1 path remains untyped for
         // backwards compatibility.
         if data.len() > 1
+            && data.len() != SECP256K1_SIGNATURE_LENGTH
             && (data[0] == SIGNATURE_TYPE_KEYCHAIN || data[0] == SIGNATURE_TYPE_KEYCHAIN_V2)
         {
             let version = if data[0] == SIGNATURE_TYPE_KEYCHAIN {
@@ -1267,7 +1304,7 @@ pub(crate) mod tests {
     }
 
     /// Generate P256 keypair, return (signing_key, pub_key_x, pub_key_y)
-    pub(crate) fn generate_p256_keypair() -> (P256SigningKey, B256, B256) {
+    fn generate_p256_keypair() -> (P256SigningKey, B256, B256) {
         let signing_key = P256SigningKey::random(&mut OsRng);
         let verifying_key = signing_key.verifying_key();
         let encoded_point = verifying_key.to_encoded_point(false);
