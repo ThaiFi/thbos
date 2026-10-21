@@ -227,7 +227,7 @@ pub fn configurable_account_verification_gas(
 ///
 /// Unlike `tempo_evm`'s `primitive_signature_verification_gas`, this does not subtract the
 /// ecrecover baseline already covered by ordinary intrinsic gas.
-pub fn primitive_verification_gas(signature: &PrimitiveSignature) -> u64 {
+fn primitive_verification_gas(signature: &PrimitiveSignature) -> u64 {
     let webauthn_data_gas = match signature {
         PrimitiveSignature::WebAuthn(sig) => calldata_gas(&sig.webauthn_data),
         PrimitiveSignature::Secp256k1(_) | PrimitiveSignature::P256(_) => 0,
