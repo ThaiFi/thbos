@@ -27,7 +27,7 @@ use evm2::{
     interpreter::gas::{KECCAK256, KECCAK256WORD},
 };
 use tempo_chainspec::hardfork::TempoHardfork;
-use tempo_primitives::TempoBlockEnv;
+use tempo_primitives::{TempoBlockEnv, account::decode_config_commitment};
 
 use crate::error::{Result, TempoPrecompileError};
 
@@ -312,6 +312,6 @@ pub fn keccak_cost(len: usize) -> Result<u64> {
 /// A malformed extension is a node invariant violation, so it fails with
 /// [`TempoPrecompileError::Fatal`].
 pub fn account_config_commitment(info: &AccountInfo, hardfork: TempoHardfork) -> Result<B256> {
-    tempo_primitives::account::decode_config_commitment(&info.extension, hardfork)
+    decode_config_commitment(&info.extension, hardfork)
         .map_err(|err| TempoPrecompileError::Fatal(err.to_string()))
 }

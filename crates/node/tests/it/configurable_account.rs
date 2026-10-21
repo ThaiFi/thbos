@@ -6,7 +6,7 @@
 use std::sync::Arc;
 
 use alloy::{
-    consensus::{SignableTransaction, TxEip7702},
+    consensus::{Header, SignableTransaction, TxEip7702},
     eips::eip7702::Authorization,
     primitives::{Address, B256, Bytes, KECCAK256_EMPTY, TxKind, U256},
     rpc::types::TransactionRequest,
@@ -18,9 +18,9 @@ use evm2::{
     evm::{AccountInfo, InMemoryDB},
 };
 use reth_evm::{ConfigureEvm, EvmEnvFor};
-use reth_primitives_traits::Recovered;
+use reth_primitives_traits::{Recovered, SignedTransaction};
 use reth_rpc_eth_api::TryIntoTxEnv;
-use serde_json::json;
+use serde_json::{Value, from_str, from_value, json};
 use tempo_alloy::rpc::{
     ConfigurableAccountSimulationApproval, ConfigurableAccountSimulationSpec,
     TempoTransactionRequest,
@@ -46,17 +46,16 @@ const FACTORY: Address = Address::repeat_byte(0x71);
 const DELEGATE: Address = Address::repeat_byte(0x44);
 
 fn evm_config() -> TempoEvmConfig {
-    let mut genesis: serde_json::Value =
-        serde_json::from_str(include_str!("../assets/test-genesis.json")).unwrap();
+    let mut genesis: Value = from_str(include_str!("../assets/test-genesis.json")).unwrap();
     genesis["config"]["configurableAccountRecoveryFactory"] = json!(FACTORY);
     TempoEvmConfig::new(Arc::new(TempoChainSpec::from_genesis(
-        serde_json::from_value(genesis).unwrap(),
+        from_value(genesis).unwrap(),
     )))
 }
 
 fn evm_env(config: &TempoEvmConfig) -> EvmEnvFor<TempoEvmConfig> {
     let header = TempoHeader {
-        inner: alloy::consensus::Header {
+        inner: Header {
             number: 1,
             timestamp: 1,
             gas_limit: 30_000_000,
@@ -115,7 +114,7 @@ fn signed_by_root(tx: TempoTransaction, root: &PrivateKeySigner) -> Recovered<Te
 }
 
 fn recovered(envelope: TempoTxEnvelope, caller: Address) -> Recovered<TempoTxEnv> {
-    let env: TempoTxEnv = Recovered::new_unchecked(envelope, caller).into();
+    let env: TempoTxEnv = envelope.with_signer(caller).into();
     Recovered::new_unchecked(env, caller)
 }
 

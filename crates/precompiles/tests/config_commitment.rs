@@ -9,7 +9,7 @@ use evm2::{
     registry::TxRegistry,
     version::{GasId, GasParams},
 };
-use tempo_chainspec::hardfork::TempoHardfork;
+use tempo_chainspec::{gas_params::version, hardfork::TempoHardfork};
 use tempo_precompiles::{
     error::TempoPrecompileError,
     storage::{
@@ -39,11 +39,7 @@ const INITIAL: B256 = B256::repeat_byte(2);
 const ROTATED: B256 = B256::repeat_byte(3);
 
 fn new_evm(spec: TempoHardfork, amsterdam_eip8037_enabled: bool) -> Evm<'static, TestTypes> {
-    new_evm_with_version(tempo_chainspec::gas_params::version(
-        SpecId::OSAKA,
-        spec,
-        amsterdam_eip8037_enabled,
-    ))
+    new_evm_with_version(version(SpecId::OSAKA, spec, amsterdam_eip8037_enabled))
 }
 
 fn new_evm_with_version(version: Version) -> Evm<'static, TestTypes> {
@@ -58,7 +54,7 @@ fn new_evm_with_version(version: Version) -> Evm<'static, TestTypes> {
 }
 
 fn gas_params(spec: TempoHardfork, amsterdam_eip8037_enabled: bool) -> GasParams {
-    tempo_chainspec::gas_params::version(SpecId::OSAKA, spec, amsterdam_eip8037_enabled).gas_params
+    version(SpecId::OSAKA, spec, amsterdam_eip8037_enabled).gas_params
 }
 
 /// Runs `f` inside a [`StorageCtx`] over the in-memory provider, then over the EVM provider.
@@ -290,14 +286,33 @@ fn evm_static_write_is_rejected_uncharged() {
     assert_eq!(storage.config_commitment(ACCOUNT).unwrap(), B256::ZERO);
 }
 
+/// A commitment write to an account holding `previous`, with its expected regular and state gas.
+struct WriteCase {
+    previous: B256,
+    cost: u64,
+    state_gas: u64,
+}
+
 #[test]
 fn evm_write_gas_boundary() {
     let spec = TempoHardfork::T14;
     let params = gas_params(spec, false);
     let registration = 20_000 + u64::from(params.get(GasId::NewAccountCost));
-    for (previous, cost, state_gas) in [
-        (B256::ZERO, registration, params.new_account_state_gas()),
-        (INITIAL, 5_000, 0),
+    for WriteCase {
+        previous,
+        cost,
+        state_gas,
+    } in [
+        WriteCase {
+            previous: B256::ZERO,
+            cost: registration,
+            state_gas: params.new_account_state_gas(),
+        },
+        WriteCase {
+            previous: INITIAL,
+            cost: 5_000,
+            state_gas: 0,
+        },
     ] {
         for shortfall in [1, 0] {
             let mut evm = new_evm(spec, false);
@@ -351,7 +366,7 @@ fn evm_registration_state_gas_spills_into_regular_gas() {
     // No T14 schedule prices new-account state gas yet, so set it here to pin the spill path.
     let spec = TempoHardfork::T14;
     let state_gas = 100_000;
-    let mut version = tempo_chainspec::gas_params::version(SpecId::OSAKA, spec, false);
+    let mut version = version(SpecId::OSAKA, spec, false);
     version.gas_params[GasId::NewAccountState] = state_gas;
     let state_gas = u64::from(state_gas);
     let regular = 20_000 + u64::from(version.gas_params.get(GasId::NewAccountCost));

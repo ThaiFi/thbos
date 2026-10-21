@@ -1,14 +1,14 @@
 //! Signature verifier precompile selectors for configurable accounts.
 
 use alloy::{
-    primitives::{Address, B256, Bytes, keccak256},
-    sol_types::{SolError, SolValue},
+    primitives::{Address, B256, keccak256},
+    sol_types::{SolCall, SolError, SolValue},
 };
 use alloy_signer::SignerSync;
 use alloy_signer_local::PrivateKeySigner;
 use evm2::precompiles::{PrecompileError, PrecompileResult};
 use tempo_chainspec::hardfork::TempoHardfork;
-use tempo_contracts::precompiles::UnknownFunctionSelector;
+use tempo_contracts::precompiles::{ISignatureVerifier, UnknownFunctionSelector};
 use tempo_precompiles::{
     Precompile,
     signature_verifier::SignatureVerifier,
@@ -54,7 +54,12 @@ fn call_with_selector(selector_signature: &str) -> PrecompileResult {
     .to_bytes();
 
     let mut calldata = selector(selector_signature).to_vec();
-    calldata.extend((account, hash, Bytes::from(signature.to_vec())).abi_encode_params());
+    ISignatureVerifier::verifyConfigurableAccountCall {
+        account,
+        hash,
+        signature,
+    }
+    .abi_encode_raw(&mut calldata);
 
     let mut storage = HashMapStorageProvider::new_with_spec(1, TempoHardfork::T14);
     storage.set_configurable_account_recovery_factory(FACTORY);
