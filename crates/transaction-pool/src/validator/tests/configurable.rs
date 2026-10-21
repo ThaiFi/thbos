@@ -17,7 +17,7 @@ use revm::{
     state::AccountInfo,
 };
 use std::time::Duration;
-use tempo_evm::transaction_error::ConfigurableAccountError;
+use tempo_evm::{tempo_execution_config, transaction_error::ConfigurableAccountError};
 use tempo_primitives::{
     account::encode_config_commitment,
     transaction::{
@@ -106,6 +106,9 @@ async fn reorg_and_rotation_revalidate_native_transaction() {
             .store(TempoHardfork::T14.variant_index(), Ordering::Relaxed);
         let mut env = validator.cached_evm_env.write();
         env.spec = TempoHardfork::T14;
+        env.version.gas_params = tempo_execution_config(TempoHardfork::T14, env.version.chain_id)
+            .version()
+            .gas_params;
         env.block.ext.configurable_account_recovery_factory = Some(FACTORY);
     };
     restore_t14();
