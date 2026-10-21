@@ -3,24 +3,21 @@ pub mod dispatch;
 use crate::{
     SIGNATURE_VERIFIER_ADDRESS,
     account_keychain::{AccountKeychain, AuthorizedKey},
+    configurable_account::{initial_account_proof_gas, valid_account},
     error::{Result, TempoPrecompileError},
-    native_multisig::{initial_account_proof_gas, keccak_cost, valid_account},
+    storage::{account_config_commitment, keccak_cost},
 };
 use alloy::{
-    primitives::{Address, B256, Bytes},
+    primitives::{Address, B256, Bytes, KECCAK256_EMPTY},
     rlp::{self, Encodable},
 };
-use revm::interpreter::gas::{STANDARD_TOKEN_COST, get_tokens_in_calldata_istanbul};
+use evm2::interpreter::gas::STANDARD_TOKEN_COST;
 use tempo_contracts::precompiles::SignatureVerifierError;
 use tempo_precompiles_macros::contract;
-use tempo_primitives::{
-    TempoBlockEnv,
-    account::decode_config_commitment,
-    transaction::{
-        MultisigSignature,
-        multisig::MULTISIG_SIGNATURE_DOMAIN,
-        tt_signature::{AccountSignature, KeychainSignature, PrimitiveSignature, TempoSignature},
-    },
+use tempo_primitives::transaction::{
+    ConfigurableAccountSignature,
+    configurable_account::CONFIGURABLE_ACCOUNT_SIGNATURE_DOMAIN,
+    tt_signature::{AccountSignature, KeychainSignature, PrimitiveSignature, TempoSignature},
 };
 
 #[contract(addr = SIGNATURE_VERIFIER_ADDRESS)]
@@ -84,26 +81,35 @@ impl SignatureVerifier {
             .is_some_and(|key| key.is_admin))
     }
 
-    fn verify_multisig(&self, account: Address, hash: B256, bytes: &[u8]) -> Result<bool> {
+    fn verify_configurable_account(
+        &self,
+        account: Address,
+        hash: B256,
+        bytes: &[u8],
+    ) -> Result<bool> {
         let signature = TempoSignature::from_bytes(bytes)
             .map_err(|_| SignatureVerifierError::invalid_format())?;
-        let Some(signature) = signature.as_multisig() else {
+        let Some(signature) = signature.as_configurable_account() else {
             return Err(SignatureVerifierError::invalid_format().into());
         };
         let config = signature.config();
+        let spec = self.storage.spec();
         let (commitment, has_code) = self.storage.with_account_info(account, |info| {
-            let commitment = decode_config_commitment(&info.extension, true)
-                .map_err(|error| TempoPrecompileError::Fatal(error.to_string()))?;
-            Ok((commitment, !info.is_empty_code_hash()))
+            Ok((
+                account_config_commitment(info, spec)?,
+                info.code_hash != KECCAK256_EMPTY,
+            ))
         })?;
 
         let initial_proof_gas = if commitment.is_zero() {
-            initial_account_proof_gas(config)
+            initial_account_proof_gas(config)?
         } else {
             0
         };
-        self.storage
-            .deduct_gas(multisig_verification_gas(signature) + initial_proof_gas)?;
+        let verification_gas = configurable_account_verification_gas(signature)?
+            .checked_add(initial_proof_gas)
+            .ok_or(TempoPrecompileError::OutOfGas)?;
+        self.storage.deduct_gas(verification_gas)?;
         if signature.account() != account
             || !valid_account(account, self.storage.spec())
             || has_code
@@ -112,7 +118,7 @@ impl SignatureVerifier {
         }
         let factory = self
             .storage
-            .with_block_env(TempoBlockEnv::configured_multisig_recovery_factory);
+            .with_block_env(|block_env| block_env.ext.configurable_account_recovery_factory());
         if signature
             .validate_account_commitment(commitment, factory)
             .is_err()
@@ -188,33 +194,47 @@ struct RecoveredKeychainKey {
     signature_type: u8,
 }
 
-/// Full multisig verification cost for a registered account, before account access.
+/// Full configurable account verification cost for a registered account, before account access.
 /// Initial address derivation is charged separately when the stored commitment is zero.
-pub fn multisig_verification_gas(signature: &MultisigSignature) -> u64 {
+///
+/// Fails with `OutOfGas` if the cost overflows `u64`.
+pub fn configurable_account_verification_gas(
+    signature: &ConfigurableAccountSignature,
+) -> Result<u64> {
     let mut witness = rlp::encode(signature.account());
     signature.config().encode(&mut witness);
-    get_tokens_in_calldata_istanbul(&witness) * STANDARD_TOKEN_COST
-        + keccak_cost(signature.config().commitment_preimage_len())
-        + keccak_cost(MULTISIG_SIGNATURE_DOMAIN.len() + 32 + 20 + 8)
-        + signature
-            .signatures()
-            .iter()
-            .map(primitive_verification_gas)
-            .sum::<u64>()
+    signature
+        .signatures()
+        .iter()
+        .map(primitive_verification_gas)
+        .chain([
+            calldata_gas(&witness),
+            keccak_cost(signature.config().commitment_preimage_len())?,
+            keccak_cost(CONFIGURABLE_ACCOUNT_SIGNATURE_DOMAIN.len() + 32 + 20 + 8)?,
+        ])
+        .try_fold(0u64, u64::checked_add)
+        .ok_or(TempoPrecompileError::OutOfGas)
 }
 
 /// Full primitive verification cost, including `WebAuthn` data calldata.
 ///
-/// Unlike `tempo_revm`'s `primitive_signature_verification_gas`, this does not subtract the
+/// Unlike `tempo_evm`'s `primitive_signature_verification_gas`, this does not subtract the
 /// ecrecover baseline already covered by ordinary intrinsic gas.
 pub fn primitive_verification_gas(signature: &PrimitiveSignature) -> u64 {
     let webauthn_data_gas = match signature {
-        PrimitiveSignature::WebAuthn(sig) => {
-            get_tokens_in_calldata_istanbul(&sig.webauthn_data) * STANDARD_TOKEN_COST
-        }
-        _ => 0,
+        PrimitiveSignature::WebAuthn(sig) => calldata_gas(&sig.webauthn_data),
+        PrimitiveSignature::Secp256k1(_) | PrimitiveSignature::P256(_) => 0,
     };
     signature.base_verification_gas() + webauthn_data_gas
+}
+
+/// Istanbul calldata cost of `input`: one token per zero byte, four per nonzero byte.
+fn calldata_gas(input: &[u8]) -> u64 {
+    input
+        .iter()
+        .map(|byte| if *byte == 0 { 1 } else { 4 })
+        .sum::<u64>()
+        * u64::from(STANDARD_TOKEN_COST)
 }
 
 #[cfg(test)]
