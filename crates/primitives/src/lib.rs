@@ -33,6 +33,7 @@ extern crate alloc;
 pub mod account;
 
 use once_cell as _;
+// TODO: Remove this import and feature-only dependency after updating Reth's feature forwarding.
 #[cfg(feature = "rpc")]
 use reth_evm as _;
 
