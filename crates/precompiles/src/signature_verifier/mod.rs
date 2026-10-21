@@ -19,6 +19,7 @@ use tempo_primitives::transaction::{
     configurable_account::CONFIGURABLE_ACCOUNT_SIGNATURE_DOMAIN,
     tt_signature::{AccountSignature, KeychainSignature, PrimitiveSignature, TempoSignature},
 };
+use tracing::trace;
 
 #[contract(addr = SIGNATURE_VERIFIER_ADDRESS)]
 pub struct SignatureVerifier {}
@@ -87,8 +88,10 @@ impl SignatureVerifier {
         hash: B256,
         bytes: &[u8],
     ) -> Result<bool> {
-        let signature = TempoSignature::from_bytes(bytes)
-            .map_err(|_| SignatureVerifierError::invalid_format())?;
+        let signature = TempoSignature::from_bytes(bytes).map_err(|error| {
+            trace!(%error, "malformed configurable account signature");
+            SignatureVerifierError::invalid_format()
+        })?;
         let Some(signature) = signature.as_configurable_account() else {
             return Err(SignatureVerifierError::invalid_format().into());
         };
@@ -126,9 +129,10 @@ impl SignatureVerifier {
             return Ok(false);
         }
 
-        signature
-            .verify_approvals(hash)
-            .map_err(|_| SignatureVerifierError::invalid_signature())?;
+        signature.verify_approvals(hash).map_err(|error| {
+            trace!(%error, "invalid configurable account approvals");
+            SignatureVerifierError::invalid_signature()
+        })?;
         Ok(true)
     }
 
@@ -157,7 +161,10 @@ impl SignatureVerifier {
         ) {
             Ok(key) => Ok(Some(key)),
             Err(err) if err.is_system_error() => Err(err),
-            Err(_) => Ok(None),
+            Err(err) => {
+                trace!(?err, %account, %key_id, "keychain rejected the key");
+                Ok(None)
+            }
         }
     }
 
@@ -220,7 +227,7 @@ pub fn configurable_account_verification_gas(
 ///
 /// Unlike `tempo_evm`'s `primitive_signature_verification_gas`, this does not subtract the
 /// ecrecover baseline already covered by ordinary intrinsic gas.
-pub fn primitive_verification_gas(signature: &PrimitiveSignature) -> u64 {
+fn primitive_verification_gas(signature: &PrimitiveSignature) -> u64 {
     let webauthn_data_gas = match signature {
         PrimitiveSignature::WebAuthn(sig) => calldata_gas(&sig.webauthn_data),
         PrimitiveSignature::Secp256k1(_) | PrimitiveSignature::P256(_) => 0,

@@ -596,11 +596,9 @@ impl FromTxWithEncoded<TempoTxEnvelope> for TempoTxEnv {
         let mut tx_env = Self::from_recovered_tx(tx.1);
         // Configurable-account cryptography may only be skipped by an explicit simulation caller.
         if is_simulation
-            && tx_env.as_aa().is_none_or(|aa| {
-                crate::handler::configurable_account::authorizations(aa)
-                    .iter()
-                    .all(Option::is_none)
-            })
+            && tx_env
+                .as_aa()
+                .is_none_or(|aa| aa.native_authorizations().iter().all(Option::is_none))
         {
             tx_env.execution_context = ExecutionContext::Simulation;
         }

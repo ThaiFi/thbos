@@ -902,7 +902,7 @@ mod tests {
         registry::{HandlerResult, TxRegistry, TxRequest, handler},
     };
     use reth_chainspec::EthChainSpec;
-    use reth_primitives_traits::SignedTransaction;
+    use reth_primitives_traits::{Account, Bytecode, SignedTransaction};
     use reth_provider::test_utils::{ExtendedAccount, MockEthProvider};
     use reth_storage_api::{AccountReader, BlockNumReader, BytecodeReader};
     use reth_transaction_pool::{

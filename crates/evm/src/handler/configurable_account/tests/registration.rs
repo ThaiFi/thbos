@@ -4,10 +4,10 @@ use super::{native_access::Setup, *};
 use crate::handler::{intrinsic_gas, nonce_intrinsic_gas, prepare_aa};
 use alloy_eips::eip7702::Authorization;
 use alloy_sol_types::SolCall;
+use commonware_utils::NZU64;
 use evm2::{bytecode::Bytecode, registry::TxRequest};
-use std::num::NonZeroU64;
 use tempo_contracts::precompiles::{CONFIGURABLE_ACCOUNT_ADDRESS, IConfigurableAccount};
-use tempo_precompiles::{PATH_USD_ADDRESS, test_util::TIP20Setup};
+use tempo_precompiles::{PATH_USD_ADDRESS, TempoPrecompiles, test_util::TIP20Setup};
 use tempo_primitives::{account::decode_config_commitment, transaction::TempoSignedAuthorization};
 
 const TARGET: Address = Address::repeat_byte(0x33);
@@ -37,7 +37,7 @@ impl Sender {
             nonce_key,
             gas_limit,
             calls,
-            valid_before: expiring.then(|| NonZeroU64::new(10).unwrap()),
+            valid_before: expiring.then_some(NZU64!(10)),
             ..base_tx()
         };
         // An expiring-nonce transaction is sponsored: the fee payer is a role account.
@@ -82,7 +82,7 @@ impl Sender {
     }
 
     fn expected_commitment(&self) -> B256 {
-        authorizations(self.setup.env.as_aa().unwrap())[0]
+        self.setup.env.as_aa().unwrap().native_authorizations()[0]
             .as_ref()
             .unwrap()
             .signature
@@ -202,12 +202,16 @@ fn native_registration_charges_empty_sender_creation_once() {
         // The cost of the same transaction without any configurable-account charge.
         let (base_regular, base_state, _) = intrinsic_gas(&sender.setup.evm, aa).unwrap();
         let (nonce_regular, nonce_state) = nonce_intrinsic_gas(&sender.setup.evm, aa);
-        let config = authorizations(aa)[0].as_ref().unwrap().signature.config();
+        let config = aa.native_authorizations()[0]
+            .as_ref()
+            .unwrap()
+            .signature
+            .config();
         let proof_and_write = initial_account_proof_gas(config).unwrap() + 20_000;
         // The fee payer is a role account, charged one cold access.
         let fee_payer_access = if nonce_key == TEMPO_EXPIRING_NONCE_KEY {
             u64::from(params.get(GasId::WarmStorageReadCost))
-                + u64::from(params.get(GasId::ColdAccountAdditionalCost))
+                + params.cold_account_additional_cost()
         } else {
             0
         };
@@ -235,7 +239,7 @@ fn native_registration_first_call_failure_and_retry(failing_code: &'static [u8])
     let expected = sender.expected_commitment();
     assert_ne!(expected, B256::ZERO);
     assert_eq!(sender.commitment(), B256::ZERO);
-    for (nonce, code, succeeds) in [(0, failing_code, false), (1, &[0x00][..], true)] {
+    for (nonce, (code, succeeds)) in (0..).zip([(failing_code, false), (&[0x00][..], true)]) {
         sender.setup.evm.overlay_db_mut().insert_account_info(
             &TARGET,
             AccountInfo::default().with_code(Bytecode::new_legacy(Bytes::copy_from_slice(code))),
@@ -315,7 +319,7 @@ fn native_getter_observes_first_registration_during_execution() {
     }];
     let mut sender = Sender::for_native(native, U256::ZERO, 0, 1_000_000, calls);
     let expected = sender.expected_commitment();
-    let precompiles = tempo_precompiles::TempoPrecompiles::<crate::TempoEvmTypes>::new(
+    let precompiles = TempoPrecompiles::<TempoEvmTypes>::new(
         TempoHardfork::T14,
         sender.setup.evm.ext().actions.clone(),
         sender.setup.evm.ext().non_creditable_slots.clone(),
@@ -331,7 +335,7 @@ fn native_getter_observes_first_registration_during_execution() {
         .unwrap()
         .commit();
     assert!(output.status, "{output:?}");
-    assert_eq!(output.output.as_ref(), expected.as_slice());
+    assert_eq!(output.output, Bytes::from(expected));
 }
 
 #[test]

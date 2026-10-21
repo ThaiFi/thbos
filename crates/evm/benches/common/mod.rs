@@ -395,12 +395,13 @@ fn insert_account(
     address: Address,
     account: &AccountInfo,
 ) {
+    let info = account;
+    let bytecode_hash = info.code_hash;
     let account = RethAccount {
-        // Keep `Some` even for empty code.
-        bytecode_hash: Some(account.code_hash),
-        nonce: account.nonce,
-        balance: account.balance,
-        extension: RethAccountExtension::from_shared(account.extension.clone().into_shared()),
+        nonce: info.nonce,
+        balance: info.balance,
+        bytecode_hash: Some(bytecode_hash),
+        extension: RethAccountExtension::from_shared(info.extension.clone().into_shared()),
     };
     cache.insert_account(address, Some(account.clone()));
     accounts.insert(address, account);

@@ -1641,6 +1641,7 @@ mod tests {
         test_util::TIP20Setup,
     };
     use alloy::primitives::{Address, B256, Bytes, TxKind, U256};
+    use evm2::PrecompileError;
     use tempo_chainspec::hardfork::TempoHardfork;
     use tempo_contracts::precompiles::{DEFAULT_FEE_TOKEN, IAccountKeychain::SignatureType};
 
@@ -1964,7 +1965,7 @@ mod tests {
                         );
                         if result.is_err() {
                             assert!(
-                                matches!(result, Err(evm2::PrecompileError::Revert(_))),
+                                matches!(result, Err(PrecompileError::Revert(_))),
                                 "{spec:?}, {selector:?}, {delegate_case:?}: {result:?}"
                             );
                             assert_eq!(

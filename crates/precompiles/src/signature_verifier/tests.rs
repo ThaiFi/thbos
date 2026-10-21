@@ -11,7 +11,7 @@ use alloy_signer::SignerSync;
 use alloy_signer_local::PrivateKeySigner;
 use eyre::OptionExt;
 use p256::{ecdsa::SigningKey, elliptic_curve::rand_core::OsRng};
-use tempo_chainspec::hardfork::TempoHardfork;
+use tempo_chainspec::{gas_params, hardfork::TempoHardfork};
 use tempo_contracts::precompiles::ISignatureVerifier;
 use tempo_primitives::transaction::{
     ConfigurableAccountConfig, ConfigurableAccountOwner, configurable_account_digest,
@@ -436,7 +436,7 @@ fn verify_configurable_account_staticcall_charges_gas_and_halts_when_short() -> 
     }
     .abi_encode();
     let spec = TempoHardfork::T14;
-    let version = tempo_chainspec::gas_params::version(SpecId::OSAKA, spec, false);
+    let version = gas_params::version(SpecId::OSAKA, spec, false);
     let parsed = TempoSignature::from_bytes(&signature).unwrap();
     let expected = input_cost(spec, calldata.len())?
         + u64::from(version.gas_params.get(GasId::WarmStorageReadCost))

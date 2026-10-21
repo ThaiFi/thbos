@@ -3,6 +3,7 @@
 use alloy_primitives::{Address, TxKind};
 use alloy_rpc_types_eth::TransactionRequest;
 use reth_rpc_convert::TryIntoTxEnv;
+use reth_rpc_eth_types::EthApiError;
 use tempo_alloy::rpc::TempoTransactionRequest;
 use tempo_evm::TempoEvmEnv;
 use tempo_primitives::SignatureType;
@@ -35,5 +36,5 @@ fn configurable_account_key_type_cannot_fabricate_a_primitive_simulation_signatu
     let error = aa_request(SignatureType::ConfigurableAccount)
         .try_into_tx_env(&env)
         .expect_err("a configurable account key type has no primitive stand-in");
-    assert!(error.to_string().contains("configuration witness"));
+    assert!(matches!(error, EthApiError::InvalidParams(_)));
 }
