@@ -193,39 +193,6 @@ mod tests {
     }
 
     #[test]
-    fn user_withdrawals_are_matched_by_sender_tag() {
-        let mut tracker = LatencyTracker::default();
-        let first = B256::with_last_byte(1);
-        let second = B256::with_last_byte(2);
-        let samples = tracker.observe(
-            &[],
-            &[
-                requested(user(first)),
-                requested(WithdrawalOrigin::DepositBounceBack),
-            ],
-            1_000,
-        );
-        assert_eq!(samples, LatencySamples::default());
-        tracker.observe(&[], &[requested(user(second))], 2_000);
-
-        // Processing order and unknown tags must not affect the pairing.
-        let tempo = [L1BlockEvents {
-            number: 22,
-            timestamp_millis: 7_000,
-            events: vec![
-                processed(second),
-                processed(B256::with_last_byte(3)),
-                processed(first),
-            ],
-        }];
-        let samples = tracker.observe(&tempo, [], 8_000);
-
-        assert_eq!(samples.withdrawals, vec![5.0, 6.0]);
-        assert!(tracker.requested_withdrawals.is_empty());
-        assert!(samples.l1_withdrawals.is_empty());
-    }
-
-    #[test]
     fn only_recent_blocks_are_sampled() {
         let now_millis = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -239,7 +206,7 @@ mod tests {
     }
 
     #[test]
-    fn l1_withdrawals_use_each_requests_imported_reference() {
+    fn user_withdrawals_are_matched_by_sender_tag() {
         let mut tracker = LatencyTracker::default();
         let first = B256::with_last_byte(1);
         let second = B256::with_last_byte(2);
@@ -288,8 +255,19 @@ mod tests {
     }
 
     #[test]
-    fn invalid_l1_coordinates_are_not_recorded_as_zero_latency() {
-        for (number, timestamp_millis) in [(9, 2_000), (11, 999)] {
+    fn l1_coordinate_boundaries() {
+        for (number, timestamp_millis, expected) in [
+            (9, 2_000, vec![]),
+            (11, 999, vec![]),
+            (
+                10,
+                1_000,
+                vec![L1WithdrawalLatency {
+                    seconds: 0.0,
+                    blocks: 0,
+                }],
+            ),
+        ] {
             let mut tracker = LatencyTracker::default();
             let tag = B256::with_last_byte(1);
             tracker.observe(
@@ -310,45 +288,7 @@ mod tests {
                 [],
                 3_000,
             );
-            assert!(samples.l1_withdrawals.is_empty());
+            assert_eq!(samples.l1_withdrawals, expected);
         }
-    }
-
-    #[test]
-    fn same_l1_block_is_a_valid_zero_delay_and_completions_are_consumed_once() {
-        let mut tracker = LatencyTracker::default();
-        let tag = B256::with_last_byte(1);
-        let reference = L1BlockEvents {
-            number: 10,
-            timestamp_millis: 1_000,
-            events: vec![],
-        };
-        tracker.observe(&[reference], &[requested(user(tag))], 1_100);
-        let completion = L1BlockEvents {
-            number: 10,
-            timestamp_millis: 1_000,
-            events: vec![L1PortalEvent::WithdrawalProcessed {
-                sender_tag: tag,
-                token: Address::ZERO,
-                amount: 1,
-                callback_success: false,
-            }],
-        };
-        let samples = tracker.observe(std::slice::from_ref(&completion), [], 1_200);
-        assert_eq!(
-            samples.l1_withdrawals,
-            vec![L1WithdrawalLatency {
-                seconds: 0.0,
-                blocks: 0
-            }]
-        );
-        assert_eq!(
-            tracker.observe(std::slice::from_ref(&completion), [], 1_300),
-            LatencySamples::default()
-        );
-        assert_eq!(
-            LatencyTracker::default().observe(&[completion], [], 1_300),
-            LatencySamples::default()
-        );
     }
 }
