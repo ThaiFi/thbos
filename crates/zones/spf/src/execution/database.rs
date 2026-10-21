@@ -8,7 +8,10 @@ use alloy_primitives::{
     Address, B256, Bytes, U256, keccak256,
     map::{AddressMap, B256Map, U256Map},
 };
-use evm2::{bytecode::Bytecode, evm::AccountInfo};
+use evm2::{
+    bytecode::Bytecode,
+    evm::{AccountExtension, AccountInfo},
+};
 use reth_evm::Database;
 use reth_execution_types::native_account;
 use reth_trie_common::{HashedPostState, KeccakKeyHasher};
@@ -128,6 +131,7 @@ impl Database for WitnessDatabase {
             nonce: account.nonce,
             code_hash: account.code_hash,
             code: None,
+            extension: AccountExtension::from_shared(account.extension.into_shared()),
             _non_exhaustive: (),
         });
         self.accounts.insert(*address, account.clone());
