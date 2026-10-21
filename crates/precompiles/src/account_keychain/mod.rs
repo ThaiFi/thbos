@@ -1982,7 +1982,7 @@ mod tests {
     }
 
     #[test]
-    fn test_multisig_parent_code_grant_guards() -> eyre::Result<()> {
+    fn test_configurable_account_parent_code_grant_guards() -> eyre::Result<()> {
         #[derive(Clone, Copy, Debug)]
         enum ParentCode {
             Empty,

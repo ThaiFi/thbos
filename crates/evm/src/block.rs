@@ -293,7 +293,10 @@ impl<'a> TempoBlockExecutor<'a> {
     ///
     /// Installs `0xEF` marker bytecode and raises the nonce to at least one, preserving the
     /// balance and storage.
-    fn reserve_multisig_factory(&mut self, address: Address) -> Result<(), BlockExecutionError> {
+    fn reserve_configurable_account_recovery_factory(
+        &mut self,
+        address: Address,
+    ) -> Result<(), BlockExecutionError> {
         let original = match self.evm_mut().state_mut().account_info_untracked(&address) {
             Ok(info) => info,
             Err(error) => return Err(map_database_error(error)),
@@ -639,7 +642,7 @@ impl<'a> BlockExecutor for TempoBlockExecutor<'a> {
                 .ext
                 .configurable_account_recovery_factory()
             {
-                self.reserve_multisig_factory(factory)?;
+                self.reserve_configurable_account_recovery_factory(factory)?;
             }
         }
         // Chains starting at T13 supply their runtime code in genesis. Preserve those

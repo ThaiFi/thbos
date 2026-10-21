@@ -68,7 +68,7 @@ impl RootRole {
         self,
         chain_id: u64,
         root: &PrivateKeySigner,
-        account: &NativeAccount,
+        account: &ConfigurableAccount,
         other: &PrivateKeySigner,
         valid_before: u64,
     ) -> eyre::Result<TempoTxEnvelope> {
@@ -141,9 +141,9 @@ struct VoucherChannel {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn native_rpc_registration_revert_retry_and_rotation() -> eyre::Result<()> {
+async fn configurable_account_rpc_registration_revert_retry_and_rotation() -> eyre::Result<()> {
     let mut env = environment().await?;
-    let mut account = NativeAccount::new(0x11, 2);
+    let mut account = ConfigurableAccount::new(0x11, 2);
     env.fund_account(account.address).await?;
     assert_eq!(commitment(&env, account.address).await?, B256::ZERO);
     let request = account.simulation_request();
@@ -225,7 +225,7 @@ async fn native_rpc_registration_revert_retry_and_rotation() -> eyre::Result<()>
         initial_word
     );
 
-    let replacement = NativeAccount::new(0x21, 2);
+    let replacement = ConfigurableAccount::new(0x21, 2);
     let (next, rotate) = account.rotate_to(&replacement);
     // The current config signs a transaction that waits in the pool behind the rotation.
     let mut stale = account.transaction(&env, vec![noop()]);
@@ -257,9 +257,9 @@ async fn native_rpc_registration_revert_retry_and_rotation() -> eyre::Result<()>
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn native_rpc_historical_state_and_account_overrides() -> eyre::Result<()> {
+async fn configurable_account_rpc_historical_state_and_account_overrides() -> eyre::Result<()> {
     let mut env = environment().await?;
-    let mut account = NativeAccount::new(0x18, 2);
+    let mut account = ConfigurableAccount::new(0x18, 2);
     env.fund_account(account.address).await?;
     let tx = account.transaction(&env, vec![noop()]);
     let signature = account.sign(&tx)?;
@@ -269,7 +269,7 @@ async fn native_rpc_historical_state_and_account_overrides() -> eyre::Result<()>
     let initial = account.config.commitment().unwrap();
     let old_request = account.simulation_request();
 
-    let replacement = NativeAccount::new(0x28, 2);
+    let replacement = ConfigurableAccount::new(0x28, 2);
     let (next, rotate) = account.rotate_to(&replacement);
     let tx = account.transaction(&env, vec![rotate]);
     let signature = account.sign(&tx)?;
@@ -332,9 +332,9 @@ async fn native_rpc_historical_state_and_account_overrides() -> eyre::Result<()>
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn native_rpc_fill_and_access_list_preserve_authority() -> eyre::Result<()> {
+async fn configurable_account_rpc_fill_and_access_list_preserve_authority() -> eyre::Result<()> {
     let mut env = environment().await?;
-    let mut account = NativeAccount::new(0x19, 3);
+    let mut account = ConfigurableAccount::new(0x19, 3);
     env.fund_account(account.address).await?;
     let provider = tempo_provider(&env);
     let mut request = account.simulation_request();
@@ -430,10 +430,11 @@ async fn native_rpc_fill_and_access_list_preserve_authority() -> eyre::Result<()
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn native_rpc_delegate_rotation_preserves_grant_and_spending() -> eyre::Result<()> {
+async fn configurable_account_rpc_delegate_rotation_preserves_grant_and_spending()
+-> eyre::Result<()> {
     let mut env = environment().await?;
-    let mut parent = NativeAccount::new(0x31, 2);
-    let mut delegate = NativeAccount::new(0x41, 2);
+    let mut parent = ConfigurableAccount::new(0x31, 2);
+    let mut delegate = ConfigurableAccount::new(0x41, 2);
     env.fund_account(parent.address).await?;
     env.fund_account(delegate.address).await?;
     let limit = U256::from(100_000_000_000u64);
@@ -480,7 +481,7 @@ async fn native_rpc_delegate_rotation_preserves_grant_and_spending() -> eyre::Re
         .call()
         .await?;
 
-    let replacement = NativeAccount::new(0x51, 2);
+    let replacement = ConfigurableAccount::new(0x51, 2);
     let (next, rotate) = delegate.rotate_to(&replacement);
     let tx = delegate.transaction(&env, vec![rotate]);
     let signature = delegate.sign(&tx)?;
@@ -534,10 +535,11 @@ async fn native_rpc_delegate_rotation_preserves_grant_and_spending() -> eyre::Re
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn native_rpc_maximum_mixed_quorums_and_validation_cost_order() -> eyre::Result<()> {
+async fn configurable_account_rpc_maximum_mixed_quorums_and_validation_cost_order()
+-> eyre::Result<()> {
     let mut env = environment().await?;
-    let mut parent = NativeAccount::new(0x61, 8);
-    let delegate = NativeAccount::new(0x81, 8);
+    let mut parent = ConfigurableAccount::new(0x61, 8);
+    let delegate = ConfigurableAccount::new(0x81, 8);
     let grant = KeyAuthorization::unrestricted(
         env.chain_id(),
         SignatureType::ConfigurableAccount,
@@ -650,7 +652,7 @@ async fn eoa_migration_rpc_estimate_send_and_rotate() -> eyre::Result<()> {
     {
         let seed = 0x30 + 0x10 * index as u8;
         let root = OwnerKey::new(seed, kind);
-        let mut account = NativeAccount::migrated(root.address(), seed + 1, 3);
+        let mut account = ConfigurableAccount::migrated(root.address(), seed + 1, 3);
         env.fund_account(account.address).await?;
         assert_eq!(commitment(&env, account.address).await?, B256::ZERO);
         let expected = account.config.commitment().unwrap();
@@ -730,7 +732,7 @@ async fn eoa_migration_rpc_estimate_send_and_rotate() -> eyre::Result<()> {
         );
 
         // The version-one witness signs the next transaction, which rotates to version two.
-        let replacement = NativeAccount::new(seed + 8, 2);
+        let replacement = ConfigurableAccount::new(seed + 8, 2);
         let (next, rotate) = account.rotate_to(&replacement);
         let tx = account.transaction(&env, vec![rotate]);
         let signature = account.sign(&tx)?;
@@ -756,7 +758,7 @@ async fn retired_root_rpc_rejects_send_and_allows_calls() -> eyre::Result<()> {
     {
         let seed = 0x30 + 0x10 * index as u8;
         let root = OwnerKey::new(seed, kind);
-        let mut account = NativeAccount::migrated(root.address(), seed + 1, 3);
+        let mut account = ConfigurableAccount::migrated(root.address(), seed + 1, 3);
         env.fund_account(account.address).await?;
 
         // Before the migration the root key is the account's authority.
@@ -831,7 +833,7 @@ async fn retired_root_rpc_rejects_send_and_allows_calls() -> eyre::Result<()> {
 async fn root_transaction_queued_behind_migration_is_not_included() -> eyre::Result<()> {
     let mut env = environment().await?;
     let root = OwnerKey::new(0x30, SignatureType::Secp256k1);
-    let mut account = NativeAccount::migrated(root.address(), 0x31, 3);
+    let mut account = ConfigurableAccount::migrated(root.address(), 0x31, 3);
     env.fund_account(account.address).await?;
 
     // The migration (nonce n) and a root-signed transaction (nonce n + 1) are pending together.
@@ -942,7 +944,7 @@ fn legacy_signed(
 /// tip than the default, so the builder runs it before the other transactions.
 fn migration(
     env: &Localnet,
-    account: &NativeAccount,
+    account: &ConfigurableAccount,
     root: &PrivateKeySigner,
 ) -> eyre::Result<TempoTxEnvelope> {
     let mut tx = account.transaction(env, vec![account.upgrade_call()]);
@@ -972,7 +974,7 @@ async fn pend(env: &Localnet, txs: &[&TempoTxEnvelope]) -> eyre::Result<Vec<B256
 /// Builds the next block and checks that it holds the successful migration `hash` of `account`.
 async fn mine_migration(
     env: &mut Localnet,
-    account: &NativeAccount,
+    account: &ConfigurableAccount,
     hash: B256,
 ) -> eyre::Result<()> {
     env.setup.node.advance_block().await?;
@@ -1011,7 +1013,7 @@ async fn retired_root_pending_transactions_evicted() -> eyre::Result<()> {
         let seed = 0x20 + 0x10 * index as u8;
         let root = PrivateKeySigner::from_bytes(&B256::repeat_byte(seed)).unwrap();
         let other = PrivateKeySigner::from_bytes(&B256::repeat_byte(seed + 4)).unwrap();
-        let account = NativeAccount::migrated(root.address(), seed + 1, 3);
+        let account = ConfigurableAccount::migrated(root.address(), seed + 1, 3);
         env.fund_account(account.address).await?;
         env.fund_account(other.address()).await?;
         let latest = provider
@@ -1052,7 +1054,7 @@ async fn retired_root_leaves_unrelated_pending_transactions_valid() -> eyre::Res
     let key = PrivateKeySigner::from_bytes(&B256::repeat_byte(0x34)).unwrap();
     let bystanders =
         [0x40, 0x50].map(|seed| PrivateKeySigner::from_bytes(&B256::repeat_byte(seed)).unwrap());
-    let mut account = NativeAccount::migrated(root.address(), 0x31, 3);
+    let mut account = ConfigurableAccount::migrated(root.address(), 0x31, 3);
     for address in [
         account.address,
         bystanders[0].address(),
@@ -1130,7 +1132,7 @@ async fn retired_root_reorg_evicts_pending_transactions() -> eyre::Result<()> {
     let sponsor = PrivateKeySigner::from_bytes(&B256::repeat_byte(0x41)).unwrap();
     let grantor = PrivateKeySigner::from_bytes(&B256::repeat_byte(0x42)).unwrap();
     let grantee = PrivateKeySigner::from_bytes(&B256::repeat_byte(0x43)).unwrap();
-    let mut account = NativeAccount::migrated(root.address(), 0x31, 3);
+    let mut account = ConfigurableAccount::migrated(root.address(), 0x31, 3);
     for address in [
         account.address,
         bystander.address(),
@@ -1269,11 +1271,11 @@ async fn retired_root_reorg_evicts_pending_transactions() -> eyre::Result<()> {
 }
 
 /// A reorg onto a chain without an account's migration evicts the pending transactions that its
-/// native config signs: as the sender, as the grant signer of its access key and as the access key
-/// of another account (TIP-1112). The new chain changes no commitment, so only the reorg marks
-/// them for revalidation.
+/// configurable account config signs: as the sender, as the grant signer of its access key and as
+/// the access key of another account (TIP-1112). The new chain changes no commitment, so only the
+/// reorg marks them for revalidation.
 #[tokio::test(flavor = "multi_thread")]
-async fn reorg_without_migration_evicts_native_transactions() -> eyre::Result<()> {
+async fn reorg_without_migration_evicts_configurable_account_transactions() -> eyre::Result<()> {
     let mut env = environment().await?;
     // Keep genesis finalized, so the blocks below can be reorged.
     env.setup.node.set_finality(Finality::Keep);
@@ -1281,7 +1283,7 @@ async fn reorg_without_migration_evicts_native_transactions() -> eyre::Result<()
     let root = PrivateKeySigner::from_bytes(&B256::repeat_byte(0x30)).unwrap();
     let key = PrivateKeySigner::from_bytes(&B256::repeat_byte(0x34)).unwrap();
     let parent = PrivateKeySigner::from_bytes(&B256::repeat_byte(0x40)).unwrap();
-    let mut account = NativeAccount::migrated(root.address(), 0x31, 3);
+    let mut account = ConfigurableAccount::migrated(root.address(), 0x31, 3);
     for address in [account.address, parent.address()] {
         env.fund_account(address).await?;
     }
@@ -1346,7 +1348,7 @@ async fn parallel_builder_skips_root_payment_after_same_block_migration() -> eyr
     let OwnerKey::Secp(root) = &migrating else {
         unreachable!("the migrating owner is a secp256k1 key")
     };
-    let account = NativeAccount::migrated(migrating.address(), 0x31, 3);
+    let account = ConfigurableAccount::migrated(migrating.address(), 0x31, 3);
     let sponsored = OwnerKey::new(0x50, SignatureType::Secp256k1);
     let bystander = OwnerKey::new(0x40, SignatureType::Secp256k1);
     for address in [account.address, sponsored.address(), bystander.address()] {
@@ -1444,7 +1446,7 @@ async fn parallel_builder_runs_voucher_redemption_after_same_block_migration(
     // Fresh accounts per variant: the migrating payer, a live payer and one payee for each.
     let (migrating, live) = (key(0), key(1));
     let (migrating_payee, live_payee) = (key(2), key(3));
-    let mut account = NativeAccount::migrated(migrating.address(), seed + 4, 3);
+    let mut account = ConfigurableAccount::migrated(migrating.address(), seed + 4, 3);
     for address in [
         migrating.address(),
         live.address(),

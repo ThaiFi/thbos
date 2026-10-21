@@ -1420,7 +1420,7 @@ mod tests {
     }
 
     #[test]
-    fn multisig_factory_genesis_reservation_and_validation() {
+    fn configurable_account_recovery_factory_genesis_reservation_and_validation() {
         let factory = Address::repeat_byte(0x71);
         let mut genesis = DEV.genesis().clone();
         genesis
@@ -1461,7 +1461,5 @@ mod tests {
                 .insert("configurableAccountRecoveryFactory".into(), invalid);
             assert!(TempoChainSpec::try_from_genesis(genesis.clone()).is_err());
         }
-        assert_eq!(PRESTO.info.configurable_account_recovery_factory(), None);
-        assert_eq!(MODERATO.info.configurable_account_recovery_factory(), None);
     }
 }

@@ -99,8 +99,8 @@ const SPLIT_NEW_ACCOUNT_COST: [(GasId, u32); 2] = [
 /// warm store resets (2,900 each).
 const EXPIRING_NONCE_GAS: u64 = 2 * 2_100 + 100 + 3 * 2_900;
 
-/// The hash that the multisig verification tests approve.
-const MULTISIG_HASH: B256 = B256::repeat_byte(0x42);
+/// The hash that the configurable account verification tests approve.
+const CONFIGURABLE_ACCOUNT_HASH: B256 = B256::repeat_byte(0x42);
 
 /// Settled amount, deposit and close request of the channel, with the balances of its payee and
 /// payer and of the precompile that holds the deposit.
@@ -294,7 +294,7 @@ enum SignedAction {
 enum Verifier {
     Keychain,
     KeychainAdmin,
-    Multisig,
+    ConfigurableAccount,
 }
 
 impl Verifier {
@@ -312,7 +312,7 @@ impl Verifier {
                 signature,
             }
             .abi_encode(),
-            Self::Multisig => ISignatureVerifier::verifyConfigurableAccountCall {
+            Self::ConfigurableAccount => ISignatureVerifier::verifyConfigurableAccountCall {
                 account,
                 hash,
                 signature,
@@ -469,7 +469,7 @@ fn native_rotation_rejects_access_keys_and_callbacks() {
             if admin {
                 authorization = authorization.into_admin(f.account);
             }
-            let approval = multisig_approval(
+            let approval = configurable_account_approval(
                 f.account,
                 &f.config,
                 &f.owner,
@@ -916,7 +916,7 @@ fn sender_registration_gas(lane: NonceLane, create_first: bool, empty_sender: bo
         f.getter()
     };
     let tx = lane_tx(&mut f, lane, vec![call]);
-    let tx = multisig_signed(&f, tx);
+    let tx = configurable_account_signed(&f, tx);
     block_gas(&mut f, &tx)
 }
 
@@ -946,7 +946,7 @@ fn delegate_registration_gas(empty_delegate: bool) -> BlockGas {
         ..aa_tx(0, vec![f.getter()])
     };
     let digest = KeychainSignature::signing_hash(tx.signature_hash(), parent);
-    let signature = multisig_approval(delegate, &config, &key, digest);
+    let signature = configurable_account_approval(delegate, &config, &key, digest);
     let tx = tx.into_signed(TempoSignature::Keychain(KeychainSignature::new(
         parent,
         AccountSignature::ConfigurableAccount(signature),
@@ -1298,7 +1298,7 @@ fn native_signed_parent_delegate_case(outcome: GrantOutcome, gas_price: u128) {
                     .collect(),
             );
             let grant_signature = if parent_native {
-                AccountSignature::ConfigurableAccount(multisig_approval(
+                AccountSignature::ConfigurableAccount(configurable_account_approval(
                     f.account,
                     &f.config,
                     &f.owner,
@@ -1338,7 +1338,7 @@ fn native_signed_parent_delegate_case(outcome: GrantOutcome, gas_price: u128) {
             let sign = |tx: &TempoTransaction| {
                 let digest = KeychainSignature::signing_hash(tx.signature_hash(), parent);
                 let signature = if delegate_native {
-                    AccountSignature::ConfigurableAccount(multisig_approval(
+                    AccountSignature::ConfigurableAccount(configurable_account_approval(
                         delegate, &config, &signer, digest,
                     ))
                 } else {
@@ -1858,7 +1858,8 @@ fn keychain_tx(f: &Fixture, key: &PrivateKeySigner, nonce: u64, calls: Vec<Call>
     keychain_signed(aa_tx(nonce, calls), key, f.account)
 }
 
-/// A contract that forwards its calldata to the multisig precompile and reverts with the result.
+/// A contract that forwards its calldata to the configurable account precompile and reverts with
+/// the result.
 fn forwarder(f: &mut Fixture) -> Call {
     let code = [
         bytes!("365f5f375f5f365f5f73").as_ref(),
@@ -1869,8 +1870,8 @@ fn forwarder(f: &mut Fixture) -> Call {
     f.install_contract(Address::repeat_byte(0x55), code)
 }
 
-/// The data of the multisig precompile's logs; fee transfers and key grants log too.
-fn multisig_logs(result: &TxResult<TempoEvmTypes>) -> Vec<LogData> {
+/// The data of the configurable account precompile's logs; fee transfers and key grants log too.
+fn configurable_account_logs(result: &TxResult<TempoEvmTypes>) -> Vec<LogData> {
     result
         .logs
         .iter()
@@ -1897,7 +1898,7 @@ fn assert_upgraded(
         threshold: config.threshold,
         owners: abi_owners(config),
     };
-    assert_eq!(multisig_logs(result), [event.encode_log_data()]);
+    assert_eq!(configurable_account_logs(result), [event.encode_log_data()]);
     assert_eq!(f.commitment(), commitment);
 }
 
@@ -1912,7 +1913,7 @@ fn expect_revert(
     let result = f.run(&tx);
     assert!(result.stop.is_revert(), "{label}: {result:?}");
     assert_eq!(&result.output, error, "{label}");
-    assert!(multisig_logs(&result).is_empty(), "{label}");
+    assert!(configurable_account_logs(&result).is_empty(), "{label}");
 }
 
 #[test]
@@ -2086,7 +2087,7 @@ fn eoa_migration_error_order() {
     );
     expect_revert(
         Fixture::new(),
-        "native account batch",
+        "configurable account batch",
         |f| f.signed(3, vec![upgrade.clone(), f.getter()]).into(),
         &only_call,
     );
@@ -2104,10 +2105,10 @@ fn eoa_migration_error_order() {
             &root_required,
         );
     }
-    // 2 before 5: the native account's invalid configuration is not reached.
+    // 2 before 5: the configurable account's invalid configuration is not reached.
     expect_revert(
         Fixture::new(),
-        "native account",
+        "configurable account",
         |f| f.signed(3, vec![Fixture::upgrade(&zero_threshold)]).into(),
         &root_required,
     );
@@ -2312,7 +2313,7 @@ fn eoa_migration_failure_keeps_fee_and_nonce() {
         let result = f.run(&tx);
         assert!(result.stop.is_revert(), "{label}: {result:?}");
         assert_eq!(result.output.as_ref(), error, "{label}");
-        assert!(multisig_logs(&result).is_empty(), "{label}");
+        assert!(configurable_account_logs(&result).is_empty(), "{label}");
         let fee = calc_gas_balance_spending(result.tx_gas_used(), 1);
         assert!(fee > U256::ZERO, "{label}");
         assert_eq!(
@@ -2602,7 +2603,7 @@ fn eoa_migration_preserves_account_state() {
 }
 
 #[test]
-fn eoa_migration_then_multisig_and_rotation() {
+fn eoa_migration_then_configurable_account_and_rotation() {
     let mut f = Fixture::with_parent(false);
     let owner = f.owner.address();
     let config = migrate(&mut f, 3, owner);
@@ -2888,7 +2889,7 @@ fn retired_root_rejects_delegated_roles() {
     }
 
     // G22 (b): a native transaction of the migrated account may not carry a grant signed by its
-    // retired root; the multisig-signed grant is accepted (see the guard test).
+    // retired root; the configurable-account-signed grant is accepted (see the guard test).
     let mut f = Fixture::with_parent(false);
     let root = f.owner.address();
     f.config = migrate(&mut f, 3, root);
@@ -2897,7 +2898,7 @@ fn retired_root_rejects_delegated_roles() {
         key_authorization: Some(grant_by(&f.owner, new_key.address())),
         ..aa_tx(4, vec![f.getter()])
     };
-    let tx = multisig_signed(&f, tx);
+    let tx = configurable_account_signed(&f, tx);
     assert_eq!(
         rejection(&mut f, &tx, account),
         retired(account, RootKeyRole::KeyAuthorizationSigner)
@@ -3045,9 +3046,9 @@ fn retired_root_keeps_owner_parent_and_sender_authority() {
     let result = f.run(&tx);
     assert!(result.status, "{result:?}");
 
-    // X pays its own fees in a multisig transaction, and its calls authenticate as X.
+    // X pays its own fees in a configurable account transaction, and its calls authenticate as X.
     let before = balance(&mut f, account);
-    let tx = multisig_signed(
+    let tx = configurable_account_signed(
         &f,
         TempoTransaction {
             max_fee_per_gas: 1,
@@ -3076,15 +3077,16 @@ fn retired_root_keeps_owner_parent_and_sender_authority() {
         TempoInvalidTransaction::KeychainValidationFailed { .. }
     ));
 
-    // A multisig-signed grant is accepted: the grant's signature is not a primitive root.
+    // A configurable-account-signed grant is accepted: the grant's signature is not a primitive
+    // root.
     let grant = KeyAuthorization::unrestricted(1, SignatureType::Secp256k1, signer(8).address());
-    let grant_signature = AccountSignature::ConfigurableAccount(multisig_approval(
+    let grant_signature = AccountSignature::ConfigurableAccount(configurable_account_approval(
         account,
         &f.config,
         &f.owner,
         grant.signature_hash(),
     ));
-    let tx = multisig_signed(
+    let tx = configurable_account_signed(
         &f,
         TempoTransaction {
             key_authorization: Some(grant.into_signed(grant_signature)),
@@ -3094,7 +3096,7 @@ fn retired_root_keeps_owner_parent_and_sender_authority() {
     let result = f.run(&tx);
     assert!(result.status, "{result:?}");
 
-    // G24: another multisig M that lists the retired X accepts X's approval.
+    // G24: another configurable account M that lists the retired X accepts X's approval.
     let mut m = Fixture::new();
     let owner = m.owner.address();
     retire(&mut m, owner);
@@ -3185,7 +3187,7 @@ fn retired_root_error_order_and_access_gas() {
         key_authorization: Some(root_grant),
         ..aa_tx(3, vec![f.getter()])
     };
-    let tx = multisig_signed_by(account, &witness_config, &witness_owner, native_tx);
+    let tx = configurable_account_signed_by(account, &witness_config, &witness_owner, native_tx);
     assert!(matches!(
         rejection(&mut f, &tx, account),
         TempoInvalidTransaction::ConfigurableAccount(
@@ -3299,9 +3301,9 @@ fn retired_root_error_order_and_access_gas() {
         )),
         base + warm
     );
-    // A multisig grant to the fee payer adds nothing to the fee payer's access; one to another
-    // account adds a cold access. The delegate charge exists only at T14, so the two transactions
-    // are compared at T14.
+    // A configurable account grant to the fee payer adds nothing to the fee payer's access; one to
+    // another account adds a cold access. The delegate charge exists only at T14, so the two
+    // transactions are compared at T14.
     let delegated = |delegate: Address| {
         gas_at(TempoHardfork::T14, &key, |f| {
             let grant =
@@ -3922,7 +3924,7 @@ fn retired_root_permit_reverts() {
     assert_reverts_with(&result, permit_retired(x), "signed after migration");
     assert_eq!(permit_state(&mut f, x, spender), (U256::ZERO, U256::ZERO));
 
-    // X relays its own old permit through its native multisig.
+    // X relays its own old permit through its configurable account.
     f.config = config;
     let tx = f.signed(4, vec![early_for_x]);
     let result = f.run(&tx);
@@ -4593,8 +4595,9 @@ fn retired_root_signatures_still_recover_and_keychain_format_is_unchanged() {
         .into(),
     };
     assert!(bool_query(&mut f, verify, None, "verify").0);
-    // A V2 keychain signature whose inner signature is a multisig one is not a keychain one,
-    // retired key or not, whether the multisig names the parent account or another.
+    // A V2 keychain signature whose inner signature is a configurable account one is not a
+    // keychain one, retired key or not, whether the configurable account names the parent account
+    // or another.
     let signing_hash = KeychainSignature::signing_hash(hash, account);
     let other_owner = signer(3);
     let other_config = ConfigurableAccountConfig {
@@ -4605,8 +4608,9 @@ fn retired_root_signatures_still_recover_and_keychain_format_is_unchanged() {
         ..f.config.clone()
     };
     for named in [account, signer(2).address()] {
-        let multisig = multisig_approval(named, &other_config, &other_owner, signing_hash);
-        let signature = TempoSignature::Keychain(KeychainSignature::new(account, multisig));
+        let approval =
+            configurable_account_approval(named, &other_config, &other_owner, signing_hash);
+        let signature = TempoSignature::Keychain(KeychainSignature::new(account, approval));
         for function in [Verifier::Keychain, Verifier::KeychainAdmin] {
             let call = function.call(account, hash, signature.to_bytes());
             let result = send(&mut f, signer(9).address(), vec![call]);
@@ -4830,23 +4834,23 @@ fn relayed(
     send_listed(f, signer(9).address(), vec![call], access_list, gas_limit)
 }
 
-/// The `verifyMultisig` call of `signature`.
-fn verify_multisig_call(
+/// The `verifyConfigurableAccount` call of `signature`.
+fn verify_configurable_account_call(
     account: Address,
     hash: B256,
     signature: &ConfigurableAccountSignature,
 ) -> Call {
-    Verifier::Multisig.call(
+    Verifier::ConfigurableAccount.call(
         account,
         hash,
         TempoSignature::ConfigurableAccount(signature.clone()).to_bytes(),
     )
 }
 
-/// Checks what `verifyMultisig` returns for `signature` and the gas of the transaction: its
-/// calldata, the ABI input, and the charge for `signature`: the account access, the
+/// Checks what `verifyConfigurableAccount` returns for `signature` and the gas of the transaction:
+/// its calldata, the ABI input, and the charge for `signature`: the account access, the
 /// verification and, while the account is unregistered, the derivation of its address.
-fn check_multisig_verdict(
+fn check_configurable_account_verdict(
     f: &mut Fixture,
     account: Address,
     signature: &ConfigurableAccountSignature,
@@ -4869,7 +4873,7 @@ fn check_multisig_verdict(
     };
     let charge = access_gas + configurable_account_verification_gas(signature).unwrap() + initial;
 
-    let call = verify_multisig_call(account, MULTISIG_HASH, signature);
+    let call = verify_configurable_account_call(account, CONFIGURABLE_ACCOUNT_HASH, signature);
     let zeros = call.input.iter().filter(|byte| **byte == 0).count() as u64;
     let nonzeros = call.input.len() as u64 - zeros;
     // Intrinsic gas: 21000 plus 4 per zero and 16 per non-zero calldata byte. A transaction
@@ -4899,20 +4903,21 @@ fn check_multisig_verdict(
 }
 
 #[test]
-fn verify_multisig_before_and_after_rotation() {
+fn verify_configurable_account_before_and_after_rotation() {
     let mut f = Fixture::new();
     seed_relayer(&mut f);
     let account = f.account;
     let (cold, listed) = (Access::Cold, Access::Listed);
 
     // Unregistered: the initial configuration derives the account, and nothing is written.
-    let initial = multisig_approval(account, &f.config, &f.owner, MULTISIG_HASH);
+    let initial =
+        configurable_account_approval(account, &f.config, &f.owner, CONFIGURABLE_ACCOUNT_HASH);
     assert_eq!(
         configurable_account_verification_gas(&initial).unwrap(),
         4_024
     );
     let valid = Verdict::Valid;
-    check_multisig_verdict(
+    check_configurable_account_verdict(
         &mut f,
         account,
         &initial,
@@ -4927,10 +4932,11 @@ fn verify_multisig_before_and_after_rotation() {
         version: 1,
         ..f.config.clone()
     };
-    let unregistered_later = multisig_approval(account, &later, &f.owner, MULTISIG_HASH);
+    let unregistered_later =
+        configurable_account_approval(account, &later, &f.owner, CONFIGURABLE_ACCOUNT_HASH);
     let invalid = Verdict::Invalid;
     let label = "unregistered later version";
-    check_multisig_verdict(
+    check_configurable_account_verdict(
         &mut f,
         account,
         &unregistered_later,
@@ -4954,29 +4960,37 @@ fn verify_multisig_before_and_after_rotation() {
     let rotate = f.signed(3, vec![Fixture::rotation(&f.config, &next)]);
     assert!(f.run(&rotate).status);
     assert_eq!(f.commitment(), next.commitment().unwrap());
-    let current = multisig_approval(account, &next, &next_owner, MULTISIG_HASH);
-    check_multisig_verdict(&mut f, account, &current, true, cold, valid, "rotated");
+    let current =
+        configurable_account_approval(account, &next, &next_owner, CONFIGURABLE_ACCOUNT_HASH);
+    check_configurable_account_verdict(&mut f, account, &current, true, cold, valid, "rotated");
     let label = "rotated, listed account";
-    check_multisig_verdict(&mut f, account, &current, true, listed, valid, label);
-    let stale = multisig_approval(account, &f.config, &f.owner, MULTISIG_HASH);
+    check_configurable_account_verdict(&mut f, account, &current, true, listed, valid, label);
+    let stale =
+        configurable_account_approval(account, &f.config, &f.owner, CONFIGURABLE_ACCOUNT_HASH);
     let label = "stale configuration";
-    check_multisig_verdict(&mut f, account, &stale, true, cold, invalid, label);
+    check_configurable_account_verdict(&mut f, account, &stale, true, cold, invalid, label);
 }
 
 #[test]
-fn verify_multisig_false_cases_charge_before_they_check() {
+fn verify_configurable_account_false_cases_charge_before_they_check() {
     let mut f = Fixture::new();
     seed_relayer(&mut f);
     let account = f.account;
     let (cold, invalid) = (Access::Cold, Verdict::Invalid);
-    let valid = multisig_approval(account, &f.config, &f.owner, MULTISIG_HASH);
+    let valid =
+        configurable_account_approval(account, &f.config, &f.owner, CONFIGURABLE_ACCOUNT_HASH);
 
     // The signature names another account than the one checked.
-    let names_other = multisig_approval(signer(5).address(), &f.config, &f.owner, MULTISIG_HASH);
+    let names_other = configurable_account_approval(
+        signer(5).address(),
+        &f.config,
+        &f.owner,
+        CONFIGURABLE_ACCOUNT_HASH,
+    );
     let label = "account mismatch";
-    check_multisig_verdict(&mut f, account, &names_other, false, cold, invalid, label);
+    check_configurable_account_verdict(&mut f, account, &names_other, false, cold, invalid, label);
 
-    // Accounts that cannot be native multisig accounts, even when the signature names them: a
+    // Accounts that cannot be configurable accounts, even when the signature names them: a
     // Tempo and an EVM precompile, a virtual address and a zone portal.
     let mut virtual_address = Address::ZERO;
     virtual_address.0[4..14].fill(0xfd);
@@ -4988,9 +5002,10 @@ fn verify_multisig_false_cases_charge_before_they_check() {
         (virtual_address, cold),
         (zone_portal, cold),
     ] {
-        let names_address = multisig_approval(address, &f.config, &f.owner, MULTISIG_HASH);
+        let names_address =
+            configurable_account_approval(address, &f.config, &f.owner, CONFIGURABLE_ACCOUNT_HASH);
         let label = format!("invalid account {address}");
-        check_multisig_verdict(
+        check_configurable_account_verdict(
             &mut f,
             address,
             &names_address,
@@ -5006,37 +5021,39 @@ fn verify_multisig_false_cases_charge_before_they_check() {
         salt: B256::repeat_byte(1),
         ..f.config.clone()
     };
-    let misderived = multisig_approval(account, &other_salt, &f.owner, MULTISIG_HASH);
+    let misderived =
+        configurable_account_approval(account, &other_salt, &f.owner, CONFIGURABLE_ACCOUNT_HASH);
     let label = "initial account mismatch";
-    check_multisig_verdict(&mut f, account, &misderived, false, cold, invalid, label);
+    check_configurable_account_verdict(&mut f, account, &misderived, false, cold, invalid, label);
 
     // An initial configuration needs the configured recovery factory.
     let factory = f.evm.block().ext.configurable_account_recovery_factory;
     f.update_block(|block| block.ext.configurable_account_recovery_factory = None);
     assert!(factory.is_some());
     let label = "no recovery factory";
-    check_multisig_verdict(&mut f, account, &valid, false, cold, invalid, label);
+    check_configurable_account_verdict(&mut f, account, &valid, false, cold, invalid, label);
     f.update_block(|block| block.ext.configurable_account_recovery_factory = factory);
 
-    // An account with code is not a multisig account, however well signed.
+    // An account with code is not a configurable account, however well signed.
     let label = "valid";
-    check_multisig_verdict(&mut f, account, &valid, false, cold, Verdict::Valid, label);
+    check_configurable_account_verdict(&mut f, account, &valid, false, cold, Verdict::Valid, label);
     let info = f.info(account).unwrap();
     f.evm
         .overlay_db_mut()
         .insert_account_info(&account, info.with_code(Bytecode::new_legacy(bytes!("00"))));
     let label = "account with code";
-    check_multisig_verdict(&mut f, account, &valid, false, cold, invalid, label);
+    check_configurable_account_verdict(&mut f, account, &valid, false, cold, invalid, label);
 }
 
 #[test]
-fn verify_multisig_reverts() {
+fn verify_configurable_account_reverts() {
     let mut f = Fixture::new();
     seed_relayer(&mut f);
     let account = f.account;
 
-    // Anything that is not a multisig signature is a format error.
-    let secp = PrimitiveSignature::Secp256k1(f.owner.sign_hash_sync(&MULTISIG_HASH).unwrap());
+    // Anything that is not a configurable account signature is a format error.
+    let secp =
+        PrimitiveSignature::Secp256k1(f.owner.sign_hash_sync(&CONFIGURABLE_ACCOUNT_HASH).unwrap());
     let keychain = TempoSignature::Keychain(KeychainSignature::new(account, secp.clone()));
     for (label, signature) in [
         ("primitive", secp.to_bytes()),
@@ -5044,17 +5061,20 @@ fn verify_multisig_reverts() {
         ("empty", Bytes::new()),
         ("truncated", Bytes::from_static(&[0x05, 0xc0])),
     ] {
-        let call = Verifier::Multisig.call(account, MULTISIG_HASH, signature);
+        let call =
+            Verifier::ConfigurableAccount.call(account, CONFIGURABLE_ACCOUNT_HASH, signature);
         let result = relayed(&mut f, call, 1_000_000, None);
         assert_reverts_with(&result, ISignatureVerifier::InvalidFormat {}, label);
     }
 
     // Approvals that do not verify revert after the charge: another hash, and a key outside the
     // configuration.
-    let other_hash = multisig_approval(account, &f.config, &f.owner, B256::repeat_byte(0x43));
-    let stranger = multisig_approval(account, &f.config, &signer(7), MULTISIG_HASH);
+    let other_hash =
+        configurable_account_approval(account, &f.config, &f.owner, B256::repeat_byte(0x43));
+    let stranger =
+        configurable_account_approval(account, &f.config, &signer(7), CONFIGURABLE_ACCOUNT_HASH);
     for (label, signature) in [("other hash", &other_hash), ("unknown owner", &stranger)] {
-        check_multisig_verdict(
+        check_configurable_account_verdict(
             &mut f,
             account,
             signature,
@@ -5068,7 +5088,7 @@ fn verify_multisig_reverts() {
 }
 
 #[test]
-fn verify_multisig_runs_in_a_staticcall() {
+fn verify_configurable_account_runs_in_a_staticcall() {
     let mut f = Fixture::new();
     seed_relayer(&mut f);
     let account = f.account;
@@ -5081,14 +5101,15 @@ fn verify_multisig_runs_in_a_staticcall() {
     .concat();
     let proxy = f.install_contract(Address::repeat_byte(0x56), code);
     let through_proxy = |signature: &ConfigurableAccountSignature, hash| Call {
-        input: verify_multisig_call(account, hash, signature).input,
+        input: verify_configurable_account_call(account, hash, signature).input,
         ..proxy.clone()
     };
 
-    let valid = multisig_approval(account, &f.config, &f.owner, MULTISIG_HASH);
+    let valid =
+        configurable_account_approval(account, &f.config, &f.owner, CONFIGURABLE_ACCOUNT_HASH);
     let result = relayed(
         &mut f,
-        through_proxy(&valid, MULTISIG_HASH),
+        through_proxy(&valid, CONFIGURABLE_ACCOUNT_HASH),
         1_000_000,
         None,
     );
@@ -5106,7 +5127,7 @@ fn verify_multisig_runs_in_a_staticcall() {
 }
 
 #[test]
-fn verify_multisig_needs_its_gas() {
+fn verify_configurable_account_needs_its_gas() {
     for registered in [false, true] {
         let mut f = Fixture::new();
         seed_relayer(&mut f);
@@ -5120,8 +5141,9 @@ fn verify_multisig_needs_its_gas() {
             assert!(f.run(&rotate).status);
             f.config = next;
         }
-        let signature = multisig_approval(account, &f.config, &f.owner, MULTISIG_HASH);
-        let call = verify_multisig_call(account, MULTISIG_HASH, &signature);
+        let signature =
+            configurable_account_approval(account, &f.config, &f.owner, CONFIGURABLE_ACCOUNT_HASH);
+        let call = verify_configurable_account_call(account, CONFIGURABLE_ACCOUNT_HASH, &signature);
         // The gas the call uses when it has plenty is exactly what it needs.
         let result = relayed(&mut f, call.clone(), 1_000_000, None);
         assert!(result.status, "{result:?}");
@@ -5137,7 +5159,7 @@ fn verify_multisig_needs_its_gas() {
 }
 
 #[test]
-fn native_multisig_is_rejected_before_t14() {
+fn configurable_account_is_rejected_before_t14() {
     let unsupported =
         TempoInvalidTransaction::ConfigurableAccount(ConfigurableAccountError::UnsupportedContext);
     let mut f = Fixture::with_spec(true, TempoHardfork::T13);
@@ -5145,9 +5167,10 @@ fn native_multisig_is_rejected_before_t14() {
     // Signature type `0x05`.
     let tx = f.signed(3, vec![f.getter()]);
     assert_eq!(rejection(&mut f, &tx, account), unsupported, "0x05");
-    // A multisig-signed key authorization under a primitive transaction signature.
+    // A configurable-account-signed key authorization under a primitive transaction signature.
     let grant = KeyAuthorization::unrestricted(1, SignatureType::Secp256k1, signer(5).address());
-    let approval = multisig_approval(account, &f.config, &f.owner, grant.signature_hash());
+    let approval =
+        configurable_account_approval(account, &f.config, &f.owner, grant.signature_hash());
     let tx = f.sign_primitive(TempoTransaction {
         key_authorization: Some(grant.into_signed(approval)),
         ..aa_tx(3, vec![f.getter()])
@@ -5155,7 +5178,7 @@ fn native_multisig_is_rejected_before_t14() {
     assert_eq!(
         rejection(&mut f, &tx, account),
         unsupported,
-        "multisig-signed grant"
+        "configurable-account-signed grant"
     );
     // Key type 3 in a primitive-signed grant: no native role is involved.
     let grant =
@@ -5226,23 +5249,23 @@ fn key_type_3_authorization_calls_revert_as_before_t14() {
     };
     for calldata in &calls {
         // Before T14 type 3 is indistinguishable from any other unknown type.
-        let multisig = run(TempoHardfork::T13, calldata, 3);
+        let type_3 = run(TempoHardfork::T13, calldata, 3);
         let unknown = run(TempoHardfork::T13, calldata, 4);
-        assert!(multisig.stop.is_revert(), "{multisig:?}");
-        assert_eq!(multisig, unknown);
+        assert!(type_3.stop.is_revert(), "{type_3:?}");
+        assert_eq!(type_3, unknown);
         // At T14 the same calldata is accepted or fails with a distinct error.
         let active = run(TempoHardfork::T14, calldata, 3);
         assert_ne!(active, run(TempoHardfork::T14, calldata, 4));
-        assert_ne!(active, multisig);
+        assert_ne!(active, type_3);
     }
 }
 
 #[test]
-fn multisig_is_rejected_where_it_cannot_sign() {
+fn configurable_account_is_rejected_where_it_cannot_sign() {
     let context = TempoInvalidTransaction::ConfigurableAccount(
         ConfigurableAccountError::InvalidSignatureContext,
     );
-    // An authorization-list entry signed by a multisig, whatever the hardfork.
+    // An authorization-list entry signed by a configurable account, whatever the hardfork.
     for spec in [TempoHardfork::T13, TempoHardfork::T14] {
         let mut f = Fixture::with_spec(true, spec);
         let account = f.account;
@@ -5251,8 +5274,12 @@ fn multisig_is_rejected_where_it_cannot_sign() {
             address: Address::ZERO,
             nonce: 0,
         };
-        let approval =
-            multisig_approval(account, &f.config, &f.owner, authorization.signature_hash());
+        let approval = configurable_account_approval(
+            account,
+            &f.config,
+            &f.owner,
+            authorization.signature_hash(),
+        );
         let tx = f.sign_primitive(TempoTransaction {
             tempo_authorization_list: vec![TempoSignedAuthorization::new_unchecked(
                 authorization,
@@ -5262,11 +5289,11 @@ fn multisig_is_rejected_where_it_cannot_sign() {
         });
         assert_eq!(rejection(&mut f, &tx, account), context, "{spec:?}");
     }
-    // A legacy (V1) keychain signature wrapping a multisig can only be built in memory.
+    // A legacy (V1) keychain signature wrapping a configurable account can only be built in memory.
     let mut f = Fixture::with_spec(true, TempoHardfork::T1B);
     let account = f.account;
     let tx = aa_tx(3, vec![f.getter()]);
-    let approval = multisig_approval(account, &f.config, &f.owner, tx.signature_hash());
+    let approval = configurable_account_approval(account, &f.config, &f.owner, tx.signature_hash());
     let mut keychain = KeychainSignature::new(account, approval);
     keychain.version = KeychainVersion::V1;
     let tx = tx.into_signed(TempoSignature::Keychain(keychain));

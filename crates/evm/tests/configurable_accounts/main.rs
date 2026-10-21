@@ -118,7 +118,7 @@ impl Fixture {
     }
 
     fn signed(&self, nonce: u64, calls: Vec<Call>) -> AASigned {
-        multisig_signed(self, aa_tx(nonce, calls))
+        configurable_account_signed(self, aa_tx(nonce, calls))
     }
 
     fn getter(&self) -> Call {
@@ -358,23 +358,23 @@ fn signer(seed: u8) -> PrivateKeySigner {
 }
 
 /// Signs `tx` as the account's configurable account, with the fixture's current configuration.
-fn multisig_signed(f: &Fixture, tx: TempoTransaction) -> AASigned {
-    multisig_signed_by(f.account, &f.config, &f.owner, tx)
+fn configurable_account_signed(f: &Fixture, tx: TempoTransaction) -> AASigned {
+    configurable_account_signed_by(f.account, &f.config, &f.owner, tx)
 }
 
 /// Signs `tx` as the configurable `account` with `config`, approved by `owner`.
-fn multisig_signed_by(
+fn configurable_account_signed_by(
     account: Address,
     config: &ConfigurableAccountConfig,
     owner: &PrivateKeySigner,
     tx: TempoTransaction,
 ) -> AASigned {
-    let signature = multisig_approval(account, config, owner, tx.signature_hash());
+    let signature = configurable_account_approval(account, config, owner, tx.signature_hash());
     tx.into_signed(TempoSignature::ConfigurableAccount(signature))
 }
 
 /// `owner`'s approval of `inner_digest` as the configurable `account` with `config`.
-fn multisig_approval(
+fn configurable_account_approval(
     account: Address,
     config: &ConfigurableAccountConfig,
     owner: &PrivateKeySigner,

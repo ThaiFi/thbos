@@ -508,7 +508,8 @@ fn is_parallel_candidate(tx: &BestTransaction, spec: TempoHardfork) -> bool {
             .transaction
             .nonce_key_ref()
             .is_some_and(|nonce_key| !nonce_key.is_zero())
-        // No configurable-account roles or keychain/multisig calls that replay cannot reproduce
+        // No configurable-account roles or keychain/configurable account calls that replay cannot
+        // reproduce
         && supports_storage_action_replay(tx.transaction.inner(), spec)
 }
 

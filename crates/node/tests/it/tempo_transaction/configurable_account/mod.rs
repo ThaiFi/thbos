@@ -1,4 +1,4 @@
-//! Signed native-account transactions through a local node's public RPC.
+//! Signed configurable account transactions through a local node's public RPC.
 use super::{
     helpers::{create_basic_aa_tx, sign_p256_primitive, sign_webauthn_primitive},
     local::Localnet,
@@ -46,14 +46,14 @@ const GAS_LIMIT: u64 = 5_000_000;
 
 type P256Signer = fn(B256, &SigningKey, B256, B256) -> eyre::Result<PrimitiveSignature>;
 
-struct NativeAccount {
+struct ConfigurableAccount {
     address: Address,
     config: ConfigurableAccountConfig,
     owners: Vec<OwnerKey>,
     nonce: u64,
 }
 
-impl NativeAccount {
+impl ConfigurableAccount {
     fn new(seed: u8, count: u8) -> Self {
         let mut owners = (0..count)
             .map(|index| {
