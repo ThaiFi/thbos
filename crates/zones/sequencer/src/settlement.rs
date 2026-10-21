@@ -45,7 +45,7 @@ use crate::{
     nonce_keys::SUBMIT_BATCH_NONCE_KEY,
     prover::SettlementProof,
     prover_config::active_l1_hardfork,
-    withdrawals::build_withdrawal_batches,
+    withdrawals::{build_withdrawal_batches, withdrawal_deposit_headroom},
 };
 use alloy_consensus::{Transaction, TxReceipt as _, transaction::TxHashRef as _};
 use alloy_eips::{BlockHashOrNumber, BlockId, eip2935::HISTORY_SERVE_WINDOW};
@@ -75,6 +75,7 @@ use tempo_primitives::{
 use tokio::time::{Instant, sleep};
 use tracing::{debug, info, instrument, warn};
 use zone_chainspec::ZoneChainSpec;
+use zone_primitives::constants::WITHDRAWAL_BOUNCEBACK_RESERVE;
 use zone_prover::{ProofBundle, VerifierMode};
 
 #[derive(Debug)]
@@ -631,7 +632,8 @@ impl BatchSubmitter {
     /// the slot must hash to the batch's committed withdrawal queue, fit one `processWithdrawals`
     /// call within both the planner budget and [`MAX_ATOMIC_WITHDRAWAL_GAS`], the portal queue
     /// must be empty so the appended call can only consume the slot this batch enqueues, the
-    /// portal must not be paused, and the sequencer must be able to fund the combined gas limit
+    /// portal must not be paused, every withdrawal must fit the portal's deposit capacity for
+    /// bounce-backs, and the sequencer must be able to fund the combined gas limit
     /// at the fixed max fee exactly as pool admission checks it. Every disqualification falls
     /// back to submit-only.
     ///
@@ -699,6 +701,16 @@ impl BatchSubmitter {
             info!(
                 withdrawal_count = withdrawals.len(),
                 "Portal is paused; submitting batch alone"
+            );
+            return None;
+        }
+        // Same bound as the standalone processor: public deposits landing after this read cannot
+        // consume the bounce-back reserve.
+        if withdrawals.len() > state.deposit_headroom.min(WITHDRAWAL_BOUNCEBACK_RESERVE) {
+            info!(
+                withdrawal_count = withdrawals.len(),
+                deposit_headroom = state.deposit_headroom,
+                "Portal deposit backlog leaves no bounce-back capacity; submitting batch alone"
             );
             return None;
         }
@@ -779,7 +791,8 @@ impl BatchSubmitter {
     }
 
     /// Read the canonical portal state that gates atomic withdrawal processing, plus the
-    /// sequencer's fee-token balance, in one `latest` multicall.
+    /// sequencer's fee-token balance, in one `latest` multicall. Deposit headroom is measured
+    /// before this batch's `submitBatch` processes deposits, so it can only understate capacity.
     ///
     /// The balance assumes the sequencer pays L1 fees in PathUSD, the default fee token and the
     /// one the withdrawal processor's balance metric tracks. A different fee token only makes
@@ -787,13 +800,22 @@ impl BatchSubmitter {
     /// caught by pool admission, after which retries submit the batch alone as well.
     async fn read_atomic_slot_state(&self, sequencer: Address) -> Result<AtomicSlotState> {
         let fee_token = ITIP20::new(PATH_USD_ADDRESS, self.l1_provider.clone());
-        let (queue_head, queue_tail, paused, fee_token_balance): (U256, U256, bool, U256) = self
+        let (
+            queue_head,
+            queue_tail,
+            paused,
+            fee_token_balance,
+            deposit_count,
+            last_processed_deposit_number,
+        ): (U256, U256, bool, U256, u64, u64) = self
             .l1_provider
             .multicall()
             .add(self.portal.withdrawalQueueHead())
             .add(self.portal.withdrawalQueueTail())
             .add(self.portal.paused())
             .add(fee_token.balanceOf(sequencer))
+            .add(self.portal.depositCount())
+            .add(self.portal.lastProcessedDepositNumber())
             .aggregate()
             .await?;
         Ok(AtomicSlotState {
@@ -801,6 +823,10 @@ impl BatchSubmitter {
             queue_tail,
             paused,
             fee_token_balance,
+            deposit_headroom: withdrawal_deposit_headroom(
+                deposit_count,
+                last_processed_deposit_number,
+            )?,
         })
     }
 
@@ -1662,6 +1688,8 @@ struct AtomicSlotState {
     queue_tail: U256,
     paused: bool,
     fee_token_balance: U256,
+    /// Withdrawals that can each bounce back without exceeding `MAX_UNPROCESSED_DEPOSITS`.
+    deposit_headroom: usize,
 }
 
 /// A confirmed L1 batch submission.
@@ -2234,6 +2262,7 @@ mod tests {
     use tempo_alloy::rpc::TempoHeaderResponse;
     use tempo_primitives::{Block, TempoHeader, TempoPrimitives};
     use zone_chainspec::test_utils::set_tempo_fork;
+    use zone_primitives::constants::MAX_UNPROCESSED_DEPOSITS;
 
     fn mock_l1(asserter: Asserter) -> DynProvider<TempoNetwork> {
         ProviderBuilder::new_with_network::<TempoNetwork>()
@@ -2768,12 +2797,20 @@ mod tests {
     }
 
     /// Multicall response for `read_atomic_slot_state`.
-    fn atomic_slot_state(head: u64, tail: u64, paused: bool, fee_token_balance: U256) -> Bytes {
+    fn atomic_slot_state(
+        head: u64,
+        tail: u64,
+        paused: bool,
+        fee_token_balance: U256,
+        outstanding_deposits: u64,
+    ) -> Bytes {
         abi_encode_multicall(vec![
             abi_word(U256::from(head)),
             abi_word(U256::from(tail)),
             abi_word(paused),
             abi_word(fee_token_balance),
+            abi_word(outstanding_deposits),
+            abi_word(0u64),
         ])
     }
 
@@ -2803,7 +2840,7 @@ mod tests {
             calc_gas_balance_spending(gas_limit, crate::TEMPO_L1_MAX_FEE_PER_GAS);
 
         // Empty unpaused queue and an affordable balance, then the eth_estimateGas preflight.
-        asserter.push_success(&atomic_slot_state(5, 5, false, exact_fee_balance));
+        asserter.push_success(&atomic_slot_state(5, 5, false, exact_fee_balance, 0));
         asserter.push_success(&alloy_primitives::U64::from(1_000_000u64));
         let request = submitter
             .try_build_combined_submission_request(
@@ -2843,18 +2880,23 @@ mod tests {
 
         // A tip-anchored submission cannot be estimated, so it relies on the canonical portal
         // state gate alone and sends optimistically.
-        asserter.push_success(&atomic_slot_state(5, 5, false, exact_fee_balance));
-        assert!(
+        let tip_anchored = async || {
             submitter
                 .try_build_combined_submission_request(
                     test_submission_request(portal_address, &submit_call, sender, 9),
                     submit_call.withdrawalQueueHash,
                     slot,
-                    true
+                    true,
                 )
                 .await
                 .is_some()
-        );
+        };
+        asserter.push_success(&atomic_slot_state(5, 5, false, exact_fee_balance, 0));
+        assert!(tip_anchored().await);
+        // A full deposit backlog leaves no bounce-back capacity.
+        let full_backlog = MAX_UNPROCESSED_DEPOSITS as u64;
+        asserter.push_success(&atomic_slot_state(5, 5, false, U256::MAX, full_backlog));
+        assert!(!tip_anchored().await);
         assert!(
             asserter.read_q().is_empty(),
             "tip-anchored path must not estimate"
@@ -2883,7 +2925,7 @@ mod tests {
             nextZoneHeight: U256::from(8),
             signatures: vec![Bytes::from_static(&[0xcc])],
         };
-        asserter.push_success(&atomic_slot_state(0, 0, false, U256::MAX));
+        asserter.push_success(&atomic_slot_state(0, 0, false, U256::MAX, 0));
         let request = submitter
             .try_build_combined_submission_request(
                 test_submission_request(portal, &call, Address::repeat_byte(0x22), 4),
@@ -2933,7 +2975,7 @@ mod tests {
                     .await
                     .is_some()
             };
-        let ready = atomic_slot_state(5, 5, false, U256::MAX);
+        let ready = atomic_slot_state(5, 5, false, U256::MAX, 0);
 
         // No withdrawals to process.
         assert!(!eligible(&test_submit_batch_call(&[]), &[], MAX_WITHDRAWAL_BATCH_GAS).await);
@@ -2980,17 +3022,17 @@ mod tests {
         );
 
         // The portal queue still has a pending head slot.
-        asserter.push_success(&atomic_slot_state(4, 5, false, U256::MAX));
+        asserter.push_success(&atomic_slot_state(4, 5, false, U256::MAX, 0));
         assert!(!eligible(&submit_call, &withdrawals, MAX_WITHDRAWAL_BATCH_GAS).await);
         // The portal is paused.
-        asserter.push_success(&atomic_slot_state(5, 5, true, U256::MAX));
+        asserter.push_success(&atomic_slot_state(5, 5, true, U256::MAX, 0));
         assert!(!eligible(&submit_call, &withdrawals, MAX_WITHDRAWAL_BATCH_GAS).await);
         // The sequencer cannot fund the combined gas limit at the max fee.
         let short_balance = calc_gas_balance_spending(
             combined_gas_limit(&withdrawals),
             crate::TEMPO_L1_MAX_FEE_PER_GAS,
         ) - U256::from(1);
-        asserter.push_success(&atomic_slot_state(5, 5, false, short_balance));
+        asserter.push_success(&atomic_slot_state(5, 5, false, short_balance, 0));
         assert!(!eligible(&submit_call, &withdrawals, MAX_WITHDRAWAL_BATCH_GAS).await);
         // The portal state read fails.
         asserter.push_failure_msg("portal state read failed");
