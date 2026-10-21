@@ -15,52 +15,6 @@ use tempo_precompiles::{
 };
 use tempo_primitives::transaction::{KeychainSignature, SignatureType, SignedKeyAuthorization};
 
-/// A ready-to-run scenario.
-pub(super) struct Setup {
-    pub(super) evm: TempoEvm<'static>,
-    pub(super) env: TempoTxEnv,
-    pub(super) caller: Address,
-}
-
-impl Setup {
-    /// Runs the transaction and commits it, returning `(success, tx_gas_used)`.
-    pub(super) fn run(&mut self) -> HandlerResult<(bool, u64)> {
-        self.evm
-            .transact(&Recovered::new_unchecked(self.env.clone(), self.caller))
-            .map(|executed| {
-                let result = executed.commit();
-                (result.status, result.tx_gas_used())
-            })
-    }
-
-    /// Runs `prepare_aa` only, without executing the calls.
-    pub(super) fn prepare(&mut self) -> HandlerResult<PreparedAa> {
-        prepare_aa(&mut TxRequest {
-            envelope: &self.env,
-            tx: Recovered::new_unchecked(self.env.as_aa().unwrap(), self.caller),
-            host: &mut self.evm,
-            _non_exhaustive: (),
-        })
-    }
-
-    /// Warms the transaction's base accounts and access list, then returns the configurable
-    /// account gas and state gas that `prepare_aa` adds to the intrinsic cost.
-    fn native_gas(&mut self) -> HandlerResult<(u64, u64)> {
-        let tx = self.env.as_aa().unwrap().inner().tx();
-        warm_base_accounts(&mut self.evm, self.caller, tx.calls[0].to);
-        warm_access_list(&mut self.evm, &tx.access_list);
-        let spec = self.evm.config_spec_id();
-        validate_state(&mut self.evm, &self.env, spec)
-    }
-
-    pub(super) fn account(&mut self, address: Address) -> Option<AccountInfo> {
-        self.evm
-            .state_mut()
-            .account_info_untracked(&address)
-            .unwrap()
-    }
-}
-
 /// A parent account (primitive or configurable) granting access to a configurable delegate.
 struct Access {
     parent: Native,
@@ -211,24 +165,6 @@ impl Access {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
-enum GrantCase {
-    PrimitiveGrant,
-    NativeGrant,
-    PrimitiveGrantAndUse,
-    NativeGrantAndUse,
-    PrimitiveAdminGrant,
-    NativeAdminGrant,
-}
-
-#[derive(Clone, Copy, Debug)]
-enum Warmth {
-    Cold,
-    Loaded,
-    AccessList,
-    Coinbase,
-}
-
 /// Everything that varies between the grant scenarios.
 #[derive(Clone)]
 struct Scenario {
@@ -281,6 +217,70 @@ impl Scenario {
         self.authorization = Some(authorization);
         self
     }
+}
+
+/// A ready-to-run scenario.
+pub(super) struct Setup {
+    pub(super) evm: TempoEvm<'static>,
+    pub(super) env: TempoTxEnv,
+    pub(super) caller: Address,
+}
+
+impl Setup {
+    /// Runs the transaction and commits it, returning `(success, tx_gas_used)`.
+    pub(super) fn run(&mut self) -> HandlerResult<(bool, u64)> {
+        self.evm
+            .transact(&Recovered::new_unchecked(self.env.clone(), self.caller))
+            .map(|executed| {
+                let result = executed.commit();
+                (result.status, result.tx_gas_used())
+            })
+    }
+
+    /// Runs `prepare_aa` only, without executing the calls.
+    pub(super) fn prepare(&mut self) -> HandlerResult<PreparedAa> {
+        prepare_aa(&mut TxRequest {
+            envelope: &self.env,
+            tx: Recovered::new_unchecked(self.env.as_aa().unwrap(), self.caller),
+            host: &mut self.evm,
+            _non_exhaustive: (),
+        })
+    }
+
+    /// Warms the transaction's base accounts and access list, then returns the configurable
+    /// account gas and state gas that `prepare_aa` adds to the intrinsic cost.
+    fn native_gas(&mut self) -> HandlerResult<(u64, u64)> {
+        let tx = self.env.as_aa().unwrap().inner().tx();
+        warm_base_accounts(&mut self.evm, self.caller, tx.calls[0].to);
+        warm_access_list(&mut self.evm, &tx.access_list);
+        let spec = self.evm.config_spec_id();
+        validate_state(&mut self.evm, &self.env, spec)
+    }
+
+    pub(super) fn account(&mut self, address: Address) -> Option<AccountInfo> {
+        self.evm
+            .state_mut()
+            .account_info_untracked(&address)
+            .unwrap()
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+enum GrantCase {
+    PrimitiveGrant,
+    NativeGrant,
+    PrimitiveGrantAndUse,
+    NativeGrantAndUse,
+    PrimitiveAdminGrant,
+    NativeAdminGrant,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum Warmth {
+    Cold,
+    Loaded,
+    AccessList,
+    Coinbase,
 }
 
 #[derive(Clone, Copy, Debug)]
