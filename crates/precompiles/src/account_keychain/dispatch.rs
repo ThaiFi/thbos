@@ -2,7 +2,10 @@
 
 use super::{AccountKeychain, KeyRestrictions, TokenLimit, authorizeKeyCall};
 use crate::{Precompile, charge_input_cost, dispatch, mutate, view};
-use alloy::{primitives::Address, sol_types::SolCall};
+use alloy::{
+    primitives::{Address, B256, Bytes},
+    sol_types::SolCall,
+};
 use revm::precompile::PrecompileResult;
 use tempo_contracts::precompiles::{AccountKeychainError, IAccountKeychain};
 
@@ -10,6 +13,23 @@ impl Precompile for AccountKeychain {
     fn call(&mut self, calldata: &[u8], msg_sender: Address) -> PrecompileResult {
         if let Some(err) = charge_input_cost(&mut self.storage, calldata) {
             return err;
+        }
+
+        // T11's strict ABI decoder rejected enum value 3 before ConfigurableAccount existed.
+        // All authorization entrypoints put signatureType in the second ABI word.
+        if self.storage.spec().is_t11()
+            && !self.storage.spec().is_t14()
+            && [
+                IAccountKeychain::authorizeKey_0Call::SELECTOR,
+                IAccountKeychain::authorizeKey_1Call::SELECTOR,
+                IAccountKeychain::authorizeKey_2Call::SELECTOR,
+                IAccountKeychain::authorizeAdminKeyCall::SELECTOR,
+            ]
+            .iter()
+            .any(|selector| calldata.starts_with(selector))
+            && calldata.get(36..68) == Some(B256::with_last_byte(3).as_slice())
+        {
+            return Ok(self.storage.revert_output(Bytes::new()));
         }
 
         dispatch!(

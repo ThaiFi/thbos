@@ -1,0 +1,221 @@
+//! The ConfigurableAccount keychain key type through the account keychain ABI.
+
+use alloy::{
+    primitives::{Address, B256, Bytes},
+    sol_types::SolCall,
+};
+use revm::{precompile::PrecompileOutput, state::Bytecode};
+use tempo_chainspec::hardfork::TempoHardfork;
+use tempo_contracts::precompiles::IAccountKeychain::{
+    KeyRestrictions, SignatureType, authorizeAdminKeyCall, authorizeKey_0Call, authorizeKey_1Call,
+    authorizeKey_2Call, getKeyCall,
+};
+use tempo_precompiles::{
+    Precompile,
+    account_keychain::AccountKeychain,
+    storage::{StorageCtx, hashmap::HashMapStorageProvider},
+};
+
+const PARENT: Address = Address::repeat_byte(0x11);
+const DELEGATE: Address = Address::repeat_byte(0x22);
+
+fn restrictions(expiry: u64) -> KeyRestrictions {
+    KeyRestrictions {
+        expiry,
+        enforceLimits: false,
+        limits: vec![],
+        allowAnyCalls: true,
+        allowedCalls: vec![],
+    }
+}
+
+/// Runs `calldata` from `PARENT` as both the sender and the transaction origin.
+fn call_as_parent(storage: &mut HashMapStorageProvider, calldata: &[u8]) -> PrecompileOutput {
+    StorageCtx::enter(storage, || {
+        let mut keychain = AccountKeychain::new();
+        keychain.set_tx_origin(PARENT).unwrap();
+        keychain
+            .call(calldata, PARENT)
+            .expect("keychain calls never fail the frame")
+    })
+}
+
+/// One calldata per authorization entrypoint that carries a `signatureType`.
+fn authorization_calls(
+    key_id: Address,
+    signature_type: SignatureType,
+    expiry: u64,
+) -> [Vec<u8>; 4] {
+    [
+        authorizeKey_0Call {
+            keyId: key_id,
+            signatureType: signature_type,
+            expiry,
+            enforceLimits: false,
+            limits: vec![],
+        }
+        .abi_encode(),
+        authorizeKey_1Call {
+            keyId: key_id,
+            signatureType: signature_type,
+            config: restrictions(expiry),
+        }
+        .abi_encode(),
+        authorizeKey_2Call {
+            keyId: key_id,
+            signatureType: signature_type,
+            config: restrictions(expiry),
+            witness: B256::ZERO,
+        }
+        .abi_encode(),
+        authorizeAdminKeyCall {
+            keyId: key_id,
+            signatureType: signature_type,
+            witness: B256::ZERO,
+        }
+        .abi_encode(),
+    ]
+}
+
+fn key_expiry(storage: &mut HashMapStorageProvider, key_id: Address) -> u64 {
+    StorageCtx::enter(storage, || {
+        AccountKeychain::new()
+            .get_key(getKeyCall {
+                account: PARENT,
+                keyId: key_id,
+            })
+            .unwrap()
+            .expiry
+    })
+}
+
+/// Before T14, key type 3 reverts exactly like an unknown key type (4) on every
+/// authorization entrypoint.
+#[test]
+fn key_type_reverts_like_an_unknown_type_before_t14() {
+    for spec in TempoHardfork::VARIANTS
+        .iter()
+        .copied()
+        .filter(|spec| !spec.is_t14())
+    {
+        for key_id in [Address::ZERO, PARENT, DELEGATE] {
+            for expiry in [0, u64::MAX] {
+                let known = authorization_calls(key_id, SignatureType::ConfigurableAccount, expiry);
+                for mut calldata in known {
+                    // The `signatureType` word follows the `keyId` word, after the selector.
+                    assert_eq!(calldata[67], 3);
+                    let mut run = |signature_type: u8| {
+                        calldata[67] = signature_type;
+                        let mut storage = HashMapStorageProvider::new_with_spec(1, spec);
+                        call_as_parent(&mut storage, &calldata)
+                    };
+                    let configurable = run(3);
+                    let unknown = run(4);
+                    assert!(unknown.is_revert(), "{spec}: {calldata:?}");
+                    assert_eq!(
+                        (configurable.is_revert(), configurable.bytes),
+                        (unknown.is_revert(), unknown.bytes),
+                        "{spec}: {calldata:?}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Delegate {
+    CodeFree,
+    SelfGrant,
+    Bytecode,
+    Delegation,
+}
+
+/// A grant to a ConfigurableAccount key is accepted from T14 only, and only for a code-free
+/// delegate other than the granting account.
+#[test]
+fn delegate_grants_are_guarded_from_t14() {
+    for spec in TempoHardfork::VARIANTS {
+        // Skips the legacy `authorizeKey` selector, which every fork since T3 rejects outright.
+        for index in 1..4 {
+            for case in [
+                Delegate::CodeFree,
+                Delegate::SelfGrant,
+                Delegate::Bytecode,
+                Delegate::Delegation,
+            ] {
+                let mut storage = HashMapStorageProvider::new_with_spec(1, *spec);
+                let delegate = if case == Delegate::SelfGrant {
+                    PARENT
+                } else {
+                    DELEGATE
+                };
+                match case {
+                    Delegate::Bytecode => StorageCtx::enter(&mut storage, || {
+                        StorageCtx
+                            .set_code(
+                                delegate,
+                                Bytecode::new_raw(Bytes::from_static(&[0x60, 0x00])),
+                            )
+                            .unwrap()
+                    }),
+                    Delegate::Delegation => StorageCtx::enter(&mut storage, || {
+                        StorageCtx
+                            .set_code(delegate, Bytecode::new_eip7702(Address::repeat_byte(0x33)))
+                            .unwrap()
+                    }),
+                    Delegate::CodeFree | Delegate::SelfGrant => {}
+                }
+
+                let calldata =
+                    &authorization_calls(delegate, SignatureType::ConfigurableAccount, u64::MAX)
+                        [index];
+                let output = call_as_parent(&mut storage, calldata);
+                let granted = spec.is_t14() && case == Delegate::CodeFree;
+                assert_eq!(
+                    !output.is_revert(),
+                    granted,
+                    "{spec}, entrypoint {index}, {case:?}"
+                );
+                if !granted && delegate != PARENT {
+                    assert_eq!(
+                        key_expiry(&mut storage, delegate),
+                        0,
+                        "{spec}, entrypoint {index}, {case:?}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// A stored ConfigurableAccount key is only usable from T14, and only when the signature
+/// declares the same type.
+#[test]
+fn stored_key_type_is_checked_on_use() {
+    let mut storage = HashMapStorageProvider::new_with_spec(1, TempoHardfork::T14);
+    let grant = &authorization_calls(DELEGATE, SignatureType::ConfigurableAccount, u64::MAX)[1];
+    assert!(!call_as_parent(&mut storage, grant).is_revert());
+
+    let validate = |storage: &mut HashMapStorageProvider, expected_sig_type| {
+        StorageCtx::enter(storage, || {
+            AccountKeychain::new()
+                .validate_keychain_authorization(PARENT, DELEGATE, 0, expected_sig_type)
+                .is_ok()
+        })
+    };
+    for spec in TempoHardfork::VARIANTS
+        .iter()
+        .copied()
+        .filter(|spec| spec.is_t14())
+    {
+        storage.set_spec(spec);
+        assert!(validate(&mut storage, None));
+        assert!(validate(&mut storage, Some(3)));
+        assert!(!validate(&mut storage, Some(0)));
+    }
+    storage.set_spec(TempoHardfork::T13);
+    for expected_sig_type in [None, Some(0), Some(3)] {
+        assert!(!validate(&mut storage, expected_sig_type));
+    }
+}
