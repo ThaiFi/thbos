@@ -12,10 +12,11 @@ use alloy::{
 use alloy_eips::{BlockId, BlockNumberOrTag, Decodable2718, eip7702::Authorization};
 use eyre::OptionExt;
 use futures::{FutureExt, StreamExt};
+use jsonrpsee::types::ErrorObject;
 use reth_e2e_test_utils::{node::Finality, wait::WAIT_TIMEOUT};
 use reth_ethereum::pool::{TransactionEvent, TransactionPool};
 use reth_node_builder::BuiltPayload;
-use reth_rpc_eth_types::RpcInvalidTransactionError;
+use reth_rpc_eth_types::{EthApiError, RpcInvalidTransactionError};
 use serde_json::{from_value, json};
 use tempo_chainspec::spec::TEMPO_T1_BASE_FEE;
 use tempo_contracts::precompiles::{
@@ -26,8 +27,8 @@ use tempo_evm::transaction_error::ConfigurableAccountError;
 use tempo_primitives::{
     account::encode_config_commitment,
     transaction::{
-        ConfigurableAccountQuorumError, KeyAuthorization, SignedKeyAuthorization,
-        TempoSignedAuthorization, TokenLimit, calc_gas_balance_spending,
+        ConfigurableAccountQuorumError, ConfigurableAccountStateError, KeyAuthorization,
+        SignedKeyAuthorization, TempoSignedAuthorization, TokenLimit, calc_gas_balance_spending,
     },
 };
 use tokio::time::timeout;
@@ -292,11 +293,17 @@ async fn configurable_account_rpc_historical_state_and_account_overrides() -> ey
         .call(old_request.clone())
         .latest()
         .await
-        .unwrap_err()
-        .to_string();
-    assert!(stale.contains("commitment mismatch"), "{stale}");
-    assert!(stale.contains(&initial.to_string()), "{stale}");
-    assert!(stale.contains(&current.to_string()), "{stale}");
+        .unwrap_err();
+    let mismatch = ConfigurableAccountStateError::CommitmentMismatch {
+        expected: current,
+        actual: initial,
+    };
+    let invalid = EthApiError::InvalidParams(format!(
+        "{mismatch} for {} at the requested state",
+        account.address
+    ));
+    let invalid = ErrorObject::from(invalid);
+    assert_rpc_error(&stale, invalid.code(), invalid.message())?;
     let historical_gas = provider
         .estimate_gas(old_request)
         .block(historical_block)
