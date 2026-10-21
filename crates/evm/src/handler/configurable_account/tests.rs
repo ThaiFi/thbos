@@ -16,7 +16,7 @@ use tempo_precompiles::{
     signature_verifier::configurable_account_verification_gas, storage::keccak_cost,
 };
 use tempo_primitives::{
-    AASigned, TempoTxEnvelope,
+    TempoTxEnvelope,
     account::encode_config_commitment,
     transaction::{
         AccountSignature, CONFIGURABLE_ACCOUNT_CONFIG_DOMAIN, CONFIGURABLE_ACCOUNT_DOMAIN,

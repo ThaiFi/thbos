@@ -335,7 +335,7 @@ fn native_getter_observes_first_registration_during_execution() {
         .unwrap()
         .commit();
     assert!(output.status, "{output:?}");
-    assert_eq!(output.output, expected.as_slice());
+    assert_eq!(output.output, Bytes::from(expected));
 }
 
 #[test]
