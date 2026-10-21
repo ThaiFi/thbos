@@ -733,6 +733,8 @@ pub enum AccountSignatureError {
     InvalidConfigurableAccount(RlpError),
     /// A primitive signature that does not decode, with its message.
     Primitive(&'static str),
+    /// A configurable account approval inside a keychain V1 envelope.
+    ConfigurableAccountInKeychainV1,
 }
 
 impl AccountSignatureError {
@@ -742,6 +744,9 @@ impl AccountSignatureError {
             Self::Keychain => "keychain signatures are not account signatures",
             Self::InvalidConfigurableAccount(_) => "Invalid configurable account signature RLP",
             Self::Primitive(message) => message,
+            Self::ConfigurableAccountInKeychainV1 => {
+                "configurable account access keys require keychain V2"
+            }
         }
     }
 }
@@ -828,7 +833,7 @@ impl TempoSignature {
             let inner_signature = AccountSignature::from_bytes(inner_sig_bytes)?;
             if version == KeychainVersion::V1 && inner_signature.as_configurable_account().is_some()
             {
-                return Err("configurable account access keys require keychain V2");
+                return Err(AccountSignatureError::ConfigurableAccountInKeychainV1.into());
             }
 
             return Ok(Self::Keychain(KeychainSignature {
