@@ -227,11 +227,7 @@ fn keychain_verification_by_retired_roots_and_stored_key_types() {
 fn keychain_signature_must_embed_the_verified_account() {
     let key = Key::random(Secp256k1);
     let account = Address::repeat_byte(0x01);
-    let grant = Grant {
-        stored_type: Secp256k1,
-        admin: true,
-    };
-    let mut storage = storage_at(T14, account, key.address(), Some(grant), &[]);
+    let mut storage = storage_at(T14, account, key.address(), admin_key(Secp256k1), &[]);
     let signature = keychain_signature(&key, account);
     StorageCtx::enter(&mut storage, || {
         let verifier = SignatureVerifier::new();
