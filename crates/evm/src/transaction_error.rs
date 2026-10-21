@@ -339,9 +339,7 @@ pub enum ConfigurableAccountError {
         actual: Address,
     },
     /// The supplied configuration does not match the stored commitment.
-    #[error(
-        "configurable account configuration commitment mismatch: expected {expected}, actual {actual}"
-    )]
+    #[error("account configuration commitment mismatch: expected {expected}, actual {actual}")]
     ConfigurationCommitmentMismatch {
         /// Stored commitment.
         expected: B256,

@@ -30,8 +30,8 @@ use tempo_primitives::{
     TempoHeader, TempoTxEnvelope,
     transaction::{
         Call, ConfigurableAccountConfig, ConfigurableAccountOwner, ConfigurableAccountSignature,
-        PrimitiveSignature, TempoSignature, TempoSignedAuthorization, TempoTransaction,
-        configurable_account_digest,
+        ConfigurableAccountStateError, PrimitiveSignature, TempoSignature,
+        TempoSignedAuthorization, TempoTransaction, configurable_account_digest,
     },
 };
 
@@ -344,5 +344,41 @@ fn configurable_account_signature_verification_is_intrinsic_gas() {
     assert_eq!(
         native.tx_gas_used() - primitive.tx_gas_used(),
         verification + first_use
+    );
+}
+
+/// A registered account signing with another configuration fails with the commitment mismatch
+/// that the account state reports, worded as the state error is.
+#[test]
+fn configurable_account_commitment_mismatch_reads_as_the_state_error() {
+    let mut evm = evm(InMemoryDB::default());
+    let owner = PrivateKeySigner::random();
+    let (config, account) = configurable_account(&owner);
+    let calls = vec![call(DELEGATE, Bytes::new())];
+    let envelope = signed_by_account(aa_tx(0, calls.clone()), &owner, config.clone(), account);
+    let result = evm
+        .transact(&recovered(envelope, account))
+        .unwrap()
+        .commit();
+    assert!(result.status, "{result:?}");
+    let registered = commitment(&mut evm, account);
+
+    let stale = ConfigurableAccountConfig {
+        salt: B256::repeat_byte(0x5b),
+        ..config
+    };
+    let envelope = signed_by_account(aa_tx(1, calls), &owner, stale, account);
+    let error = invalid(&mut evm, &recovered(envelope, account));
+    let TempoInvalidTransaction::ConfigurableAccount(
+        ConfigurableAccountError::ConfigurationCommitmentMismatch { expected, actual },
+    ) = error
+    else {
+        panic!("{error:?}");
+    };
+    assert_eq!(expected, registered);
+    assert_ne!(actual, registered);
+    assert_eq!(
+        error.to_string(),
+        ConfigurableAccountStateError::CommitmentMismatch { expected, actual }.to_string()
     );
 }
