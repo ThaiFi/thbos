@@ -93,17 +93,6 @@ enum Committed {
     Account,
 }
 
-/// A keychain signature by a signer of `signer_type` at `spec`, and whether `verify_keychain` and
-/// `verify_keychain_admin` accept it.
-struct Case {
-    spec: TempoHardfork,
-    signer_type: SignatureType,
-    /// The grant to the signer; none when the signer is the account's root key.
-    grant: Option<Grant>,
-    committed: Committed,
-    expected: (bool, bool),
-}
-
 const fn key(stored_type: SignatureType) -> Option<Grant> {
     Some(Grant {
         stored_type,
@@ -178,24 +167,34 @@ fn keychain_signature(key: &Key, account: Address) -> Bytes {
     .to_bytes()
 }
 
-const fn case(
-    spec: TempoHardfork,
-    signer_type: SignatureType,
-    grant: Option<Grant>,
-    committed: Committed,
-    expected: (bool, bool),
-) -> Case {
-    Case {
-        spec,
-        signer_type,
-        grant,
-        committed,
-        expected,
-    }
-}
-
 #[test]
 fn keychain_verification_by_retired_roots_and_stored_key_types() {
+    /// A keychain signature by a signer of `signer_type` at `spec`, and whether
+    /// `verify_keychain` and `verify_keychain_admin` accept it.
+    struct Case {
+        spec: TempoHardfork,
+        signer_type: SignatureType,
+        /// The grant to the signer; none when the signer is the account's root key.
+        grant: Option<Grant>,
+        committed: Committed,
+        expected: (bool, bool),
+    }
+
+    const fn case(
+        spec: TempoHardfork,
+        signer_type: SignatureType,
+        grant: Option<Grant>,
+        committed: Committed,
+        expected: (bool, bool),
+    ) -> Case {
+        Case {
+            spec,
+            signer_type,
+            grant,
+            committed,
+            expected,
+        }
+    }
     let cases = [
         // The root is implicitly admin, but is not an access key.
         case(T14, Secp256k1, None, Nobody, (false, true)),
@@ -235,7 +234,7 @@ fn keychain_verification_by_retired_roots_and_stored_key_types() {
             Signer => vec![signer.address()],
             Account => vec![account],
         };
-        let case =
+        let name =
             format!("{spec:?}, {signer_type:?} signer, grant: {grant:?}, committed: {committed:?}");
         let mut storage = storage_at(spec, account, signer.address(), grant, &committed_addresses);
         let signature = keychain_signature(&signer, account);
@@ -244,13 +243,13 @@ fn keychain_verification_by_retired_roots_and_stored_key_types() {
             (
                 verifier
                     .verify_keychain(account, HASH, signature.clone())
-                    .expect(&case),
+                    .expect(&name),
                 verifier
                     .verify_keychain_admin(account, HASH, signature)
-                    .expect(&case),
+                    .expect(&name),
             )
         });
-        assert_eq!(actual, expected, "{case}");
+        assert_eq!(actual, expected, "{name}");
     }
 }
 
