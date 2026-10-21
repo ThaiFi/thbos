@@ -181,7 +181,6 @@ crate::sol! {
         error InvalidSignature();
         error LogoURITooLong();
         error InvalidLogoURI();
-        /// The account's root key is retired because it has a configuration commitment.
         error RootKeyRetired(address account);
     }
 }

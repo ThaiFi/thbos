@@ -56,7 +56,7 @@ impl SignatureVerifier {
     /// when the inner signature type differs from the stored key type.
     pub fn verify_keychain(&self, account: Address, hash: B256, signature: Bytes) -> Result<bool> {
         let key = self.recover_keychain_key(hash, signature)?;
-        if key.account != account || self.is_retired_root(key.key_id)? {
+        if key.account != account || self.storage.is_retired_root(key.key_id)? {
             return Ok(false);
         }
 
@@ -78,7 +78,7 @@ impl SignatureVerifier {
         signature: Bytes,
     ) -> Result<bool> {
         let key = self.recover_keychain_key(hash, signature)?;
-        if key.account != account || self.is_retired_root(key.key_id)? {
+        if key.account != account || self.storage.is_retired_root(key.key_id)? {
             return Ok(false);
         }
 
@@ -89,13 +89,6 @@ impl SignatureVerifier {
         Ok(self
             .registered_key(account, key.key_id, key.signature_type)?
             .is_some_and(|key| key.is_admin))
-    }
-
-    /// Returns whether `key_id` is a retired root key (TIP-1112): from T14, an address with a
-    /// nonzero account commitment no longer acts through its own key. Reads the commitment at call
-    /// time, so a migration earlier in the block counts.
-    fn is_retired_root(&self, key_id: Address) -> Result<bool> {
-        Ok(self.storage.spec().is_t14() && !self.storage.config_commitment(key_id)?.is_zero())
     }
 
     /// Returns the active access key, or `None` when the keychain rejects it.
