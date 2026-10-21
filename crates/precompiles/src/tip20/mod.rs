@@ -333,6 +333,11 @@ impl TIP20Token {
     /// Maximum byte length of a token logo URI (TIP-1026).
     pub const MAX_LOGO_URI_BYTES: usize = 256;
 
+    /// Maximum byte length of a token name (metadata setters).
+    pub const MAX_NAME_BYTES: usize = 128;
+    /// Maximum byte length of a token symbol (metadata setters).
+    pub const MAX_SYMBOL_BYTES: usize = 32;
+
     /// Allowlist of ASCII-case-insensitive URI schemes accepted for [`Self::set_logo_uri`].
     ///
     /// TIP-1026 guarantees that the protocol validates the scheme prefix to make integration easier
@@ -411,6 +416,61 @@ impl TIP20Token {
     }
 
     // ========== End TIP-1026 ==========
+
+    // ========== Metadata: Name / Symbol ==========
+
+    /// Sets the token name (requires `DEFAULT_ADMIN_ROLE`).
+    ///
+    /// Note: the token's EIP-712 domain separator is derived from the name, so
+    /// changing it invalidates signatures signed against the previous domain.
+    ///
+    /// # Errors
+    /// - `Unauthorized` — caller does not hold `DEFAULT_ADMIN_ROLE`
+    /// - `InvalidName` — new name is empty
+    /// - `NameTooLong` — `bytes(newName).length > 128`
+    pub fn set_name(&mut self, msg_sender: Address, call: ITIP20::setNameCall) -> Result<()> {
+        self.check_role(msg_sender, DEFAULT_ADMIN_ROLE)?;
+
+        if call.newName.is_empty() {
+            return Err(TIP20Error::invalid_name().into());
+        }
+        if call.newName.len() > Self::MAX_NAME_BYTES {
+            return Err(TIP20Error::name_too_long().into());
+        }
+
+        self.name.write(call.newName.clone())?;
+
+        self.emit_event(TIP20Event::NameUpdated(ITIP20::NameUpdated {
+            updater: msg_sender,
+            newName: call.newName,
+        }))
+    }
+
+    /// Sets the token symbol (requires `DEFAULT_ADMIN_ROLE`).
+    ///
+    /// # Errors
+    /// - `Unauthorized` — caller does not hold `DEFAULT_ADMIN_ROLE`
+    /// - `InvalidSymbol` — new symbol is empty
+    /// - `SymbolTooLong` — `bytes(newSymbol).length > 32`
+    pub fn set_symbol(&mut self, msg_sender: Address, call: ITIP20::setSymbolCall) -> Result<()> {
+        self.check_role(msg_sender, DEFAULT_ADMIN_ROLE)?;
+
+        if call.newSymbol.is_empty() {
+            return Err(TIP20Error::invalid_symbol().into());
+        }
+        if call.newSymbol.len() > Self::MAX_SYMBOL_BYTES {
+            return Err(TIP20Error::symbol_too_long().into());
+        }
+
+        self.symbol.write(call.newSymbol.clone())?;
+
+        self.emit_event(TIP20Event::SymbolUpdated(ITIP20::SymbolUpdated {
+            updater: msg_sender,
+            newSymbol: call.newSymbol,
+        }))
+    }
+
+    // ========== End Metadata ==========
 
     /// Pauses all token transfers.
     ///
@@ -3311,6 +3371,199 @@ pub(crate) mod tests {
                 },
             )?;
             assert_eq!(token.logo_uri()?, "");
+
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn test_set_name_admin_updates_and_emits() -> eyre::Result<()> {
+        let mut storage = HashMapStorageProvider::new(1);
+        let admin = Address::random();
+
+        StorageCtx::enter(&mut storage, || {
+            let mut token = TIP20Setup::create("Test", "TST", admin)
+                .clear_events()
+                .apply()?;
+
+            token.set_name(
+                admin,
+                ITIP20::setNameCall {
+                    newName: "ThaiFi USD".to_string(),
+                },
+            )?;
+
+            assert_eq!(token.name()?, "ThaiFi USD");
+            // Only the name changes — symbol and currency are untouched.
+            assert_eq!(token.symbol()?, "TST");
+            assert_eq!(token.currency()?, "USD");
+
+            token.assert_emitted_events(vec![TIP20Event::NameUpdated(ITIP20::NameUpdated {
+                updater: admin,
+                newName: "ThaiFi USD".to_string(),
+            })]);
+
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn test_set_name_non_admin_reverts() -> eyre::Result<()> {
+        let mut storage = HashMapStorageProvider::new(1);
+        let admin = Address::random();
+        let non_admin = Address::random();
+
+        StorageCtx::enter(&mut storage, || {
+            let mut token = TIP20Setup::create("Test", "TST", admin).apply()?;
+
+            let result = token.set_name(
+                non_admin,
+                ITIP20::setNameCall {
+                    newName: "Sneaky".to_string(),
+                },
+            );
+
+            assert!(matches!(
+                result,
+                Err(TempoPrecompileError::RolesAuthError(
+                    RolesAuthError::Unauthorized(_)
+                ))
+            ));
+            assert_eq!(token.name()?, "Test");
+
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn test_set_name_empty_and_too_long_revert() -> eyre::Result<()> {
+        let mut storage = HashMapStorageProvider::new(1);
+        let admin = Address::random();
+
+        StorageCtx::enter(&mut storage, || {
+            let mut token = TIP20Setup::create("Test", "TST", admin).apply()?;
+
+            let result = token.set_name(admin, ITIP20::setNameCall { newName: String::new() });
+            assert!(matches!(
+                result,
+                Err(TempoPrecompileError::TIP20(TIP20Error::InvalidName(_)))
+            ));
+
+            let too_long = "a".repeat(TIP20Token::MAX_NAME_BYTES + 1);
+            let result = token.set_name(admin, ITIP20::setNameCall { newName: too_long });
+            assert!(matches!(
+                result,
+                Err(TempoPrecompileError::TIP20(TIP20Error::NameTooLong(_)))
+            ));
+
+            // A name exactly at the cap is accepted.
+            let at_cap = "b".repeat(TIP20Token::MAX_NAME_BYTES);
+            token.set_name(admin, ITIP20::setNameCall { newName: at_cap.clone() })?;
+            assert_eq!(token.name()?, at_cap);
+
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn test_set_symbol_admin_updates_and_emits() -> eyre::Result<()> {
+        let mut storage = HashMapStorageProvider::new(1);
+        let admin = Address::random();
+
+        StorageCtx::enter(&mut storage, || {
+            let mut token = TIP20Setup::create("Test", "TST", admin)
+                .clear_events()
+                .apply()?;
+
+            token.set_symbol(
+                admin,
+                ITIP20::setSymbolCall {
+                    newSymbol: "USDF".to_string(),
+                },
+            )?;
+
+            assert_eq!(token.symbol()?, "USDF");
+            assert_eq!(token.name()?, "Test");
+            assert_eq!(token.currency()?, "USD");
+
+            token.assert_emitted_events(vec![TIP20Event::SymbolUpdated(ITIP20::SymbolUpdated {
+                updater: admin,
+                newSymbol: "USDF".to_string(),
+            })]);
+
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn test_set_symbol_non_admin_and_invalid_reverts() -> eyre::Result<()> {
+        let mut storage = HashMapStorageProvider::new(1);
+        let admin = Address::random();
+        let non_admin = Address::random();
+
+        StorageCtx::enter(&mut storage, || {
+            let mut token = TIP20Setup::create("Test", "TST", admin).apply()?;
+
+            let result = token.set_symbol(
+                non_admin,
+                ITIP20::setSymbolCall {
+                    newSymbol: "SNEAKY".to_string(),
+                },
+            );
+            assert!(matches!(
+                result,
+                Err(TempoPrecompileError::RolesAuthError(
+                    RolesAuthError::Unauthorized(_)
+                ))
+            ));
+
+            let result = token.set_symbol(
+                admin,
+                ITIP20::setSymbolCall {
+                    newSymbol: String::new(),
+                },
+            );
+            assert!(matches!(
+                result,
+                Err(TempoPrecompileError::TIP20(TIP20Error::InvalidSymbol(_)))
+            ));
+
+            let too_long = "a".repeat(TIP20Token::MAX_SYMBOL_BYTES + 1);
+            let result = token.set_symbol(
+                admin,
+                ITIP20::setSymbolCall {
+                    newSymbol: too_long,
+                },
+            );
+            assert!(matches!(
+                result,
+                Err(TempoPrecompileError::TIP20(TIP20Error::SymbolTooLong(_)))
+            ));
+
+            assert_eq!(token.symbol()?, "TST");
+
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn test_domain_separator_tracks_name_change() -> eyre::Result<()> {
+        let mut storage = HashMapStorageProvider::new(1);
+        let admin = Address::random();
+
+        StorageCtx::enter(&mut storage, || {
+            let mut token = TIP20Setup::create("Test", "TST", admin).apply()?;
+
+            let before = token.domain_separator()?;
+            token.set_name(
+                admin,
+                ITIP20::setNameCall {
+                    newName: "Renamed".to_string(),
+                },
+            )?;
+            let after = token.domain_separator()?;
+
+            assert_ne!(before, after);
 
             Ok(())
         })

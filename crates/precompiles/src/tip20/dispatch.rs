@@ -64,6 +64,8 @@ impl Precompile for TIP20Token {
                     setSupplyCap(call) => mutate(call, msg_sender, |sender, c| self.set_supply_cap(sender, c)),
                     #[schedule(since = T5)]
                     setLogoURI(call) => mutate(call, msg_sender, |sender, c| self.set_logo_uri(sender, c)),
+                    setName(call) => mutate(call, msg_sender, |sender, c| self.set_name(sender, c)),
+                    setSymbol(call) => mutate(call, msg_sender, |sender, c| self.set_symbol(sender, c)),
                     pause(call) => mutate(call, msg_sender, |sender, c| self.pause(sender, c)),
                     unpause(call) => mutate(call, msg_sender, |sender, c| self.unpause(sender, c)),
                     setNextQuoteToken(call) => mutate(call, msg_sender, |sender, c| self.set_next_quote_token(sender, c)),
@@ -695,6 +697,43 @@ mod tests {
             let result = token.call(&set_logo_uri_calldata, admin)?;
             assert!(result.is_revert());
             assert!(UnknownFunctionSelector::abi_decode(&result.bytes).is_ok());
+
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn test_name_symbol_selectors_route() -> eyre::Result<()> {
+        // setName/setSymbol are not hardfork-gated: the selectors route at any fork.
+        let mut storage = HashMapStorageProvider::new_with_spec(1, TempoHardfork::T4);
+        let admin = Address::random();
+
+        StorageCtx::enter(&mut storage, || {
+            let mut token = TIP20Setup::create("Test", "TST", admin)
+                .clear_events()
+                .apply()?;
+
+            let set_name_calldata = ITIP20::setNameCall {
+                newName: "Renamed".to_string(),
+            }
+            .abi_encode();
+            let result = token.call(&set_name_calldata, admin)?;
+            assert!(!result.is_revert());
+            assert_eq!(token.name()?, "Renamed");
+
+            let set_symbol_calldata = ITIP20::setSymbolCall {
+                newSymbol: "RNM".to_string(),
+            }
+            .abi_encode();
+            let result = token.call(&set_symbol_calldata, admin)?;
+            assert!(!result.is_revert());
+            assert_eq!(token.symbol()?, "RNM");
+
+            // Non-admin reverts, but with Unauthorized — not an unknown selector.
+            let non_admin = Address::random();
+            let result = token.call(&set_name_calldata, non_admin)?;
+            assert!(result.is_revert());
+            assert!(UnknownFunctionSelector::abi_decode(&result.bytes).is_err());
 
             Ok(())
         })
