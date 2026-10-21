@@ -1153,6 +1153,7 @@ dependencies = [
  "smallvec",
  "thiserror 2.0.21",
  "tracing",
+ "triomphe",
 ]
 
 [[package]]
@@ -14693,6 +14694,7 @@ dependencies = [
  "alloy-rpc-types-eth",
  "derive_more",
  "reth-ethereum-engine-primitives",
+ "reth-evm",
  "reth-node-api",
  "reth-payload-primitives",
  "reth-primitives-traits",
@@ -14781,6 +14783,7 @@ dependencies = [
  "reth-codecs",
  "reth-db-api",
  "reth-ethereum-primitives",
+ "reth-evm",
  "reth-primitives-traits",
  "reth-rpc-convert",
  "serde",
@@ -14832,6 +14835,7 @@ dependencies = [
  "reth-cli-commands",
  "reth-db-api",
  "reth-etl",
+ "reth-evm",
  "reth-primitives-traits",
  "reth-provider",
  "reth-tasks",
@@ -17203,6 +17207,7 @@ dependencies = [
  "metrics",
  "parking_lot",
  "rayon",
+ "reth-evm",
  "reth-metrics",
  "reth-primitives-traits",
  "reth-provider",

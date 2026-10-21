@@ -33,6 +33,8 @@ extern crate alloc;
 pub mod account;
 
 use once_cell as _;
+#[cfg(feature = "rpc")]
+use reth_evm as _;
 
 /// Tempo block.
 pub type Block = alloy_consensus::Block<TempoTxEnvelope, TempoHeader>;

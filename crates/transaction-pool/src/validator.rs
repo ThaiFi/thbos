@@ -12,7 +12,7 @@ use parking_lot::RwLock;
 use reth_chainspec::{ChainSpecProvider, EthChainSpec};
 use reth_evm::{BlockExecutorFactory, ConfigureEvm, EvmEnv as _, database::StateProviderDatabase};
 use reth_primitives_traits::{
-    Account, Bytecode, SealedBlock, transaction::error::InvalidTransactionError,
+    Account, AccountExtension, Bytecode, SealedBlock, transaction::error::InvalidTransactionError,
 };
 use reth_provider::BlockReaderIdExt;
 use reth_storage_api::{
@@ -837,6 +837,7 @@ where
                 balance: account.balance,
                 bytecode_hash: (!account.code_hash.is_zero() && account.code_hash != KECCAK_EMPTY)
                     .then_some(account.code_hash),
+                extension: AccountExtension::from_shared(account.extension.into_shared()),
             }))
     }
 }
@@ -971,6 +972,7 @@ mod tests {
             nonce: 7,
             balance: U256::from(42),
             bytecode_hash: Some(code_hash),
+            ..Default::default()
         };
         let bytecode = EvmBytecode::default();
         let account_reads = Arc::new(AtomicUsize::new(0));
@@ -991,7 +993,10 @@ mod tests {
         let cache = StateCache::default();
         let cached = CachedAccountInfoReader::new(Db::new(StateCacheDb::new(&cache, provider)));
 
-        assert_eq!(cached.basic_account(&address).unwrap(), Some(account));
+        assert_eq!(
+            cached.basic_account(&address).unwrap(),
+            Some(account.clone())
+        );
         assert_eq!(cached.basic_account(&address).unwrap(), Some(account));
         assert_eq!(account_reads.load(Ordering::Relaxed), 1);
 
