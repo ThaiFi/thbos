@@ -895,10 +895,7 @@ mod tests {
     use evm2::{
         DatabaseError, TxResult,
         bytecode::Bytecode as EvmBytecode,
-        evm::{
-            AccountExtension as EvmAccountExtension, AccountInfo, Database, Db, InMemoryDB,
-            precompile::NoPrecompiles,
-        },
+        evm::{AccountInfo, Database, Db, InMemoryDB, precompile::NoPrecompiles},
         registry::{HandlerResult, TxRegistry, TxRequest, handler},
     };
     use reth_chainspec::EthChainSpec;
@@ -977,7 +974,7 @@ mod tests {
             nonce: 7,
             balance: U256::from(42),
             bytecode_hash: Some(code_hash),
-            extension: AccountExtension::copy_from_slice(&[0x42; 32]),
+            ..Default::default()
         };
         let bytecode = EvmBytecode::default();
         let account_reads = Arc::new(AtomicUsize::new(0));
@@ -985,17 +982,12 @@ mod tests {
         let provider = CountingDatabase {
             address,
             code_hash,
-            account: {
-                let mut info = AccountInfo::new(
-                    account.balance,
-                    account.nonce,
-                    code_hash,
-                    Some(bytecode.clone()),
-                );
-                info.extension =
-                    EvmAccountExtension::from_shared(account.extension.clone().into_shared());
-                info
-            },
+            account: AccountInfo::new(
+                account.balance,
+                account.nonce,
+                code_hash,
+                Some(bytecode.clone()),
+            ),
             bytecode: bytecode.clone(),
             account_reads: account_reads.clone(),
             bytecode_reads: bytecode_reads.clone(),
