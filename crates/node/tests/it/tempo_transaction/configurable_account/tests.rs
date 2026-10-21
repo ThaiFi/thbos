@@ -15,6 +15,7 @@ use futures::{FutureExt, StreamExt};
 use reth_e2e_test_utils::{node::Finality, wait::WAIT_TIMEOUT};
 use reth_ethereum::pool::{TransactionEvent, TransactionPool};
 use reth_node_builder::BuiltPayload;
+use reth_rpc_eth_types::RpcInvalidTransactionError;
 use serde_json::{from_value, json};
 use tempo_chainspec::spec::TEMPO_T1_BASE_FEE;
 use tempo_contracts::precompiles::{
@@ -26,7 +27,7 @@ use tempo_primitives::{
     account::encode_config_commitment,
     transaction::{
         ConfigurableAccountQuorumError, KeyAuthorization, SignedKeyAuthorization,
-        TempoSignedAuthorization, TokenLimit,
+        TempoSignedAuthorization, TokenLimit, calc_gas_balance_spending,
     },
 };
 use tokio::time::timeout;
@@ -578,16 +579,17 @@ async fn configurable_account_rpc_maximum_mixed_quorums_and_validation_cost_orde
         error.contains("intrinsic") || error.contains("gas limit"),
         "{error}"
     );
-    let error = reject(
+    let error = rejection(
         &env,
         tx.clone(),
         delegate.as_delegate(&tx, parent.address, false)?,
     )
-    .await?;
-    assert!(
-        error.contains("fund") || error.contains("balance"),
-        "{error}"
-    );
+    .await;
+    let unfunded = RpcInvalidTransactionError::InsufficientFunds {
+        cost: calc_gas_balance_spending(tx.gas_limit, tx.max_fee_per_gas),
+        balance: U256::ZERO,
+    };
+    assert_rpc_error(&error, unfunded.error_code(), &unfunded.to_string())?;
     env.fund_account(parent.address).await?;
     let expected = match parent.owners.last().unwrap() {
         OwnerKey::Secp(_) => {
