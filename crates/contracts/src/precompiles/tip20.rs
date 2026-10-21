@@ -87,6 +87,8 @@ crate::sol! {
         function transferPolicyId() external view returns (uint64);
         function logoURI() external view returns (string memory);
         function setLogoURI(string calldata newLogoURI) external;
+        function setName(string calldata newName) external;
+        function setSymbol(string calldata newSymbol) external;
         function burnBlocked(address from, uint256 amount) external;
         /// @notice Burns from any unprotected account (requires BURN_AT_ROLE, T12+).
         function burnAt(address from, uint256 amount) external;
@@ -158,6 +160,8 @@ crate::sol! {
         event RewardDistributed(address indexed funder, uint256 amount);
         event RewardRecipientSet(address indexed holder, address indexed recipient);
         event LogoURIUpdated(address indexed updater, string newLogoURI);
+        event NameUpdated(address indexed updater, string newName);
+        event SymbolUpdated(address indexed updater, string newSymbol);
 
         // Errors
         error InsufficientBalance(uint256 available, uint256 required, address token);
@@ -182,6 +186,10 @@ crate::sol! {
         error LogoURITooLong();
         error InvalidLogoURI();
         error RootKeyRetired(address account);
+        error NameTooLong();
+        error SymbolTooLong();
+        error InvalidName();
+        error InvalidSymbol();
     }
 }
 
