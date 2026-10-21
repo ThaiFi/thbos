@@ -1078,6 +1078,21 @@ fn native_replay_rejects_account_authorization() {
         &pure_verifier.into_signed(primitive.clone()).into(),
         TempoHardfork::T14
     ));
+    // Only a primitive root signature is replayed, even for an ordinary call.
+    for signature in [
+        signed.signature().clone(),
+        TempoSignature::Keychain(KeychainSignature::new(
+            f.account,
+            PrimitiveSignature::Secp256k1(Signature::test_signature()),
+        )),
+    ] {
+        let envelope: TempoTxEnvelope = ordinary_tx.clone().into_signed(signature).into();
+        assert!(!supports_storage_action_replay(
+            &envelope,
+            TempoHardfork::T14
+        ));
+        rejected.push(envelope);
+    }
     let mut tx = ordinary_tx;
     tx.key_authorization = Some(
         KeyAuthorization::unrestricted(1, SignatureType::Secp256k1, Address::repeat_byte(2))
