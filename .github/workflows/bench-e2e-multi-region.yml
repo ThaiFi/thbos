@@ -1004,6 +1004,21 @@ jobs:
             fi
           done
 
+      - name: Read load-generator progress
+        run: |
+          [[ "$BENCHMARK_RUN_IDS" =~ ^[0-9]+(,[0-9]+)*$ ]]
+          IFS=',' read -ra benchmark_runs <<< "$BENCHMARK_RUN_IDS"
+          for benchmark_run_id in "${benchmark_runs[@]}"; do
+            benchmark_instance="tempo-e2e-bench-e2e-multi-region-$benchmark_run_id-1-load-generator-0"
+            benchmark_zone="$(gcloud compute instances list --filter="name=$benchmark_instance" --format='value(zone.basename())')"
+            [[ -n "$benchmark_zone" ]] || continue
+            timeout 90 gcloud compute ssh "$benchmark_instance" \
+              --zone="$benchmark_zone" --tunnel-through-iap --quiet \
+              --ssh-key-file="$RUNNER_TEMP/benchmark-diagnostic-key" \
+              --ssh-key-expire-after=10m \
+              --command="sudo bash -c 'for progress_file in /opt/tempo/load-generator/job.*/results/load-generator.log /opt/tempo/load-generator/job.*/results/txgen-setup-generate.err /opt/tempo/load-generator/job.*/results/txgen-setup-send.err; do if test -f \"\$progress_file\"; then echo \"\$progress_file\"; tail -n 30 \"\$progress_file\"; fi; done'" || echo "Live load-generator logs unavailable."
+          done
+
       - name: Read owned benchmark VM error signals
         run: |
           [[ "$BENCHMARK_RUN_IDS" =~ ^[0-9]+(,[0-9]+)*$ ]]
