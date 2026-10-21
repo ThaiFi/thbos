@@ -278,58 +278,58 @@ env:
   CARGO_HTTP_TIMEOUT: "180"
 
 jobs:
-read-benchmark-progress:
-  permissions:
-    contents: read
-    id-token: write
-  runs-on: depot-ubuntu-latest-8
-  timeout-minutes: 10
-  env:
-    BENCH_GCP_PROJECT_ID: chain-benchmarking-zygis
-    BENCH_GCP_WIF_PROVIDER: projects/383683155128/locations/global/workloadIdentityPools/tempo-benchmark/providers/tempo-benchmark
-    BENCH_GCP_SERVICE_ACCOUNT: benchmark-runner@chain-benchmarking-zygis.iam.gserviceaccount.com
-    BENCH_INPUT_CLOUD: gcp
-  steps:
-  - name: Secure runner
-    uses: tempoxyz/gh-actions/actions/secure-runner@35019557465e3c38ee3468be171771fd73577584
-  - name: Fetch GitHub token via STS
-    id: github-sts
-    uses: tempoxyz/gh-actions/actions/github-sts@35019557465e3c38ee3468be171771fd73577584
-    with:
-      scope: tempoxyz/tempo-multi-region-benchmark
-      policy: bench-e2e-multi-region
-  - name: Check org membership
-    if: github.event_name != 'schedule'
-    uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3
-    with:
-      github-token: ${{ steps.github-sts.outputs.token }}
-      script: "const org = 'tempoxyz';\nconst username = context.actor;\n\ntry {\n  const { status } = await github.rest.orgs.checkMembershipForUser({\
-        \ org, username });\n  if (status === 204 || status === 302) {\n    return;\n  }\n} catch {}\n\ncore.setFailed(`@${username}\
-        \ is not a member of ${org}`);\n"
-  - name: Isolate Google Cloud CLI state
-    if: env.BENCH_INPUT_CLOUD == 'gcp'
-    run: "gcloud_config_dir=\"$RUNNER_TEMP/gcloud-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}\"\nmkdir -p \"$gcloud_config_dir\"\
-      \n{\n  echo \"CLOUDSDK_CONFIG=$gcloud_config_dir\"\n  echo \"CLOUDSDK_CORE_PROJECT=$BENCH_GCP_PROJECT_ID\"\
-      \n} >> \"$GITHUB_ENV\"\n"
-  - name: Authenticate to Google Cloud
-    if: env.BENCH_INPUT_CLOUD == 'gcp'
-    uses: tempoxyz/gh-actions/vendor/google-github-actions/auth@35019557465e3c38ee3468be171771fd73577584
-    with:
-      workload_identity_provider: ${{ env.BENCH_GCP_WIF_PROVIDER }}
-      service_account: ${{ env.BENCH_GCP_SERVICE_ACCOUNT }}
-  - name: Setup Google Cloud CLI
-    if: env.BENCH_INPUT_CLOUD == 'gcp'
-    uses: tempoxyz/gh-actions/vendor/google-github-actions/setup-gcloud@35019557465e3c38ee3468be171771fd73577584
-    with:
-      project_id: ${{ env.BENCH_GCP_PROJECT_ID }}
-  - name: Read active benchmark progress
-    run: "set -euo pipefail\nmkdir -p progress\nprefix=gs://tempo-benchmark-artifacts-383683155128-us-east1/runs/bench-e2e-multi-region-39514560289-1/artifacts/runner\n\
-      for name in status.json timings.json timings.ndjson report.json txgen-report.json; do\n  if gcloud storage\
-      \ cp \"$prefix/$name\" \"progress/$name\"; then\n    if [[ \"$name\" != txgen-report.json ]]; then cat \"\
-      progress/$name\"; fi\n  fi\ndone\ngcloud storage ls \"$prefix/**\" > progress/object-list.txt\ncat progress/object-list.txt\n"
-  - name: Upload benchmark progress
-    uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
-    with:
-      name: multi-region-jit-live-progress
-      path: progress
-      if-no-files-found: error
+  read-benchmark-progress:
+    permissions:
+      contents: read
+      id-token: write
+    runs-on: depot-ubuntu-latest-8
+    timeout-minutes: 10
+    env:
+      BENCH_GCP_PROJECT_ID: chain-benchmarking-zygis
+      BENCH_GCP_WIF_PROVIDER: projects/383683155128/locations/global/workloadIdentityPools/tempo-benchmark/providers/tempo-benchmark
+      BENCH_GCP_SERVICE_ACCOUNT: benchmark-runner@chain-benchmarking-zygis.iam.gserviceaccount.com
+      BENCH_INPUT_CLOUD: gcp
+    steps:
+    - name: Secure runner
+      uses: tempoxyz/gh-actions/actions/secure-runner@35019557465e3c38ee3468be171771fd73577584
+    - name: Fetch GitHub token via STS
+      id: github-sts
+      uses: tempoxyz/gh-actions/actions/github-sts@35019557465e3c38ee3468be171771fd73577584
+      with:
+        scope: tempoxyz/tempo-multi-region-benchmark
+        policy: bench-e2e-multi-region
+    - name: Check org membership
+      if: github.event_name != 'schedule'
+      uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3
+      with:
+        github-token: ${{ steps.github-sts.outputs.token }}
+        script: "const org = 'tempoxyz';\nconst username = context.actor;\n\ntry {\n  const { status } = await github.rest.orgs.checkMembershipForUser({\
+          \ org, username });\n  if (status === 204 || status === 302) {\n    return;\n  }\n} catch {}\n\ncore.setFailed(`@${username}\
+          \ is not a member of ${org}`);\n"
+    - name: Isolate Google Cloud CLI state
+      if: env.BENCH_INPUT_CLOUD == 'gcp'
+      run: "gcloud_config_dir=\"$RUNNER_TEMP/gcloud-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}\"\nmkdir -p \"$gcloud_config_dir\"\
+        \n{\n  echo \"CLOUDSDK_CONFIG=$gcloud_config_dir\"\n  echo \"CLOUDSDK_CORE_PROJECT=$BENCH_GCP_PROJECT_ID\"\
+        \n} >> \"$GITHUB_ENV\"\n"
+    - name: Authenticate to Google Cloud
+      if: env.BENCH_INPUT_CLOUD == 'gcp'
+      uses: tempoxyz/gh-actions/vendor/google-github-actions/auth@35019557465e3c38ee3468be171771fd73577584
+      with:
+        workload_identity_provider: ${{ env.BENCH_GCP_WIF_PROVIDER }}
+        service_account: ${{ env.BENCH_GCP_SERVICE_ACCOUNT }}
+    - name: Setup Google Cloud CLI
+      if: env.BENCH_INPUT_CLOUD == 'gcp'
+      uses: tempoxyz/gh-actions/vendor/google-github-actions/setup-gcloud@35019557465e3c38ee3468be171771fd73577584
+      with:
+        project_id: ${{ env.BENCH_GCP_PROJECT_ID }}
+    - name: Read active benchmark progress
+      run: "set -euo pipefail\nmkdir -p progress\nprefix=gs://tempo-benchmark-artifacts-383683155128-us-east1/runs/bench-e2e-multi-region-39514560289-1/artifacts/runner\n\
+        for name in status.json timings.json timings.ndjson report.json txgen-report.json; do\n  if gcloud storage\
+        \ cp \"$prefix/$name\" \"progress/$name\"; then\n    if [[ \"$name\" != txgen-report.json ]]; then cat \"\
+        progress/$name\"; fi\n  fi\ndone\ngcloud storage ls \"$prefix/**\" > progress/object-list.txt\ncat progress/object-list.txt\n"
+    - name: Upload benchmark progress
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+      with:
+        name: multi-region-jit-live-progress
+        path: progress
+        if-no-files-found: error
