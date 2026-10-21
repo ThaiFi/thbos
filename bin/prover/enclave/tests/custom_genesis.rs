@@ -4,6 +4,7 @@ use std::{fs, path::Path, process::Command};
 
 use alloy_genesis::Genesis;
 use alloy_primitives::Address;
+use serde_json::{json, to_vec};
 
 #[test]
 fn invalid_custom_genesis_fails_startup_without_panicking() {
@@ -14,13 +15,9 @@ fn invalid_custom_genesis_fails_startup_without_panicking() {
     genesis.config.chain_id = 31_318;
     genesis.config.extra_fields.insert(
         "configurableAccountRecoveryFactory".into(),
-        serde_json::json!(Address::ZERO),
+        json!(Address::ZERO),
     );
-    fs::write(
-        directory.join("custom.json"),
-        serde_json::to_vec(&genesis).unwrap(),
-    )
-    .unwrap();
+    fs::write(directory.join("custom.json"), to_vec(&genesis).unwrap()).unwrap();
 
     let output = Command::new(env!("CARGO_BIN_EXE_tempo-zone-prover-enclave"))
         .arg("--tempo-genesis")

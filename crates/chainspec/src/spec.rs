@@ -1393,6 +1393,8 @@ mod tests {
     #[cfg(feature = "cli")]
     #[test]
     fn genesis_cli_parser_checks_account_extensions() {
+        use serde_json::to_string;
+
         let mut genesis = DEV.genesis().clone();
         genesis
             .config
@@ -1401,7 +1403,7 @@ mod tests {
         let address = Address::repeat_byte(0x33);
         let payload = encode_config_commitment(B256::repeat_byte(1));
         genesis.alloc.entry(address).or_default().extension = payload.clone().into();
-        let spec = chain_value_parser(&serde_json::to_string(&genesis).unwrap()).unwrap();
+        let spec = chain_value_parser(&to_string(&genesis).unwrap()).unwrap();
         assert_eq!(
             spec.genesis().alloc[&address].extension.as_ref(),
             payload.as_ref()
@@ -1410,13 +1412,13 @@ mod tests {
             .config
             .extra_fields
             .insert("t14Time".into(), json!(genesis.timestamp + 1));
-        assert!(chain_value_parser(&serde_json::to_string(&genesis).unwrap()).is_err());
+        assert!(chain_value_parser(&to_string(&genesis).unwrap()).is_err());
         genesis
             .config
             .extra_fields
             .insert("t14Time".into(), json!(genesis.timestamp));
         genesis.alloc.entry(address).or_default().extension = vec![0x80].into();
-        assert!(chain_value_parser(&serde_json::to_string(&genesis).unwrap()).is_err());
+        assert!(chain_value_parser(&to_string(&genesis).unwrap()).is_err());
     }
 
     #[test]
