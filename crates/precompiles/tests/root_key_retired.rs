@@ -69,7 +69,7 @@ fn permit(
             spender,
             value,
             deadline,
-            v: u8::from(signature.v()) + 27,
+            v: signature.v_byte(),
             r: signature.r().into(),
             s: signature.s().into(),
         });
