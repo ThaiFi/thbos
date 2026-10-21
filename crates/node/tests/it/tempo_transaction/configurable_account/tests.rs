@@ -21,14 +21,14 @@ use tempo_contracts::precompiles::{
     ACCOUNT_KEYCHAIN_ADDRESS, IAccountKeychain, ITIP20, ITIP20ChannelReserve,
     TIP20_CHANNEL_RESERVE_ADDRESS,
 };
+use tempo_evm::transaction_error::ConfigurableAccountError;
 use tempo_primitives::{
     account::encode_config_commitment,
     transaction::{
-        KeyAuthorization, MultisigQuorumError, SignedKeyAuthorization, TempoSignedAuthorization,
-        TokenLimit,
+        ConfigurableAccountQuorumError, KeyAuthorization, SignedKeyAuthorization,
+        TempoSignedAuthorization, TokenLimit,
     },
 };
-use tempo_revm::native_multisig::NativeMultisigError;
 use tokio::time::timeout;
 
 /// A voucher channel funds a deposit in the fee token and pays out a signed cumulative amount.
@@ -161,7 +161,7 @@ async fn native_rpc_registration_revert_retry_and_rotation() -> eyre::Result<()>
     let tx = account.transaction(
         &env,
         vec![Call {
-            to: NATIVE_MULTISIG_ADDRESS.into(),
+            to: CONFIGURABLE_ACCOUNT_ADDRESS.into(),
             value: U256::ZERO,
             input: Bytes::from_static(&[0xff, 0xff, 0xff, 0xff]),
         }],
@@ -340,7 +340,7 @@ async fn native_rpc_fill_and_access_list_preserve_authority() -> eyre::Result<()
     let mut request = account.simulation_request();
     // Model the same algorithms and WebAuthn length that will be submitted.
     request
-        .multisig_simulation
+        .configurable_account_simulation
         .as_mut()
         .expect("simulation request carries a quorum")
         .approvals = account
@@ -354,7 +354,7 @@ async fn native_rpc_fill_and_access_list_preserve_authority() -> eyre::Result<()
                 )),
                 _ => None,
             };
-            Ok(MultisigSimulationApproval {
+            Ok(ConfigurableAccountSimulationApproval {
                 owner: owner.address(),
                 key_type: Some(signature.signature_type()),
                 key_data,
@@ -405,13 +405,13 @@ async fn native_rpc_fill_and_access_list_preserve_authority() -> eyre::Result<()
     assert_eq!(unsigned.tx().key_authorization.as_ref(), Some(&grant));
     assert_eq!(unsigned.signature(), &TempoSignature::default());
     for field in [
-        "multisigSimulation",
+        "configurableAccountSimulation",
         "keyAuthorizationSimulation",
-        "multisigSimulationSignature",
+        "configurableAccountSimulationSignature",
     ] {
         assert!(filled["tx"].get(field).is_none(), "{filled}");
     }
-    request.key_authorization_simulation = request.multisig_simulation.clone();
+    request.key_authorization_simulation = request.configurable_account_simulation.clone();
     let error = provider
         .fill_transaction(request)
         .await
@@ -437,14 +437,17 @@ async fn native_rpc_delegate_rotation_preserves_grant_and_spending() -> eyre::Re
     env.fund_account(parent.address).await?;
     env.fund_account(delegate.address).await?;
     let limit = U256::from(100_000_000_000u64);
-    let grant =
-        KeyAuthorization::unrestricted(env.chain_id(), SignatureType::Multisig, delegate.address)
-            .with_account(parent.address)
-            .with_limits(vec![TokenLimit {
-                token: DEFAULT_FEE_TOKEN,
-                limit,
-                period: 0,
-            }]);
+    let grant = KeyAuthorization::unrestricted(
+        env.chain_id(),
+        SignatureType::ConfigurableAccount,
+        delegate.address,
+    )
+    .with_account(parent.address)
+    .with_limits(vec![TokenLimit {
+        token: DEFAULT_FEE_TOKEN,
+        limit,
+        period: 0,
+    }]);
     let grant_signature = parent.quorum(grant.signature_hash(), false)?;
     let mut tx = parent.transaction(
         &env,
@@ -535,9 +538,12 @@ async fn native_rpc_maximum_mixed_quorums_and_validation_cost_order() -> eyre::R
     let mut env = environment().await?;
     let mut parent = NativeAccount::new(0x61, 8);
     let delegate = NativeAccount::new(0x81, 8);
-    let grant =
-        KeyAuthorization::unrestricted(env.chain_id(), SignatureType::Multisig, delegate.address)
-            .with_account(parent.address);
+    let grant = KeyAuthorization::unrestricted(
+        env.chain_id(),
+        SignatureType::ConfigurableAccount,
+        delegate.address,
+    )
+    .with_account(parent.address);
     let grant_signature = parent.quorum(grant.signature_hash(), false)?;
     let mut tx = parent.transaction(&env, vec![noop()]);
     tx.key_authorization = Some(
@@ -578,9 +584,11 @@ async fn native_rpc_maximum_mixed_quorums_and_validation_cost_order() -> eyre::R
     )
     .await?;
     let expected = match parent.owners.last().unwrap() {
-        OwnerKey::Secp(_) => NativeMultisigError::Quorum(MultisigQuorumError::SignerNotOwner),
+        OwnerKey::Secp(_) => {
+            ConfigurableAccountError::Quorum(ConfigurableAccountQuorumError::SignerNotOwner)
+        }
         OwnerKey::P256 { .. } => {
-            NativeMultisigError::OwnerSignatureRecoveryFailed { approval_index: 7 }
+            ConfigurableAccountError::OwnerSignatureRecoveryFailed { approval_index: 7 }
         }
     }
     .to_string();
@@ -649,7 +657,7 @@ async fn eoa_migration_rpc_estimate_send_and_rotate() -> eyre::Result<()> {
         let call = account.upgrade_call();
         let request = TransactionRequest {
             from: Some(account.address),
-            to: Some(NATIVE_MULTISIG_ADDRESS.into()),
+            to: Some(CONFIGURABLE_ACCOUNT_ADDRESS.into()),
             gas_price: None,
             max_fee_per_gas: None,
             max_priority_fee_per_gas: None,
@@ -670,9 +678,7 @@ async fn eoa_migration_rpc_estimate_send_and_rotate() -> eyre::Result<()> {
         let simulated = env.provider().call(request.clone()).latest().await?;
         assert_eq!(
             simulated,
-            Bytes::from(INativeMultisig::upgradeAccountCall::abi_encode_returns(
-                &expected
-            ))
+            Bytes::from(IConfigurableAccount::upgradeAccountCall::abi_encode_returns(&expected))
         );
         assert!(
             env.provider()
@@ -690,7 +696,7 @@ async fn eoa_migration_rpc_estimate_send_and_rotate() -> eyre::Result<()> {
         };
         assert_call_reverts(
             env.provider().call(from_contract).latest().await,
-            INativeMultisig::AccountHasCode {}.abi_encode(),
+            IConfigurableAccount::AccountHasCode {}.abi_encode(),
         );
 
         // The root signs the sole call.
@@ -701,14 +707,14 @@ async fn eoa_migration_rpc_estimate_send_and_rotate() -> eyre::Result<()> {
         let upgraded = receipt
             .logs()
             .iter()
-            .filter(|log| log.address() == NATIVE_MULTISIG_ADDRESS)
-            .map(|log| INativeMultisig::AccountUpgraded::decode_log(&log.inner))
+            .filter(|log| log.address() == CONFIGURABLE_ACCOUNT_ADDRESS)
+            .map(|log| IConfigurableAccount::AccountUpgraded::decode_log(&log.inner))
             .collect::<Result<Vec<_>, _>>()?;
         assert_eq!(upgraded.len(), 1);
         let event = &upgraded[0].data;
         assert_eq!(
             *event,
-            INativeMultisig::AccountUpgraded {
+            IConfigurableAccount::AccountUpgraded {
                 account: account.address,
                 commitment: expected,
                 salt: account.config.salt,
@@ -720,7 +726,7 @@ async fn eoa_migration_rpc_estimate_send_and_rotate() -> eyre::Result<()> {
         // The account is configured now, so a second upgrade reverts when simulated.
         assert_call_reverts(
             env.provider().call(request).latest().await,
-            INativeMultisig::AccountAlreadyConfigurable {}.abi_encode(),
+            IConfigurableAccount::AccountAlreadyConfigurable {}.abi_encode(),
         );
 
         // The version-one witness signs the next transaction, which rotates to version two.
@@ -785,14 +791,14 @@ async fn retired_root_rpc_rejects_send_and_allows_calls() -> eyre::Result<()> {
         // Calls and gas estimates from the retired address are simulations, which stay allowed.
         let request = TransactionRequest {
             from: Some(account.address),
-            to: Some(NATIVE_MULTISIG_ADDRESS.into()),
+            to: Some(CONFIGURABLE_ACCOUNT_ADDRESS.into()),
             gas_price: None,
             max_fee_per_gas: None,
             max_priority_fee_per_gas: None,
             max_fee_per_blob_gas: None,
             gas: Some(GAS_LIMIT),
             value: None,
-            input: INativeMultisig::getConfigCommitmentCall {
+            input: IConfigurableAccount::getConfigCommitmentCall {
                 account: account.address,
             }
             .abi_encode()
@@ -809,7 +815,7 @@ async fn retired_root_rpc_rejects_send_and_allows_calls() -> eyre::Result<()> {
         assert_eq!(
             output,
             Bytes::from(
-                INativeMultisig::getConfigCommitmentCall::abi_encode_returns(
+                IConfigurableAccount::getConfigCommitmentCall::abi_encode_returns(
                     &account.config.commitment().unwrap()
                 )
             )
@@ -1305,8 +1311,11 @@ async fn reorg_without_migration_evicts_native_transactions() -> eyre::Result<()
     key_tx.nonce += 2;
     key_tx.key_authorization = Some(grant.into_signed(grant_signature));
     let key_tx = key_signed(key_tx, account.address, &key)?;
-    let delegation =
-        KeyAuthorization::unrestricted(chain_id, SignatureType::Multisig, account.address);
+    let delegation = KeyAuthorization::unrestricted(
+        chain_id,
+        SignatureType::ConfigurableAccount,
+        account.address,
+    );
     let signature =
         PrimitiveSignature::Secp256k1(parent.sign_hash_sync(&delegation.signature_hash())?);
     let mut delegate_tx = create_basic_aa_tx(chain_id, 1, vec![noop()], GAS_LIMIT);

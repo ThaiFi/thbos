@@ -22,17 +22,20 @@ use serde_json::{Value, from_str, json, to_string};
 use tempo_alloy::{
     TempoNetwork,
     rpc::{
-        MultisigSimulationApproval, MultisigSimulationSpec, TempoTransactionReceipt,
-        TempoTransactionRequest,
+        ConfigurableAccountSimulationApproval, ConfigurableAccountSimulationSpec,
+        TempoTransactionReceipt, TempoTransactionRequest,
     },
 };
 use tempo_chainspec::hardfork::TempoHardfork;
-use tempo_contracts::precompiles::{DEFAULT_FEE_TOKEN, INativeMultisig, NATIVE_MULTISIG_ADDRESS};
+use tempo_contracts::precompiles::{
+    CONFIGURABLE_ACCOUNT_ADDRESS, DEFAULT_FEE_TOKEN, IConfigurableAccount,
+};
 use tempo_primitives::{
     SignatureType, TempoTransaction, TempoTxEnvelope,
     transaction::{
-        Call, KeychainSignature, MULTISIG_UPGRADE_DOMAIN, MultisigConfig, MultisigOwner,
-        MultisigSignature, PrimitiveSignature, TempoSignature, multisig_digest,
+        CONFIGURABLE_ACCOUNT_UPGRADE_DOMAIN, Call, ConfigurableAccountConfig,
+        ConfigurableAccountOwner, ConfigurableAccountSignature, KeychainSignature,
+        PrimitiveSignature, TempoSignature, configurable_account_digest,
         tt_signature::derive_p256_address,
     },
 };
@@ -45,7 +48,7 @@ type P256Signer = fn(B256, &SigningKey, B256, B256) -> eyre::Result<PrimitiveSig
 
 struct NativeAccount {
     address: Address,
-    config: MultisigConfig,
+    config: ConfigurableAccountConfig,
     owners: Vec<OwnerKey>,
     nonce: u64,
 }
@@ -63,13 +66,13 @@ impl NativeAccount {
             })
             .collect::<Vec<_>>();
         owners.sort_by_key(OwnerKey::address);
-        let config = MultisigConfig {
+        let config = ConfigurableAccountConfig {
             salt: B256::repeat_byte(seed),
             version: 0,
             threshold: count,
             owners: owners
                 .iter()
-                .map(|owner| MultisigOwner {
+                .map(|owner| ConfigurableAccountOwner {
                     owner: owner.address(),
                     weight: 1,
                 })
@@ -89,7 +92,8 @@ impl NativeAccount {
     fn migrated(address: Address, seed: u8, count: u8) -> Self {
         let mut account = Self::new(seed, count);
         account.address = address;
-        account.config.salt = keccak256([MULTISIG_UPGRADE_DOMAIN, address.as_slice()].concat());
+        account.config.salt =
+            keccak256([CONFIGURABLE_ACCOUNT_UPGRADE_DOMAIN, address.as_slice()].concat());
         account.config.version = 1;
         account
     }
@@ -97,9 +101,9 @@ impl NativeAccount {
     /// The `upgradeAccount` call that commits this configuration for its address.
     fn upgrade_call(&self) -> Call {
         Call {
-            to: NATIVE_MULTISIG_ADDRESS.into(),
+            to: CONFIGURABLE_ACCOUNT_ADDRESS.into(),
             value: U256::ZERO,
-            input: INativeMultisig::upgradeAccountCall {
+            input: IConfigurableAccount::upgradeAccountCall {
                 threshold: self.config.threshold,
                 owners: abi_owners(&self.config),
             }
@@ -116,8 +120,8 @@ impl NativeAccount {
         TempoTransactionRequest {
             inner: TransactionRequest {
                 from: Some(self.address),
-                to: Some(NATIVE_MULTISIG_ADDRESS.into()),
-                input: INativeMultisig::getConfigCommitmentCall {
+                to: Some(CONFIGURABLE_ACCOUNT_ADDRESS.into()),
+                input: IConfigurableAccount::getConfigCommitmentCall {
                     account: self.address,
                 }
                 .abi_encode()
@@ -126,14 +130,14 @@ impl NativeAccount {
                 ..Default::default()
             },
             fee_token: Some(DEFAULT_FEE_TOKEN),
-            multisig_simulation: Some(MultisigSimulationSpec {
+            configurable_account_simulation: Some(ConfigurableAccountSimulationSpec {
                 signer: None,
                 config: self.config.clone(),
                 approvals: self
                     .config
                     .owners
                     .iter()
-                    .map(|owner| MultisigSimulationApproval {
+                    .map(|owner| ConfigurableAccountSimulationApproval {
                         owner: owner.owner,
                         key_type: None,
                         key_data: None,
@@ -144,8 +148,12 @@ impl NativeAccount {
         }
     }
 
-    fn quorum(&self, inner: B256, invalid_final: bool) -> eyre::Result<MultisigSignature> {
-        let digest = multisig_digest(inner, self.address, self.config.version);
+    fn quorum(
+        &self,
+        inner: B256,
+        invalid_final: bool,
+    ) -> eyre::Result<ConfigurableAccountSignature> {
+        let digest = configurable_account_digest(inner, self.address, self.config.version);
         let signatures = self
             .owners
             .iter()
@@ -159,13 +167,13 @@ impl NativeAccount {
             })
             .collect::<eyre::Result<Vec<_>>>()?;
         Ok(
-            MultisigSignature::try_new(self.address, self.config.clone(), signatures)
+            ConfigurableAccountSignature::try_new(self.address, self.config.clone(), signatures)
                 .expect("fixture configuration and primitive signatures are bounded"),
         )
     }
 
     fn sign(&self, tx: &TempoTransaction) -> eyre::Result<TempoSignature> {
-        Ok(TempoSignature::Multisig(
+        Ok(TempoSignature::ConfigurableAccount(
             self.quorum(tx.signature_hash(), false)?,
         ))
     }
@@ -185,12 +193,12 @@ impl NativeAccount {
         )))
     }
 
-    fn rotate_to(&self, replacement: &Self) -> (MultisigConfig, Call) {
+    fn rotate_to(&self, replacement: &Self) -> (ConfigurableAccountConfig, Call) {
         let mut next = replacement.config.clone();
         next.salt = self.config.salt;
         next.version = self.config.version + 1;
-        let call = INativeMultisig::updateConfigCall {
-            current: INativeMultisig::MultisigConfig {
+        let call = IConfigurableAccount::updateConfigCall {
+            current: IConfigurableAccount::ConfigurableAccountConfig {
                 salt: self.config.salt,
                 version: self.config.version,
                 threshold: self.config.threshold,
@@ -202,7 +210,7 @@ impl NativeAccount {
         (
             next,
             Call {
-                to: NATIVE_MULTISIG_ADDRESS.into(),
+                to: CONFIGURABLE_ACCOUNT_ADDRESS.into(),
                 value: U256::ZERO,
                 input: call.abi_encode().into(),
             },
@@ -242,7 +250,9 @@ impl OwnerKey {
             SignatureType::WebAuthn => |digest, key, x, y| {
                 sign_webauthn_primitive(digest, key, x, y, "https://native.example")
             },
-            SignatureType::Multisig => panic!("fixture owners must use primitive signatures"),
+            SignatureType::ConfigurableAccount => {
+                panic!("fixture owners must use primitive signatures")
+            }
         };
         let key = SigningKey::from_bytes(&[seed; 32].into()).unwrap();
         let point = key.verifying_key().to_encoded_point(false);
@@ -269,11 +279,13 @@ impl OwnerKey {
     }
 }
 
-fn abi_owners(config: &MultisigConfig) -> Vec<INativeMultisig::MultisigOwner> {
+fn abi_owners(
+    config: &ConfigurableAccountConfig,
+) -> Vec<IConfigurableAccount::ConfigurableAccountOwner> {
     config
         .owners
         .iter()
-        .map(|owner| INativeMultisig::MultisigOwner {
+        .map(|owner| IConfigurableAccount::ConfigurableAccountOwner {
             owner: owner.owner,
             weight: owner.weight,
         })
@@ -290,7 +302,7 @@ fn noop() -> Call {
 
 async fn commitment(env: &Localnet, account: Address) -> eyre::Result<B256> {
     Ok(
-        INativeMultisig::new(NATIVE_MULTISIG_ADDRESS, env.provider())
+        IConfigurableAccount::new(CONFIGURABLE_ACCOUNT_ADDRESS, env.provider())
             .getConfigCommitment(account)
             .call()
             .await?,
@@ -345,15 +357,15 @@ async fn environment_with(node: TestNodeBuilder) -> eyre::Result<Localnet> {
     init_test_tracing();
     let mut genesis: Value = from_str(&make_genesis_at(TempoHardfork::T14))?;
     genesis["config"]["t14Time"] = json!(0);
-    genesis["config"]["multisigRecoveryFactory"] = json!(FACTORY);
+    genesis["config"]["configurableAccountRecoveryFactory"] = json!(FACTORY);
     // Store the getter's result in slot zero, proving visibility inside the first signed call.
     let mut code = vec![0x63];
-    code.extend_from_slice(&INativeMultisig::getConfigCommitmentCall::SELECTOR);
+    code.extend_from_slice(&IConfigurableAccount::getConfigCommitmentCall::SELECTOR);
     code.extend_from_slice(&[
         0x60, 0xe0, 0x1b, 0x5f, 0x52, 0x33, 0x60, 0x04, 0x52, 0x60, 0x20, 0x5f, 0x60, 0x24, 0x5f,
         0x73,
     ]);
-    code.extend_from_slice(NATIVE_MULTISIG_ADDRESS.as_slice());
+    code.extend_from_slice(CONFIGURABLE_ACCOUNT_ADDRESS.as_slice());
     code.extend_from_slice(&[0x5a, 0xfa, 0x50, 0x5f, 0x51, 0x5f, 0x55, 0x00]);
     genesis["alloc"][format!("{OBSERVER}")] = json!({"balance": "0x0", "code": Bytes::from(code)});
     let setup = node
