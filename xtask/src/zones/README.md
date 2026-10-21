@@ -121,6 +121,17 @@ and execution unwind to remove every descendant, restore state and indexes,
 and reset pipeline checkpoints. Zone safe/finalized markers move to the retained
 head. Block zero and an already-current target are supported.
 
+Before removing blocks, execution atomically saves their user transactions in
+the node's transaction backup, preserving existing pending transactions and
+deduplicating reverted entries. System transactions are excluded. On restart,
+the node's normal backup loader resubmits these transactions to the txpool,
+subject to validation against the rolled-back state; expired or otherwise
+invalid transactions may be rejected. Keep transaction backups enabled when
+restarting. If the node uses `--txpool.transactions-backup <path>`, pass the same
+option to `rollback-zone`; otherwise the data directory's default backup is used.
+An unreadable or malformed existing backup or a failed backup write aborts before
+the unwind. A dry run leaves the backup untouched.
+
 This changes one node's local storage only; it does not undo batches or
 withdrawals already accepted on Tempo. Coordinate the same retained block hash
 across recovering nodes before restarting them. Existing proof witnesses remain
