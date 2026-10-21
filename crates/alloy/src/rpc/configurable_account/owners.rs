@@ -12,7 +12,7 @@ use tempo_primitives::{
 
 impl ConfigurableAccountSimulationSpec {
     /// Checks the claimed primitive quorum before constructing simulation signatures.
-    pub(crate) fn validate_owners(
+    pub fn validate_owners(
         &self,
         account: Address,
     ) -> Result<(), ConfigurableAccountSimulationError> {
