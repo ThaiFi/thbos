@@ -587,3 +587,6 @@ pub(crate) fn seed_authority(envelope: &TempoTxEnv) -> Result<(), TempoPrecompil
     };
     ConfigurableAccount::new().set_authority(envelope.evm_tx().signer(), direct, eligibility)
 }
+
+#[cfg(test)]
+mod tests;
