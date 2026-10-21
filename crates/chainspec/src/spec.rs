@@ -209,9 +209,10 @@ impl TempoChainSpec {
     /// Converts the given [`Genesis`] into a [`TempoChainSpec`].
     ///
     /// When T14 is active at genesis, initializes absent or empty code at the configurable
-    /// account address with the `0xEF` marker. If a recovery factory is configured, also replaces
-    /// its code with `0xEF` and raises its nonce to at least one, preserving its balance and
-    /// storage. These protocol reservations are applied before computing the genesis state root.
+    /// account address with the `0xEF` marker. If a nonzero recovery factory is configured, also
+    /// replaces its code with `0xEF` and raises its nonce to at least one, preserving its balance
+    /// and storage. These protocol reservations are applied before computing the genesis state
+    /// root.
     pub fn from_genesis(mut genesis: Genesis) -> Self {
         // Extract Tempo genesis info from extra_fields
         let info = TempoGenesisInfo::extract_from(&genesis);
@@ -224,7 +225,10 @@ impl TempoChainSpec {
             if marker.code.as_ref().is_none_or(|code| code.is_empty()) {
                 marker.code = Some(bytes!("ef"));
             }
-            if let Some(factory) = info.configurable_account_recovery_factory {
+            if let Some(factory) = info
+                .configurable_account_recovery_factory
+                .filter(|factory| !factory.is_zero())
+            {
                 let account = genesis.alloc.entry(factory).or_default();
                 account.code = Some(bytes!("ef"));
                 account.nonce = Some(account.nonce.unwrap_or_default().max(1));
