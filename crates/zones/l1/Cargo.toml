@@ -21,7 +21,7 @@ tempo-contracts = { workspace = true, features = ["std", "serde", "rpc"] }
 tempo-primitives.workspace = true
 
 # reth
-# Only for its `account-ext` feature: reth-provider turns on evm2's account extension but not reth-evm's.
+# Only to enable its `account-ext` feature.
 reth-evm.workspace = true
 reth-metrics.workspace = true
 reth-primitives-traits.workspace = true
