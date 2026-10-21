@@ -16,7 +16,6 @@ use alloy::{
     rpc::types::TransactionRequest,
 };
 use reth_chainspec::EthChainSpec as _;
-use reth_primitives_traits::AccountExtension;
 use reth_trie_common::{EMPTY_ROOT_HASH, HashBuilder, Nibbles, TrieAccount, proof::ProofRetainer};
 use tempo_chainspec::spec::TEMPO_T0_BASE_FEE;
 use tempo_precompiles::{
@@ -470,13 +469,12 @@ fn genesis_state_witness(genesis: &Genesis) -> (B256, Vec<Bytes>, Vec<Bytes>) {
         if let Some(code) = &account.code {
             bytecodes.entry(code_hash).or_insert_with(|| code.clone());
         }
-        let trie_account = TrieAccount {
-            nonce: account.nonce.unwrap_or_default(),
-            balance: account.balance,
+        let trie_account = TrieAccount::new(
+            account.nonce.unwrap_or_default(),
+            account.balance,
             storage_root,
             code_hash,
-            extension: AccountExtension::new(),
-        };
+        );
         account_leaves.push((keccak256(address), alloy_rlp::encode(trie_account)));
     }
 
