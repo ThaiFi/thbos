@@ -296,8 +296,8 @@ fn configurable_account_signature_must_name_the_sender() {
     );
 }
 
-/// A simulated call (`eth_call`/`eth_estimateGas`) whose outer configurable-account signature names
-/// an account other than `from` is rejected like a real transaction.
+/// A simulated transaction whose outer configurable-account signature names an account other than
+/// its sender is rejected like a real one, although RPC preprocessing never builds such a mock.
 #[test]
 fn simulated_configurable_account_signature_must_name_the_sender() {
     let mut evm = evm(InMemoryDB::default());
@@ -340,6 +340,53 @@ fn simulated_configurable_account_signature_must_name_the_sender() {
             actual: account,
         })
     );
+}
+
+/// A simulated `WebAuthn` owner approval is charged its modeled data as nonzero calldata.
+#[test]
+fn simulated_webauthn_approvals_charge_worst_case_data() {
+    let owner = PrivateKeySigner::random();
+    let (config, account) = configurable_account(&owner);
+    let gas_used = |key_type: SignatureType, key_data: Option<Bytes>| {
+        let spec = ConfigurableAccountSimulationSpec {
+            signer: None,
+            config: config.clone(),
+            approvals: vec![ConfigurableAccountSimulationApproval {
+                owner: owner.address(),
+                key_type: Some(key_type),
+                key_data,
+            }],
+        };
+        let request = TempoTransactionRequest {
+            inner: TransactionRequest {
+                from: Some(account),
+                to: Some(TxKind::Call(DELEGATE)),
+                gas: Some(5_000_000),
+                ..Default::default()
+            },
+            fee_token: Some(PATH_USD_ADDRESS),
+            key_type: Some(SignatureType::ConfigurableAccount),
+            configurable_account_simulation_signature: Some(spec.mock_signature(account).unwrap()),
+            configurable_account_simulation: Some(spec),
+            configurable_account_simulation_prepared: true,
+            ..Default::default()
+        };
+        let mut env = evm_env(&evm_config());
+        env.version.chain_id = CHAIN_ID;
+        let tx = request.try_into_tx_env(&env).unwrap();
+        let result = evm(InMemoryDB::default()).transact(&tx).unwrap().commit();
+        assert!(result.status, "{result:?}");
+        result.tx_gas_used()
+    };
+    // Same witness with no WebAuthn data isolates the data charge.
+    let empty = gas_used(SignatureType::P256, None);
+    for size in [128u16, 800, 1920] {
+        let webauthn = gas_used(
+            SignatureType::WebAuthn,
+            Some(Bytes::from(size.to_be_bytes())),
+        );
+        assert_eq!(webauthn - empty, u64::from(size) * 16, "size {size}");
+    }
 }
 
 /// A configurable account with code, including a delegation, cannot sign.
