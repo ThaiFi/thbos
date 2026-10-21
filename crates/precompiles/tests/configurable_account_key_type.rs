@@ -4,16 +4,18 @@ use alloy::{
     primitives::{Address, B256, Bytes},
     sol_types::SolCall,
 };
-use revm::{precompile::PrecompileOutput, state::Bytecode};
+use alloy_evm::EvmEnv;
+use revm::{context::CfgEnv, database::InMemoryDB, precompile::PrecompileOutput, state::Bytecode};
 use tempo_chainspec::hardfork::TempoHardfork;
 use tempo_contracts::precompiles::IAccountKeychain::{
     KeyRestrictions, SignatureType, authorizeAdminKeyCall, authorizeKey_0Call, authorizeKey_1Call,
     authorizeKey_2Call, getKeyCall,
 };
+use tempo_evm::{TempoBlockEnv, evm::TempoEvm};
 use tempo_precompiles::{
     Precompile,
     account_keychain::AccountKeychain,
-    storage::{StorageCtx, hashmap::HashMapStorageProvider},
+    storage::{StorageActions, StorageCtx, hashmap::HashMapStorageProvider},
 };
 
 const PARENT: Address = Address::repeat_byte(0x11);
@@ -32,6 +34,27 @@ fn restrictions(expiry: u64) -> KeyRestrictions {
 /// Runs `calldata` from `PARENT` as both the sender and the transaction origin.
 fn call_as_parent(storage: &mut HashMapStorageProvider, calldata: &[u8]) -> PrecompileOutput {
     StorageCtx::enter(storage, || {
+        let mut keychain = AccountKeychain::new();
+        keychain.set_tx_origin(PARENT).unwrap();
+        keychain
+            .call(calldata, PARENT)
+            .expect("keychain calls never fail the frame")
+    })
+}
+
+/// Runs `calldata` from `PARENT` as both the sender and the transaction origin, on an EVM at
+/// `spec` with mainnet gas parameters, so the output carries the gas a node would charge.
+fn call_as_parent_in_evm(spec: TempoHardfork, calldata: &[u8]) -> PrecompileOutput {
+    let mut cfg = CfgEnv::<TempoHardfork>::default();
+    cfg.set_spec_and_mainnet_gas_params(spec);
+    let mut evm = TempoEvm::new(
+        InMemoryDB::default(),
+        EvmEnv {
+            cfg_env: cfg,
+            block_env: TempoBlockEnv::default(),
+        },
+    );
+    StorageCtx::enter_ctx(evm.ctx_mut(), StorageActions::disabled(), || {
         let mut keychain = AccountKeychain::new();
         keychain.set_tx_origin(PARENT).unwrap();
         keychain
@@ -90,7 +113,7 @@ fn key_expiry(storage: &mut HashMapStorageProvider, key_id: Address) -> u64 {
 }
 
 /// Before T14, key type 3 reverts exactly like an unknown key type (4) on every
-/// authorization entrypoint.
+/// authorization entrypoint: same status, bytes and gas.
 #[test]
 fn key_type_reverts_like_an_unknown_type_before_t14() {
     for spec in TempoHardfork::VARIANTS
@@ -106,17 +129,13 @@ fn key_type_reverts_like_an_unknown_type_before_t14() {
                     assert_eq!(calldata[67], 3);
                     let mut run = |signature_type: u8| {
                         calldata[67] = signature_type;
-                        let mut storage = HashMapStorageProvider::new_with_spec(1, spec);
-                        call_as_parent(&mut storage, &calldata)
+                        call_as_parent_in_evm(spec, &calldata)
                     };
                     let configurable = run(3);
                     let unknown = run(4);
                     assert!(unknown.is_revert(), "{spec}: {calldata:?}");
-                    assert_eq!(
-                        (configurable.is_revert(), configurable.bytes),
-                        (unknown.is_revert(), unknown.bytes),
-                        "{spec}: {calldata:?}"
-                    );
+                    assert!(unknown.gas_used > 0, "{spec}: {calldata:?}");
+                    assert_eq!(configurable, unknown, "{spec}: {calldata:?}");
                 }
             }
         }
