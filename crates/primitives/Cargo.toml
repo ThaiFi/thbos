@@ -25,8 +25,7 @@ reth-ethereum-primitives = { workspace = true, optional = true }
 reth-primitives-traits = { workspace = true, optional = true }
 reth-codecs = { workspace = true, optional = true }
 reth-rpc-convert = { workspace = true, optional = true }
-# Only for its `account-ext` feature: `reth-primitives-traits/account-ext` turns on the
-# revm-state extension, but reth-rpc-convert pulls reth-evm without its own.
+# Only to enable its `account-ext` feature.
 reth-evm = { workspace = true, optional = true }
 
 # Alloy
