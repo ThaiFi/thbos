@@ -1,6 +1,6 @@
 # THBOS — Thai Baht OS
 
-**THBOS is a fork of [Tempo](https://github.com/tempoxyz/tempo) maintained by [ThaiFi](https://thaifi.com).** It is the node software for the ThaiFi chain (chain ID 17), built to power the **Thai Baht stablecoin** (pathUSD / THCFI — 1 THB = 1 token, 6 decimals).
+**THBOS is a fork of [Tempo](https://github.com/tempoxyz/tempo) maintained by [ThaiFi](https://thaifi.com).** It is the node software for the ThaiFi chain (chain ID 17), built to power the **Thai Baht stablecoin** (pathTHB / THCFI — 1 THB = 1 token, 6 decimals).
 
 We keep the fork as small as possible: everything except the base-fee schedule follows upstream Tempo. Protocol docs: [docs.tempo.xyz](https://docs.tempo.xyz/).
 
@@ -35,7 +35,7 @@ Binaries are compiled with default x86-64 target flags (no AVX2 requirement — 
 | Explorer | https://exp.thaifi.com |
 | Snapshots | https://snapshots.thaifi.com |
 | Contracts / verify | https://contracts.thaifi.com |
-| Fee token | pathUSD `0x20c0000000000000000000000000000000000000` (6 decimals) — gas is paid in the fee token, not ETH |
+| Fee token | pathTHB `0x20c0000000000000000000000000000000000000` (6 decimals) — gas is paid in the fee token, not ETH |
 | Block time | 250 ms |
 
 Operator docs (compose, genesis, snapshots): [github.com/ThaiFi/node](https://github.com/ThaiFi/node).
