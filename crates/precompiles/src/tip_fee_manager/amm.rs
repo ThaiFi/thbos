@@ -874,19 +874,19 @@ mod tests {
     }
 
     #[test]
-    fn test_mint_rejects_non_usd_user_token() -> eyre::Result<()> {
+    fn test_mint_rejects_non_iso_user_token() -> eyre::Result<()> {
         let mut storage = HashMapStorageProvider::new(1);
         let admin = Address::random();
         StorageCtx::enter(&mut storage, || {
-            let eur_token = TIP20Setup::create("EuroToken", "EUR", admin)
-                .currency("EUR")
+            let fake_token = TIP20Setup::create("FakeToken", "FAKE", admin)
+                .currency("NOTISO")
                 .apply()?;
             let usd_token = TIP20Setup::create("USDToken", "USD", admin).apply()?;
             let mut amm = TipFeeManager::new();
 
             let result = amm.mint(
                 admin,
-                eur_token.address(),
+                fake_token.address(),
                 usd_token.address(),
                 U256::from(1000),
                 admin,
@@ -899,7 +899,7 @@ mod tests {
             let result = amm.mint(
                 admin,
                 usd_token.address(),
-                eur_token.address(),
+                fake_token.address(),
                 U256::from(1000),
                 admin,
             );
@@ -1043,19 +1043,19 @@ mod tests {
     }
 
     #[test]
-    fn test_burn_rejects_non_usd_tokens() -> eyre::Result<()> {
+    fn test_burn_rejects_non_iso_tokens() -> eyre::Result<()> {
         let mut storage = HashMapStorageProvider::new(1);
         let admin = Address::random();
         StorageCtx::enter(&mut storage, || {
-            let eur_token = TIP20Setup::create("EuroToken", "EUR", admin)
-                .currency("EUR")
+            let fake_token = TIP20Setup::create("FakeToken", "FAKE", admin)
+                .currency("NOTISO")
                 .apply()?;
             let usd_token = TIP20Setup::create("USDToken", "USD", admin).apply()?;
             let mut amm = TipFeeManager::new();
 
             let result = amm.burn(
                 admin,
-                eur_token.address(),
+                fake_token.address(),
                 usd_token.address(),
                 U256::from(1000),
                 admin,
@@ -1068,7 +1068,7 @@ mod tests {
             let result = amm.burn(
                 admin,
                 usd_token.address(),
-                eur_token.address(),
+                fake_token.address(),
                 U256::from(1000),
                 admin,
             );
@@ -1076,6 +1076,19 @@ mod tests {
                 result,
                 Err(TempoPrecompileError::TIP20(TIP20Error::InvalidCurrency(_)))
             ));
+
+            // ISO 4217 currencies (e.g. canonical THB) pass the pool currency gate.
+            let mut path_usd = TIP20Setup::path_usd(admin).apply()?;
+            path_usd.set_currency(
+                admin,
+                ITIP20::setCurrencyCall {
+                    newCurrency: "THB".to_string(),
+                },
+            )?;
+            let thb_token = TIP20Setup::create("BahtToken", "THB", admin)
+                .currency("THB")
+                .apply()?;
+            validate_fee_currency(thb_token.address())?;
             Ok(())
         })
     }

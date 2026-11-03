@@ -4230,20 +4230,33 @@ mod tests {
         StorageCtx::enter(&mut storage, || {
             let admin = Address::random();
 
-            // Create EUR token with PATH USD as quote (valid non-USD token)
-            let token_0 = TIP20Setup::create("EuroToken", "EURO", admin)
-                .currency("EUR")
+            // Create token with a non-ISO 4217 currency
+            let token_0 = TIP20Setup::create("FakeToken", "FAKE", admin)
+                .currency("NOTISO")
                 .apply()?;
 
             let mut exchange = StablecoinDEX::new();
             exchange.initialize()?;
 
-            // Test: create_pair should reject non-USD token (EUR token has EUR currency)
+            // Test: create_pair should reject a non-ISO 4217 currency
             let result = exchange.create_pair(token_0.address());
             assert!(matches!(
                 result,
                 Err(TempoPrecompileError::TIP20(TIP20Error::InvalidCurrency(_)))
             ));
+
+            // ISO 4217 currencies (canonical THB quoting pathUSD flipped to THB) are accepted
+            let mut path_usd = TIP20Setup::path_usd(admin).apply()?;
+            path_usd.set_currency(
+                admin,
+                ITIP20::setCurrencyCall {
+                    newCurrency: "THB".to_string(),
+                },
+            )?;
+            let thb_token = TIP20Setup::create("BahtToken", "THB", admin)
+                .currency("THB")
+                .apply()?;
+            exchange.create_pair(thb_token.address())?;
 
             Ok(())
         })
