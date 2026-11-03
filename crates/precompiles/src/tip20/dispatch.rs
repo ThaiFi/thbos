@@ -66,6 +66,7 @@ impl Precompile for TIP20Token {
                     setLogoURI(call) => mutate(call, msg_sender, |sender, c| self.set_logo_uri(sender, c)),
                     setName(call) => mutate(call, msg_sender, |sender, c| self.set_name(sender, c)),
                     setSymbol(call) => mutate(call, msg_sender, |sender, c| self.set_symbol(sender, c)),
+                    setCurrency(call) => mutate(call, msg_sender, |sender, c| self.set_currency(sender, c)),
                     pause(call) => mutate(call, msg_sender, |sender, c| self.pause(sender, c)),
                     unpause(call) => mutate(call, msg_sender, |sender, c| self.unpause(sender, c)),
                     setNextQuoteToken(call) => mutate(call, msg_sender, |sender, c| self.set_next_quote_token(sender, c)),

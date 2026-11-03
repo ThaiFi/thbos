@@ -13,7 +13,8 @@ pub mod rewards;
 pub mod roles;
 
 pub use tempo_contracts::precompiles::{
-    IRolesAuth, ITIP20, RolesAuthError, RolesAuthEvent, TIP20Error, TIP20Event, USD_CURRENCY,
+    IRolesAuth, ITIP20, RolesAuthError, RolesAuthEvent, TIP20Error, TIP20Event, THB_CURRENCY,
+    is_iso4217_currency,
 };
 pub use tempo_primitives::is_tip20_prefix;
 
@@ -48,13 +49,14 @@ use tracing::trace;
 /// u128::MAX as U256
 pub const U128_MAX: U256 = uint!(0xffffffffffffffffffffffffffffffff_U256);
 
-/// Validates that the given token's currency is `"USD"`.
+/// Validates that the given token's currency is a recognized ISO 4217 code
+/// (THBOS: the canonical chain currency is `"THB"`, legacy `"USD"` tokens stay valid).
 ///
 /// # Errors
 /// - `InvalidToken` — address does not have the TIP-20 prefix
-/// - `InvalidCurrency` — token currency is not `"USD"`
-pub fn validate_usd_currency(token: Address) -> Result<()> {
-    if TIP20Token::from_address(token)?.currency()? != USD_CURRENCY {
+/// - `InvalidCurrency` — token currency is not an ISO 4217 code
+pub fn validate_fee_currency(token: Address) -> Result<()> {
+    if !is_iso4217_currency(&TIP20Token::from_address(token)?.currency()?) {
         return Err(TIP20Error::invalid_currency().into());
     }
     Ok(())
@@ -470,6 +472,27 @@ impl TIP20Token {
         }))
     }
 
+    /// Sets the token currency (requires `DEFAULT_ADMIN_ROLE`). Accepts only
+    /// recognized ISO 4217 codes (THBOS: the canonical chain currency is `"THB"`).
+    ///
+    /// # Errors
+    /// - `Unauthorized` — caller does not hold `DEFAULT_ADMIN_ROLE`
+    /// - `InvalidCurrency` — new currency is not an ISO 4217 code
+    pub fn set_currency(&mut self, msg_sender: Address, call: ITIP20::setCurrencyCall) -> Result<()> {
+        self.check_role(msg_sender, DEFAULT_ADMIN_ROLE)?;
+
+        if !is_iso4217_currency(&call.newCurrency) {
+            return Err(TIP20Error::invalid_currency().into());
+        }
+
+        self.currency.write(call.newCurrency.clone())?;
+
+        self.emit_event(TIP20Event::CurrencyUpdated(ITIP20::CurrencyUpdated {
+            updater: msg_sender,
+            newCurrency: call.newCurrency,
+        }))
+    }
+
     // ========== End Metadata ==========
 
     /// Pauses all token transfers.
@@ -496,12 +519,12 @@ impl TIP20Token {
 
     /// Stages a new quote token. Must be finalized via [`Self::complete_quote_token_update`].
     /// Validates that the candidate is a deployed TIP-20 token (via [`TIP20Factory`]) and, for
-    /// USD-denominated tokens, that the candidate is also USD-denominated.
+    /// THB-denominated tokens, that the candidate is also THB-denominated.
     ///
     /// # Errors
     /// - `Unauthorized` — caller does not hold `DEFAULT_ADMIN_ROLE`
     /// - `InvalidQuoteToken` — token is pathUSD, candidate is not a deployed TIP-20, or
-    ///   USD currency mismatch
+    ///   THB currency mismatch
     pub fn set_next_quote_token(
         &mut self,
         msg_sender: Address,
@@ -519,11 +542,12 @@ impl TIP20Token {
             return Err(TIP20Error::invalid_quote_token().into());
         }
 
-        // Check if the currency is USD, if so then the quote token's currency MUST also be USD
+        // THBOS: if the currency is the canonical chain currency (THB), the quote token's
+        // currency MUST also be THB (replaces the upstream USD-denomination rule)
         let currency = self.currency()?;
-        if currency == USD_CURRENCY {
+        if currency == THB_CURRENCY {
             let quote_token_currency = Self::from_address(call.newQuoteToken)?.currency()?;
-            if quote_token_currency != USD_CURRENCY {
+            if quote_token_currency != THB_CURRENCY {
                 return Err(TIP20Error::invalid_quote_token().into());
             }
         }

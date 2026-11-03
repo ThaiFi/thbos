@@ -1660,7 +1660,7 @@ mod tests {
             ),
             (
                 TempoPoolTransactionError::Evm(HandlerError::external(
-                    TempoInvalidTransaction::FeeTokenNotUsdCurrency {
+                    TempoInvalidTransaction::FeeTokenNotValidCurrency {
                         address: Address::repeat_byte(0x20),
                         currency: "EUR".to_string(),
                     },

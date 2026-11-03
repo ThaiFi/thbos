@@ -32,6 +32,20 @@ pub use tempo_precompiles::tip20::Tip20TokenMetadata;
 /// Maximum number of TIP-20 tokens kept in the metadata cache.
 const TOKEN_METADATA_CACHE_SIZE: u32 = 1024;
 
+/// How long cached TIP-20 metadata stays fresh.
+///
+/// Name and symbol are still immutable, but currency can now change via
+/// `setCurrency` — a short TTL bounds how stale a cached currency can get
+/// without re-reading state on every simulate request.
+const TOKEN_METADATA_CACHE_TTL_SECS: u64 = 60;
+
+/// Cached TIP-20 metadata with its fetch time.
+#[derive(Clone, Debug)]
+struct CachedTokenMetadata {
+    metadata: Tip20TokenMetadata,
+    cached_at: std::time::Instant,
+}
+
 /// Response for `tempo_simulateV1`.
 ///
 /// Wraps the standard `eth_simulateV1` response with a top-level `tokenMetadata` map
@@ -69,9 +83,10 @@ pub struct TempoSimulate<EthApi> {
     eth_api: EthApi,
     /// Metadata of deployed TIP-20 tokens.
     ///
-    /// Name, symbol and currency are only written when a token is created, so cached entries
-    /// never go stale.
-    token_metadata_cache: Arc<Mutex<LruMap<Address, Tip20TokenMetadata>>>,
+    /// Name and symbol are only written when a token is created, so those never go stale.
+    /// Currency can change via `setCurrency`, so cached entries expire after
+    /// [`TOKEN_METADATA_CACHE_TTL_SECS`].
+    token_metadata_cache: Arc<Mutex<LruMap<Address, CachedTokenMetadata>>>,
 }
 
 impl<EthApi> TempoSimulate<EthApi> {
@@ -195,10 +210,13 @@ where
             let mut cache = self.token_metadata_cache.lock();
             for token in tokens {
                 match cache.get(&token) {
-                    Some(cached) => {
-                        metadata.insert(token, cached.clone());
+                    Some(cached)
+                        if cached.cached_at.elapsed()
+                            < std::time::Duration::from_secs(TOKEN_METADATA_CACHE_TTL_SECS) =>
+                    {
+                        metadata.insert(token, cached.metadata.clone());
                     }
-                    None => missing.push(token),
+                    _ => missing.push(token),
                 }
             }
         }
@@ -257,7 +275,13 @@ where
             Ok(resolved) => {
                 let mut cache = self.token_metadata_cache.lock();
                 for (token, token_metadata) in resolved {
-                    cache.insert(token, token_metadata.clone());
+                    cache.insert(
+                        token,
+                        CachedTokenMetadata {
+                            metadata: token_metadata.clone(),
+                            cached_at: std::time::Instant::now(),
+                        },
+                    );
                     metadata.insert(token, token_metadata);
                 }
             }

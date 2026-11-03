@@ -23,7 +23,7 @@ use tempo_precompiles::{
         ConfigCommitmentWriteGas, Handler, PrecompileStorageProvider, StorageAction,
         StorageActions, StorageCtx, account_config_commitment,
     },
-    tip20::{ITIP20, TIP20Token},
+    tip20::{ITIP20, TIP20Token, is_iso4217_currency},
     validator_config_v2::{IValidatorConfigV2, ValidatorConfigV2, ValidatorConfigV2Error},
 };
 use tempo_primitives::{TempoAddressExt, TempoBlockEnv, TempoTxEnvelope};
@@ -163,10 +163,11 @@ pub trait TempoStateAccess<M = ()> {
         )
     }
 
-    /// Checks if the given TIP20 token has USD currency.
+    /// Checks if the given TIP20 token has a valid fee currency (ISO 4217 code;
+    /// THBOS canonical is `"THB"`, legacy `"USD"` tokens remain valid).
     ///
     /// IMPORTANT: Caller must ensure `fee_token` has a valid TIP20 prefix.
-    fn is_tip20_usd(
+    fn is_valid_fee_currency(
         &mut self,
         spec: TempoHardfork,
         fee_token: Address,
@@ -178,14 +179,14 @@ pub trait TempoStateAccess<M = ()> {
         self.with_read_only_storage_ctx(spec, actions, || {
             // SAFETY: caller must ensure prefix is already checked
             let token = TIP20Token::from_address_unchecked(fee_token);
-            Ok(token.currency.len()? == 3 && token.currency.read()?.as_str() == "USD")
+            Ok(token.currency.len()? == 3 && is_iso4217_currency(&token.currency.read()?))
         })
     }
 
-    /// Ensures the given TIP20 token uses USD currency.
+    /// Ensures the given TIP20 token uses a valid fee currency (ISO 4217 code).
     ///
     /// IMPORTANT: Caller must ensure `fee_token` has a valid TIP20 prefix.
-    fn ensure_tip20_usd(
+    fn ensure_valid_fee_currency(
         &mut self,
         spec: TempoHardfork,
         fee_token: Address,
@@ -205,9 +206,9 @@ pub trait TempoStateAccess<M = ()> {
                 token.currency.read()?
             };
 
-            if currency.as_str() != "USD" {
+            if !is_iso4217_currency(&currency) {
                 return Ok(Err(HandlerError::external(
-                    TempoInvalidTransaction::FeeTokenNotUsdCurrency {
+                    TempoInvalidTransaction::FeeTokenNotValidCurrency {
                         address: fee_token,
                         currency,
                     },
@@ -233,8 +234,8 @@ pub trait TempoStateAccess<M = ()> {
             return Ok(false);
         }
 
-        // Ensure the currency is USD
-        self.is_tip20_usd(spec, fee_token, actions)
+        // Ensure the currency is a valid ISO 4217 fee currency
+        self.is_valid_fee_currency(spec, fee_token, actions)
     }
 
     /// Checks if a fee token is paused.
@@ -877,22 +878,34 @@ mod tests {
     }
 
     #[test]
-    fn test_is_tip20_usd() -> eyre::Result<()> {
+    fn test_is_valid_fee_currency() -> eyre::Result<()> {
         let fee_token = PATH_USD_ADDRESS;
 
         // Short string encoding: left-aligned data + length*2 in LSB
         let cases: &[(U256, bool, &str)] = &[
-            // "USD" = 0x555344, len=3, LSB=6 -> true
+            // "USD" = 0x555344, len=3, LSB=6 -> true (legacy)
             (
                 uint!(0x5553440000000000000000000000000000000000000000000000000000000006_U256),
                 true,
                 "USD",
             ),
-            // "EUR" = 0x455552, len=3, LSB=6 -> false (wrong content)
+            // "THB" = 0x544842, len=3, LSB=6 -> true (canonical)
+            (
+                uint!(0x5448420000000000000000000000000000000000000000000000000000000006_U256),
+                true,
+                "THB",
+            ),
+            // "EUR" = 0x455552, len=3, LSB=6 -> true (ISO 4217)
             (
                 uint!(0x4555520000000000000000000000000000000000000000000000000000000006_U256),
-                false,
+                true,
                 "EUR",
+            ),
+            // "abc" = 0x616263, len=3, LSB=6 -> false (not ISO 4217)
+            (
+                uint!(0x6162630000000000000000000000000000000000000000000000000000000006_U256),
+                false,
+                "abc",
             ),
             // "US" = 0x5553, len=2, LSB=4 -> false (wrong length)
             (
@@ -908,12 +921,12 @@ mod tests {
             let mut db = InMemoryDB::default();
             db.insert_account_storage(&fee_token, &tip20_slots::CURRENCY, currency_value);
 
-            let is_usd = db.is_tip20_usd(
+            let is_valid = db.is_valid_fee_currency(
                 TempoHardfork::Genesis,
                 fee_token,
                 StorageActions::disabled(),
             )?;
-            assert_eq!(is_usd, *expected, "currency '{label}' failed");
+            assert_eq!(is_valid, *expected, "currency '{label}' failed");
         }
 
         Ok(())
@@ -928,18 +941,18 @@ mod tests {
         db.insert_account_storage(&fee_token, &tip20_slots::CURRENCY, &U256::from(len * 2 + 1));
 
         let err = db
-            .ensure_tip20_usd(
+            .ensure_valid_fee_currency(
                 TempoHardfork::Genesis,
                 fee_token,
                 StorageActions::disabled(),
             )
-            .expect_err("long non-USD currency returns an EVM error");
+            .expect_err("long non-ISO currency returns an EVM error");
         assert!(matches!(
             err,
             HandlerError::External(ref error)
                 if matches!(
                     error.downcast_ref::<TempoInvalidTransaction>(),
-                    Some(TempoInvalidTransaction::FeeTokenNotUsdCurrency { currency, .. })
+                    Some(TempoInvalidTransaction::FeeTokenNotValidCurrency { currency, .. })
                         if currency == "<1024 bytes>"
                 )
         ));
