@@ -681,23 +681,23 @@ mod tests {
     }
 
     #[test]
-    fn test_rejects_non_usd() -> eyre::Result<()> {
+    fn test_rejects_non_iso_currency() -> eyre::Result<()> {
         let mut storage = HashMapStorageProvider::new(1);
         let admin = Address::random();
         let user = Address::random();
         let validator = Address::random();
         let beneficiary = Address::random();
         StorageCtx::enter(&mut storage, || {
-            // Create a non-USD token
-            let non_usd_token = TIP20Setup::create("NonUSD", "EUR", admin)
-                .currency("EUR")
+            // Create a token with a non-ISO 4217 currency
+            let non_iso_token = TIP20Setup::create("FakeCoin", "FAKE", admin)
+                .currency("NOTISO")
                 .apply()?;
 
             let mut fee_manager = TipFeeManager::new();
 
-            // Try to set non-USD as user token - should fail
+            // Try to set non-ISO as user token - should fail
             let call = IFeeManager::setUserTokenCall {
-                token: non_usd_token.address(),
+                token: non_iso_token.address(),
             };
             let result = fee_manager.set_user_token(user, call);
             assert!(matches!(
@@ -705,15 +705,39 @@ mod tests {
                 Err(TempoPrecompileError::TIP20(TIP20Error::InvalidCurrency(_)))
             ));
 
-            // Try to set non-USD as validator token - should also fail
+            // Try to set non-ISO as validator token - should also fail
             let call = IFeeManager::setValidatorTokenCall {
-                token: non_usd_token.address(),
+                token: non_iso_token.address(),
             };
             let result = fee_manager.set_validator_token(validator, call, beneficiary);
             assert!(matches!(
                 result,
                 Err(TempoPrecompileError::TIP20(TIP20Error::InvalidCurrency(_)))
             ));
+
+            // ISO 4217 currencies are accepted: canonical THB, legacy USD, and others (e.g. EUR)
+            // THB tokens default-quote pathUSD, so flip it to THB first (production sequence)
+            let mut path_usd = TIP20Setup::path_usd(admin).apply()?;
+            path_usd.set_currency(
+                admin,
+                ITIP20::setCurrencyCall {
+                    newCurrency: "THB".to_string(),
+                },
+            )?;
+            let mut fee_manager = TipFeeManager::new();
+            for (name, symbol, currency) in [
+                ("Baht", "THB", "THB"),
+                ("Dollar", "USD", "USD"),
+                ("Euro", "EUR", "EUR"),
+            ] {
+                let token = TIP20Setup::create(name, symbol, admin)
+                    .currency(currency)
+                    .apply()?;
+                let call = IFeeManager::setUserTokenCall {
+                    token: token.address(),
+                };
+                fee_manager.set_user_token(user, call)?;
+            }
 
             Ok(())
         })
