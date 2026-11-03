@@ -87,9 +87,9 @@ fn fee_token_rpc_error(err: &TempoInvalidTransaction) -> Option<ErrorObject<'sta
             "name": "FeeTokenNotTip20Error",
             "token": address.to_string(),
         }),
-        TempoInvalidTransaction::FeeTokenNotUsdCurrency { address, currency } => {
+        TempoInvalidTransaction::FeeTokenNotValidCurrency { address, currency } => {
             serde_json::json!({
-                "name": "FeeTokenNotUsdError",
+                "name": "FeeTokenNotValidCurrencyError",
                 "token": address.to_string(),
                 "currency": currency,
             })
@@ -158,13 +158,13 @@ mod tests {
                 }),
             ),
             (
-                TempoInvalidTransaction::FeeTokenNotUsdCurrency {
+                TempoInvalidTransaction::FeeTokenNotValidCurrency {
                     address,
                     currency: "EUR".to_string(),
                 },
                 "uses currency",
                 serde_json::json!({
-                    "name": "FeeTokenNotUsdError",
+                    "name": "FeeTokenNotValidCurrencyError",
                     "token": address.to_string(),
                     "currency": "EUR",
                 }),

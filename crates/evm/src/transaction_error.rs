@@ -105,11 +105,11 @@ pub enum TempoInvalidTransaction {
         address: Address,
     },
 
-    /// Fee token is not USD-denominated.
+    /// Fee token does not use a valid ISO 4217 fee currency (THBOS canonical: `"THB"`).
     #[error(
-        "fee token {address} uses currency {currency:?}; fee tokens must be USD-denominated TIP-20 tokens"
+        "fee token {address} uses currency {currency:?}; fee tokens must use an ISO 4217 currency code (canonical: THB)"
     )]
-    FeeTokenNotUsdCurrency {
+    FeeTokenNotValidCurrency {
         /// Invalid fee token address.
         address: Address,
         /// Token currency read from TIP-20 metadata.
@@ -295,7 +295,7 @@ impl TempoInvalidTransaction {
             | Self::ExpiringNonceNonceNotZero
             | Self::InvalidFeeToken(_)
             | Self::FeeTokenNotTip20 { .. }
-            | Self::FeeTokenNotUsdCurrency { .. }
+            | Self::FeeTokenNotValidCurrency { .. }
             | Self::FeeTokenPaused { .. }
             | Self::AccessKeyExpiryInPast { .. }
             | Self::KeychainPrecompileError { .. }
@@ -521,9 +521,9 @@ mod tests {
         let cases = [
             TempoInvalidTransaction::InvalidFeeToken(address),
             TempoInvalidTransaction::FeeTokenNotTip20 { address },
-            TempoInvalidTransaction::FeeTokenNotUsdCurrency {
+            TempoInvalidTransaction::FeeTokenNotValidCurrency {
                 address,
-                currency: "EUR".to_string(),
+                currency: "NOTISO".to_string(),
             },
             TempoInvalidTransaction::FeeTokenPaused { address },
         ];

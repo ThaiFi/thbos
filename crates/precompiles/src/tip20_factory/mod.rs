@@ -12,7 +12,7 @@ use tempo_precompiles_macros::contract;
 use crate::{
     PATH_USD_ADDRESS, TIP20_FACTORY_ADDRESS,
     error::{Result, TempoPrecompileError},
-    tip20::{TIP20Error, TIP20Token, USD_CURRENCY},
+    tip20::{TIP20Error, TIP20Token, THB_CURRENCY},
 };
 use alloy::{
     primitives::{Address, B256, keccak256},
@@ -104,9 +104,10 @@ impl TIP20Factory {
             return Err(TIP20Error::invalid_quote_token().into());
         }
 
-        // If token is USD, its quote token must also be USD
-        if call.currency == USD_CURRENCY
-            && TIP20Token::from_address(call.quoteToken)?.currency()? != USD_CURRENCY
+        // THBOS: if the token claims the canonical chain currency (THB), its quote token
+        // must also be THB (replaces the upstream USD-denomination rule)
+        if call.currency == THB_CURRENCY
+            && TIP20Token::from_address(call.quoteToken)?.currency()? != THB_CURRENCY
         {
             return Err(TIP20Error::invalid_quote_token().into());
         }
@@ -216,9 +217,10 @@ impl TIP20Factory {
             if address == PATH_USD_ADDRESS || !self.is_tip20(quote_token)? {
                 return Err(TIP20Error::invalid_quote_token().into());
             }
-            // If token is USD, its quote token must also be USD
-            if currency == USD_CURRENCY
-                && TIP20Token::from_address(quote_token)?.currency()? != USD_CURRENCY
+            // THBOS: if the token claims the canonical chain currency (THB), its quote token
+            // must also be THB (replaces the upstream USD-denomination rule)
+            if currency == THB_CURRENCY
+                && TIP20Token::from_address(quote_token)?.currency()? != THB_CURRENCY
             {
                 return Err(TIP20Error::invalid_quote_token().into());
             }
