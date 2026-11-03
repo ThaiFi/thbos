@@ -135,7 +135,7 @@ mod tests {
     use tempo_contracts::precompiles::{
         IRolesAuth::{self, IRolesAuthCalls},
         ITIP20::ITIP20Calls,
-        RolesAuthError, TIP20Error, UnknownFunctionSelector,
+        RolesAuthError, TIP20Error, THB_CURRENCY, UnknownFunctionSelector,
     };
 
     #[test]
@@ -708,6 +708,47 @@ mod tests {
             // Non-admin reverts, but with Unauthorized — not an unknown selector.
             let non_admin = Address::random();
             let result = token.call(&set_name_calldata, non_admin)?;
+            assert!(result.is_revert());
+            assert!(UnknownFunctionSelector::abi_decode(&result.bytes).is_err());
+
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn test_currency_selectors_route() -> eyre::Result<()> {
+        // setCurrency is not hardfork-gated: the selector routes at any fork.
+        let mut storage = HashMapStorageProvider::new_with_spec(1, TempoHardfork::T4);
+        let admin = Address::random();
+
+        StorageCtx::enter(&mut storage, || {
+            let mut token = TIP20Setup::create("Test", "TST", admin)
+                .clear_events()
+                .apply()?;
+
+            // Admin flips the currency to the canonical THB.
+            let set_currency_calldata = ITIP20::setCurrencyCall {
+                newCurrency: THB_CURRENCY.to_string(),
+            }
+            .abi_encode();
+            let result = token.call(&set_currency_calldata, admin)?;
+            assert!(!result.is_revert());
+            assert_eq!(token.currency()?, THB_CURRENCY);
+
+            // Non-ISO currency is rejected with InvalidCurrency.
+            let bad_currency_calldata = ITIP20::setCurrencyCall {
+                newCurrency: "NOTISO".to_string(),
+            }
+            .abi_encode();
+            let result = token.call(&bad_currency_calldata, admin)?;
+            assert!(result.is_revert());
+            let expected: Bytes = TIP20Error::invalid_currency().selector().into();
+            assert_eq!(&result.bytes, expected.as_ref());
+            assert_eq!(token.currency()?, THB_CURRENCY, "currency unchanged");
+
+            // Non-admin reverts with Unauthorized — not an unknown selector.
+            let non_admin = Address::random();
+            let result = token.call(&set_currency_calldata, non_admin)?;
             assert!(result.is_revert());
             assert!(UnknownFunctionSelector::abi_decode(&result.bytes).is_err());
 

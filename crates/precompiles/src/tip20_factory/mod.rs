@@ -638,7 +638,7 @@ mod tests {
     }
 
     #[test]
-    fn test_create_token_usd_with_non_usd_quote() -> eyre::Result<()> {
+    fn test_create_token_thb_with_non_thb_quote() -> eyre::Result<()> {
         let mut storage = HashMapStorageProvider::new(1);
         let sender = Address::random();
         StorageCtx::enter(&mut storage, || {
@@ -648,10 +648,11 @@ mod tests {
                 .currency("EUR")
                 .apply()?;
 
+            // THBOS: a THB-claiming token must quote a THB token — a EUR quote is rejected
             let invalid_call = createTokenCall {
-                name: "USD Token".to_string(),
-                symbol: "USDT".to_string(),
-                currency: "USD".to_string(),
+                name: "THB Token".to_string(),
+                symbol: "THBT".to_string(),
+                currency: "THB".to_string(),
                 quoteToken: eur_token.address(),
                 admin: sender,
                 salt: B256::random(),
@@ -662,6 +663,18 @@ mod tests {
                 result.unwrap_err(),
                 TempoPrecompileError::TIP20(TIP20Error::invalid_quote_token())
             );
+
+            // A USD-claiming token quoting EUR is allowed (USD is no longer constrained)
+            let usd_call = createTokenCall {
+                name: "USD Token".to_string(),
+                symbol: "USDT".to_string(),
+                currency: "USD".to_string(),
+                quoteToken: eur_token.address(),
+                admin: sender,
+                salt: B256::random(),
+            };
+            factory.create_token(sender, usd_call)?;
+
             Ok(())
         })
     }
@@ -791,7 +804,7 @@ mod tests {
     }
 
     #[test]
-    fn test_create_token_reserved_address_rejects_non_usd_quote_for_usd_token() -> eyre::Result<()>
+    fn test_create_token_reserved_address_rejects_non_thb_quote_for_thb_token() -> eyre::Result<()>
     {
         let mut storage = HashMapStorageProvider::new(1);
         let admin = Address::random();
@@ -803,11 +816,12 @@ mod tests {
 
             let mut factory = TIP20Factory::new();
 
+            // THBOS: a THB-claiming reserved token must quote a THB token
             let result = factory.create_token_reserved_address(
                 address!("20C0000000000000000000000000000000000001"), // reserved address
-                "Test USD",
-                "TUSD",
-                "USD",
+                "Test THB",
+                "TTHB",
+                "THB",
                 eur_token.address(),
                 admin,
             );
