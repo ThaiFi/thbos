@@ -2,7 +2,7 @@ use crate::{
     error::{Result, TempoPrecompileError},
     storage::{ContractStorage, Handler, StorageAction, StorageCtx, StorageKey},
     tip_fee_manager::{ITIPFeeAMM, TIPFeeAMMError, TIPFeeAMMEvent, TipFeeManager},
-    tip20::{ITIP20, TIP20Token, validate_usd_currency},
+    tip20::{ITIP20, TIP20Token, validate_fee_currency},
     tip403_registry::AuthRole,
 };
 use alloy::{
@@ -295,8 +295,8 @@ impl TipFeeManager {
         }
 
         // Validate both tokens are USD currency
-        validate_usd_currency(user_token)?;
-        validate_usd_currency(validator_token)?;
+        validate_fee_currency(user_token)?;
+        validate_fee_currency(validator_token)?;
 
         let user_token = TIP20Token::from_address(user_token)?;
         let mut validator_token = TIP20Token::from_address(validator_token)?;
@@ -435,8 +435,8 @@ impl TipFeeManager {
         }
 
         // Validate both tokens are USD currency
-        validate_usd_currency(user_token)?;
-        validate_usd_currency(validator_token)?;
+        validate_fee_currency(user_token)?;
+        validate_fee_currency(validator_token)?;
 
         let mut user_token = TIP20Token::from_address(user_token)?;
         let mut validator_token = TIP20Token::from_address(validator_token)?;

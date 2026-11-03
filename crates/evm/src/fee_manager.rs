@@ -96,6 +96,8 @@ pub trait ProtocolFeeManager: Debug + Send + Sync {
     /// `host` is mutable because validation reads can warm accounts and storage, but
     /// implementations must not stage state changes here.
     ///
+    /// This hook runs before nonce and replay state are consumed.
+    ///
     /// Implementations charging non-zero fees in non-USD tokens must normalize them to the fee
     /// unit used by admission, ordering, charging, and settlement.
     fn validate_fee_token(
@@ -105,7 +107,7 @@ pub trait ProtocolFeeManager: Debug + Send + Sync {
         spec: TempoHardfork,
     ) -> HandlerResult<()> {
         let actions = host.ext().actions.clone();
-        host.ensure_tip20_usd(spec, fee_token, actions)
+        host.ensure_valid_fee_currency(spec, fee_token, actions)
     }
 
     /// Resolves the validator token used to receive protocol fees.

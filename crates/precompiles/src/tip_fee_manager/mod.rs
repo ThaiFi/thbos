@@ -9,7 +9,7 @@ use crate::{
     error::{Result, TempoPrecompileError},
     storage::{Handler, Mapping, StorageCtx},
     tip_fee_manager::amm::{FeeRoute, Pool, compute_amount_out},
-    tip20::{ITIP20, TIP20Token, validate_usd_currency},
+    tip20::{ITIP20, TIP20Token, validate_fee_currency},
     tip20_factory::TIP20Factory,
     tip403_registry::AuthRole,
 };
@@ -102,7 +102,7 @@ impl TipFeeManager {
         }
 
         // Validate that the fee token is USD
-        validate_usd_currency(call.token)?;
+        validate_fee_currency(call.token)?;
 
         self.validator_tokens[sender].write(call.token)?;
 
@@ -127,7 +127,7 @@ impl TipFeeManager {
         }
 
         // Validate that the fee token is USD
-        validate_usd_currency(call.token)?;
+        validate_fee_currency(call.token)?;
 
         // T3+: skip write and event if the token is already set to the requested value.
         // Prevents permissionless callers from forcing redundant pool invalidation scans.
