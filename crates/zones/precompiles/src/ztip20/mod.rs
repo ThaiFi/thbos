@@ -87,6 +87,9 @@ impl CallRules for TIP20Rules {
                 // Admin methods are disabled as TIP20 admin is the ZoneInbox.
                 | ITIP20::ITIP20Calls::setSupplyCap(_)
                 | ITIP20::ITIP20Calls::setLogoURI(_)
+                | ITIP20::ITIP20Calls::setName(_)
+                | ITIP20::ITIP20Calls::setSymbol(_)
+                | ITIP20::ITIP20Calls::setCurrency(_)
                 | ITIP20::ITIP20Calls::pause(_)
                 | ITIP20::ITIP20Calls::unpause(_)
                 | ITIP20::ITIP20Calls::setNextQuoteToken(_)

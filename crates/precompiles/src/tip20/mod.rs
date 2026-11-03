@@ -3617,6 +3617,101 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn test_set_currency_admin_updates_and_emits() -> eyre::Result<()> {
+        let mut storage = HashMapStorageProvider::new(1);
+        let admin = Address::random();
+
+        StorageCtx::enter(&mut storage, || {
+            let mut token = TIP20Setup::create("Test", "TST", admin)
+                .clear_events()
+                .apply()?;
+
+            token.set_currency(
+                admin,
+                ITIP20::setCurrencyCall {
+                    newCurrency: THB_CURRENCY.to_string(),
+                },
+            )?;
+
+            assert_eq!(token.currency()?, THB_CURRENCY);
+            // Only the currency changes — name and symbol are untouched.
+            assert_eq!(token.name()?, "Test");
+            assert_eq!(token.symbol()?, "TST");
+
+            token.assert_emitted_events(vec![TIP20Event::CurrencyUpdated(
+                ITIP20::CurrencyUpdated {
+                    updater: admin,
+                    newCurrency: THB_CURRENCY.to_string(),
+                },
+            )]);
+
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn test_set_currency_non_admin_reverts() -> eyre::Result<()> {
+        let mut storage = HashMapStorageProvider::new(1);
+        let admin = Address::random();
+        let non_admin = Address::random();
+
+        StorageCtx::enter(&mut storage, || {
+            let mut token = TIP20Setup::create("Test", "TST", admin).apply()?;
+
+            let result = token.set_currency(
+                non_admin,
+                ITIP20::setCurrencyCall {
+                    newCurrency: THB_CURRENCY.to_string(),
+                },
+            );
+
+            assert!(matches!(
+                result,
+                Err(TempoPrecompileError::RolesAuthError(
+                    RolesAuthError::Unauthorized(_)
+                ))
+            ));
+            assert_eq!(token.currency()?, "USD");
+
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn test_set_currency_invalid_currency_reverts() -> eyre::Result<()> {
+        let mut storage = HashMapStorageProvider::new(1);
+        let admin = Address::random();
+
+        StorageCtx::enter(&mut storage, || {
+            let mut token = TIP20Setup::create("Test", "TST", admin).apply()?;
+
+            for bad in ["NOTISO", "thb", ""] {
+                let result = token.set_currency(
+                    admin,
+                    ITIP20::setCurrencyCall {
+                        newCurrency: bad.to_string(),
+                    },
+                );
+                assert!(matches!(
+                    result,
+                    Err(TempoPrecompileError::TIP20(TIP20Error::InvalidCurrency(_)))
+                ));
+            }
+
+            // USD (legacy) stays a valid target.
+            token.set_currency(
+                admin,
+                ITIP20::setCurrencyCall {
+                    newCurrency: "USD".to_string(),
+                },
+            )?;
+            assert_eq!(token.currency()?, "USD");
+
+            Ok(())
+        })
+    }
+
+    #[test]
     fn test_domain_separator_tracks_name_change() -> eyre::Result<()> {
         let mut storage = HashMapStorageProvider::new(1);
         let admin = Address::random();
@@ -3673,20 +3768,12 @@ pub(crate) mod tests {
         let admin = Address::random();
 
         StorageCtx::enter(&mut storage, || {
-            let currency: String = thread_rng()
-                .sample_iter(&Alphanumeric)
-                .take(31)
-                .map(char::from)
-                .collect();
+            // THBOS: a THB-claiming token must quote a THB token — a USD quote token is rejected
+            let usd_token = TIP20Setup::create("USD Token", "USDT", admin).apply()?;
 
-            let token = TIP20Setup::create("Token", "T", admin)
-                .currency(&currency)
-                .apply()?;
-
-            // Try to create a new USD token with the arbitrary token as the quote token, this should fail
-            TIP20Setup::create("USD Token", "USDT", admin)
-                .currency(USD_CURRENCY)
-                .quote_token(token.address)
+            TIP20Setup::create("THB Token", "THBT", admin)
+                .currency(THB_CURRENCY)
+                .quote_token(usd_token.address)
                 .expect_tip20_err(TIP20Error::invalid_quote_token());
 
             Ok(())
@@ -3739,26 +3826,28 @@ pub(crate) mod tests {
         let admin = Address::random();
 
         StorageCtx::enter(&mut storage, || {
-            let _path_usd = TIP20Setup::path_usd(admin).apply()?;
+            // THB tokens default-quote pathUSD, so flip it to THB first (production sequence)
+            let mut path_usd = TIP20Setup::path_usd(admin).apply()?;
+            path_usd.set_currency(
+                admin,
+                ITIP20::setCurrencyCall {
+                    newCurrency: THB_CURRENCY.to_string(),
+                },
+            )?;
 
-            let currency: String = thread_rng()
-                .sample_iter(&Alphanumeric)
-                .take(31)
-                .map(char::from)
-                .collect();
+            let usd_token_1 = TIP20Setup::create("USD Token 1", "USDT", admin).apply()?;
 
-            let token_1 = TIP20Setup::create("Token 1", "TK1", admin)
-                .currency(&currency)
+            // Create a new THB token
+            let mut thb_token = TIP20Setup::create("THB Token", "THBT", admin)
+                .currency(THB_CURRENCY)
                 .apply()?;
 
-            // Create a new USD token
-            let mut usd_token = TIP20Setup::create("USD Token", "USDT", admin).apply()?;
-
-            // Try to update the USD token's quote token to the arbitrary currency token, this should fail
-            let result = usd_token.set_next_quote_token(
+            // Try to update the THB token's quote token to a USD token, this should fail
+            // (THBOS: THB-claiming tokens must quote THB tokens)
+            let result = thb_token.set_next_quote_token(
                 admin,
                 ITIP20::setNextQuoteTokenCall {
-                    newQuoteToken: token_1.address,
+                    newQuoteToken: usd_token_1.address,
                 },
             );
 
@@ -4625,10 +4714,16 @@ pub(crate) mod tests {
                 .currency("EUR")
                 .apply()?;
 
-            // USD token with non-USD quote token should fail
-            TIP20Setup::create("USDToken", "USD", admin)
+            // THBOS: THB token with a USD quote token should fail (canonical rule)
+            TIP20Setup::create("THBToken", "THBT", admin)
+                .currency(THB_CURRENCY)
                 .quote_token(eur_token.address)
                 .expect_tip20_err(TIP20Error::invalid_quote_token());
+
+            // USD token with a non-THB quote token is allowed (USD is no longer constrained)
+            let _usd_token = TIP20Setup::create("USDToken", "USD", admin)
+                .quote_token(eur_token.address)
+                .apply()?;
 
             Ok(())
         })

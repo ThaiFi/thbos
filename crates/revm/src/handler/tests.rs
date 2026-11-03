@@ -233,12 +233,12 @@ fn test_non_usd_fee_token_rejected() {
 
     let fee_token =
         StorageCtx::enter_ctx(&mut test.evm.inner.ctx, StorageActions::disabled(), || {
-            TIP20Setup::create("Euro", "EUR", admin)
-                .currency("EUR")
+            TIP20Setup::create("Fake", "FAKE", admin)
+                .currency("NOTISO")
                 .apply()
                 .map(|token| token.address())
         })
-        .expect("EUR token setup succeeds");
+        .expect("NOTISO token setup succeeds");
 
     test.evm.inner.ctx.tx.fee_token = Some(fee_token);
 
@@ -250,9 +250,9 @@ fn test_non_usd_fee_token_rejected() {
             Err(EVMError::Transaction(TempoInvalidTransaction::FeeTokenNotValidCurrency {
                 address,
                 currency,
-            })) if address == fee_token && currency == "EUR"
+            })) if address == fee_token && currency == "NOTISO"
         ),
-        "Should reject non-USD fee token with FeeTokenNotValidCurrency error"
+        "Should reject non-ISO fee token with FeeTokenNotValidCurrency error"
     );
 }
 
