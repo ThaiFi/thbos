@@ -6,8 +6,8 @@ use alloy_sol_types::{SolCall, SolType};
 /// Decimal precision for all TIP-20 tokens.
 pub const DECIMALS: u8 = 6;
 
-/// USD currency string constant.
-pub const USD_CURRENCY: &str = "USD";
+/// THB currency string constant — the canonical chain currency (THBOS).
+pub const THB_CURRENCY: &str = "THB";
 
 /// Full list of ISO 4217 currency codes.
 pub const ISO4217_CODES: &[&str] = &[
@@ -89,6 +89,7 @@ crate::sol! {
         function setLogoURI(string calldata newLogoURI) external;
         function setName(string calldata newName) external;
         function setSymbol(string calldata newSymbol) external;
+        function setCurrency(string calldata newCurrency) external;
         function burnBlocked(address from, uint256 amount) external;
         /// @notice Burns from any unprotected account (requires BURN_AT_ROLE, T12+).
         function burnAt(address from, uint256 amount) external;
@@ -162,6 +163,7 @@ crate::sol! {
         event LogoURIUpdated(address indexed updater, string newLogoURI);
         event NameUpdated(address indexed updater, string newName);
         event SymbolUpdated(address indexed updater, string newSymbol);
+        event CurrencyUpdated(address indexed updater, string newCurrency);
 
         // Errors
         error InsufficientBalance(uint256 available, uint256 required, address token);

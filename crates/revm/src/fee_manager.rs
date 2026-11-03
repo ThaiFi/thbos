@@ -117,7 +117,7 @@ pub trait ProtocolFeeManager<DB: Database>: Debug {
     ///
     /// This hook runs before nonce and replay state are consumed.
     ///
-    /// Implementations charging non-zero fees in non-USD tokens must normalize them to the fee
+    /// Implementations charging non-zero fees must normalize them to the fee
     /// unit used by admission, ordering, charging, and settlement.
     fn validate_fee_token(
         &self,
@@ -126,7 +126,7 @@ pub trait ProtocolFeeManager<DB: Database>: Debug {
         spec: TempoHardfork,
         actions: StorageActions,
     ) -> Result<(), EVMError<DB::Error, TempoInvalidTransaction>> {
-        journal.ensure_tip20_usd(spec, fee_token, actions)
+        journal.ensure_valid_fee_currency(spec, fee_token, actions)
     }
 
     /// Resolves the validator token used to receive protocol fees.

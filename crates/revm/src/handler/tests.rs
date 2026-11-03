@@ -247,12 +247,12 @@ fn test_non_usd_fee_token_rejected() {
     assert!(
         matches!(
             result,
-            Err(EVMError::Transaction(TempoInvalidTransaction::FeeTokenNotUsdCurrency {
+            Err(EVMError::Transaction(TempoInvalidTransaction::FeeTokenNotValidCurrency {
                 address,
                 currency,
             })) if address == fee_token && currency == "EUR"
         ),
-        "Should reject non-USD fee token with FeeTokenNotUsdCurrency error"
+        "Should reject non-USD fee token with FeeTokenNotValidCurrency error"
     );
 }
 

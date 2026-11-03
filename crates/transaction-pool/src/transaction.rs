@@ -1399,7 +1399,7 @@ mod tests {
                 false,
             ),
             (
-                TempoPoolTransactionError::Evm(TempoInvalidTransaction::FeeTokenNotUsdCurrency {
+                TempoPoolTransactionError::Evm(TempoInvalidTransaction::FeeTokenNotValidCurrency {
                     address: Address::repeat_byte(0x20),
                     currency: "EUR".to_string(),
                 }),

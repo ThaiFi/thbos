@@ -29,7 +29,7 @@ use crate::{
     },
     storage::{Handler, Mapping},
     storage_credits::{StorageCreditDeltas, StorageCredits},
-    tip20::{ITIP20, TIP20Token, validate_usd_currency},
+    tip20::{ITIP20, TIP20Token, validate_fee_currency},
     tip20_factory::TIP20Factory,
     tip403_registry::{AuthRole, TIP403Registry, is_policy_lookup_error},
 };
@@ -607,8 +607,8 @@ impl StablecoinDEX {
         }
 
         let quote = TIP20Token::from_address(base)?.quote_token()?;
-        validate_usd_currency(base)?;
-        validate_usd_currency(quote)?;
+        validate_fee_currency(base)?;
+        validate_fee_currency(quote)?;
 
         let book_key = compute_book_key(base, quote);
 
