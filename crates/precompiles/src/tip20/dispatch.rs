@@ -692,23 +692,21 @@ mod tests {
                 newName: "Renamed".to_string(),
             }
             .abi_encode();
-            let result = token.call(&set_name_calldata, admin)?;
-            assert!(!result.is_revert());
+            let _ = token.call(&set_name_calldata, admin)?;
             assert_eq!(token.name()?, "Renamed");
 
             let set_symbol_calldata = ITIP20::setSymbolCall {
                 newSymbol: "RNM".to_string(),
             }
             .abi_encode();
-            let result = token.call(&set_symbol_calldata, admin)?;
-            assert!(!result.is_revert());
+            let _ = token.call(&set_symbol_calldata, admin)?;
             assert_eq!(token.symbol()?, "RNM");
 
             // Non-admin reverts, but with Unauthorized — not an unknown selector.
             let non_admin = Address::random();
-            let result = token.call(&set_name_calldata, non_admin)?;
-            assert!(result.is_revert());
-            assert!(UnknownFunctionSelector::abi_decode(&result.bytes).is_err());
+            let result = token.call(&set_name_calldata, non_admin);
+            let expected: Bytes = RolesAuthError::unauthorized().selector().into();
+            assert_eq!(revert_bytes(&result), expected.as_ref());
 
             Ok(())
         })
@@ -730,8 +728,7 @@ mod tests {
                 newCurrency: THB_CURRENCY.to_string(),
             }
             .abi_encode();
-            let result = token.call(&set_currency_calldata, admin)?;
-            assert!(!result.is_revert());
+            let _ = token.call(&set_currency_calldata, admin)?;
             assert_eq!(token.currency()?, THB_CURRENCY);
 
             // Non-ISO currency is rejected with InvalidCurrency.
@@ -739,17 +736,16 @@ mod tests {
                 newCurrency: "NOTISO".to_string(),
             }
             .abi_encode();
-            let result = token.call(&bad_currency_calldata, admin)?;
-            assert!(result.is_revert());
+            let result = token.call(&bad_currency_calldata, admin);
             let expected: Bytes = TIP20Error::invalid_currency().selector().into();
-            assert_eq!(&result.bytes, expected.as_ref());
+            assert_eq!(revert_bytes(&result), expected.as_ref());
             assert_eq!(token.currency()?, THB_CURRENCY, "currency unchanged");
 
             // Non-admin reverts with Unauthorized — not an unknown selector.
             let non_admin = Address::random();
-            let result = token.call(&set_currency_calldata, non_admin)?;
-            assert!(result.is_revert());
-            assert!(UnknownFunctionSelector::abi_decode(&result.bytes).is_err());
+            let result = token.call(&set_currency_calldata, non_admin);
+            let expected: Bytes = RolesAuthError::unauthorized().selector().into();
+            assert_eq!(revert_bytes(&result), expected.as_ref());
 
             Ok(())
         })

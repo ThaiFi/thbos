@@ -107,14 +107,14 @@ fn test_resolve_fee_context_validates_fee_token_when_collection_is_disabled() {
     );
 
     let fee_token = StorageCtx::enter_evm_without_tip1060_accounting(&mut evm, || {
-        TIP20Setup::create("Euro", "EUR", admin)
-            .currency("EUR")
+        TIP20Setup::create("Fake", "FAKE", admin)
+            .currency("NOTISO")
             .with_issuer(admin)
             .with_mint(fee_payer, max_fee)
             .apply()
             .map(|token| token.address())
     })
-    .expect("EUR token setup succeeds");
+    .expect("NOTISO token setup succeeds");
 
     let tx = fee_tx_env(fee_payer, fee_token, gas_limit, gas_price);
     let result = TempoHandlerHooks::resolve_fee_context(&mut evm, &tx);
@@ -125,8 +125,8 @@ fn test_resolve_fee_context_validates_fee_token_when_collection_is_disabled() {
             Err(ref error)
                 if matches!(
                     error.external_ref::<TempoInvalidTransaction>(),
-                    Some(TempoInvalidTransaction::FeeTokenNotUsdCurrency { address, currency })
-                        if *address == fee_token && currency == "EUR"
+                    Some(TempoInvalidTransaction::FeeTokenNotValidCurrency { address, currency })
+                        if *address == fee_token && currency == "NOTISO"
                 )
         ),
         "disabled fee collection must still validate the fee token, got: {result:?}"
