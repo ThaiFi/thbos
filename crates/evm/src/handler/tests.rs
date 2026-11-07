@@ -274,12 +274,12 @@ fn test_non_usd_fee_token_rejected() {
     let mut test = storage_evm(TempoHardfork::default());
 
     let fee_token = StorageCtx::enter_evm_without_tip1060_accounting(&mut test, || {
-        TIP20Setup::create("Euro", "EUR", admin)
-            .currency("EUR")
+        TIP20Setup::create("Fake", "FAKE", admin)
+            .currency("NOTISO")
             .apply()
             .map(|token| token.address())
     })
-    .expect("EUR token setup succeeds");
+    .expect("NOTISO token setup succeeds");
 
     let tx = fee_tx_env(SIGNER, fee_token, 100_000, 1_000_000_000);
 
@@ -291,13 +291,13 @@ fn test_non_usd_fee_token_rejected() {
             Err(ref error)
                 if matches!(
                     error.external_ref::<TempoInvalidTransaction>(),
-                    Some(TempoInvalidTransaction::FeeTokenNotUsdCurrency {
-                address,
-                currency,
-                    }) if *address == fee_token && currency == "EUR"
+                    Some(TempoInvalidTransaction::FeeTokenNotValidCurrency {
+                        address,
+                        currency,
+                    }) if *address == fee_token && currency == "NOTISO"
                 )
         ),
-        "Should reject non-USD fee token with FeeTokenNotUsdCurrency error"
+        "Should reject non-ISO fee token with FeeTokenNotValidCurrency error"
     );
 }
 
