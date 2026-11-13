@@ -17,10 +17,10 @@ Everything else follows upstream Tempo.
 
 ## Images
 
-Multi-arch (`linux/amd64`, `linux/arm64`), built from the `thbos-v1.18.2` deploy branch (upstream `tempo/v1.18.2` + THBOS patches):
+Multi-arch (`linux/amd64`, `linux/arm64`), built from the `thbos-v1.18.3` deploy branch (upstream `tempo/v1.18.3` + THBOS patches):
 
 ```
-ghcr.io/thaifi/thbos:thbos-v1.18.2
+ghcr.io/thaifi/thbos:thbos-v1.18.3
 ghcr.io/thaifi/thbos:latest
 ```
 
